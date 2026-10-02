@@ -1,0 +1,17 @@
+{
+  "id": "java",
+  "language": "java",
+  "displayName": "Java (Gradle / Maven)",
+  "implemented": false,
+  "version": "0.0.0",
+  "buildSystem": "gradle|maven",
+  "detection": {
+    "anyOf": ["build.gradle.kts", "build.gradle", "pom.xml"],
+    "markers": {
+      "javaSources": ["src/main/java"]
+    }
+  },
+  "capabilities": {
+    "notes": "Planned: detekt is Kotlin-only; Java would use a different static-analysis engine. Not implemented in v1.1."
+  }
+}

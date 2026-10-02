@@ -1,0 +1,17 @@
+{
+  "id": "python",
+  "language": "python",
+  "displayName": "Python",
+  "implemented": false,
+  "version": "0.0.0",
+  "buildSystem": "pyproject|setup|none",
+  "detection": {
+    "anyOf": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"],
+    "markers": {
+      "pythonSources": ["src", "*.py"]
+    }
+  },
+  "capabilities": {
+    "notes": "Planned: import-linter for architecture, ruff/flake8 for static analysis. Not implemented in v1.1."
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "kotlin",
+  "language": "kotlin",
+  "displayName": "Kotlin (Gradle)",
+  "implemented": true,
+  "version": "1.1.0-dev",
+  "buildSystem": "gradle",
+  "detection": {
+    "anyOf": ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"],
+    "markers": {
+      "gradleWrapper": ["gradlew"],
+      "kotlinSources": ["src/main/kotlin"],
+      "androidPlugin": ["build.gradle.kts", "build.gradle"],
+      "kotlinPlugin": ["build.gradle.kts", "build.gradle"]
+    }
+  },
+  "capabilities": {
+    "architectureTests": "konsist",
+    "staticAnalysis": "detekt",
+    "injection": "gradle --init-script (no target build files modified)"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "id": "typescript",
+  "language": "typescript",
+  "displayName": "TypeScript / Node.js",
+  "implemented": false,
+  "version": "0.0.0",
+  "buildSystem": "npm|pnpm|yarn",
+  "detection": {
+    "anyOf": ["package.json", "tsconfig.json"],
+    "markers": {
+      "tsSources": ["src"]
+    }
+  },
+  "capabilities": {
+    "notes": "Planned: dependency-cruiser/ts-arch for architecture, eslint for static analysis. Not implemented in v1.1."
+  }
+}

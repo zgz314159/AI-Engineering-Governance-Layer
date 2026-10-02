@@ -1,0 +1,30 @@
+# AEGL Target Project descriptor (schema example).
+#
+# AEGL is a central governance platform: a target project only receives an
+# adapter overlay (see `aegl attach`), never a copy of this repository's
+# upstream/ sources.
+#
+# This file is declarative documentation/input. `aegl inspect <path>` detects
+# the same facts from the filesystem; this descriptor lets a user pin them.
+
+project:
+  name: example
+  path: /path/to/project
+
+technology:
+  language: kotlin        # kotlin (implemented in v1.1) | java | android | python | typescript
+  buildSystem: gradle
+  framework: generic
+
+governance:
+  specKit: true
+  architectureGuard: true
+  ruleSync: true
+  architectureTests: konsist   # konsist | none
+  staticAnalysis: detekt       # detekt | none
+
+qualityGate:
+  architecture: required
+  staticAnalysis: required
+  unitTests: required
+  build: required
