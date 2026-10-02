@@ -59,6 +59,12 @@ def cmd_adapters(args) -> int:
     return _emit({"adapters": _descriptors()})
 
 
+def cmd_version(args) -> int:
+    vfile = ROOT / "VERSION"
+    version = vfile.read_text(encoding="utf-8").strip() if vfile.exists() else "0.0.0"
+    return _emit({"aeglVersion": version})
+
+
 def cmd_inspect(args) -> int:
     project = Path(args.project)
     if not project.is_dir():
@@ -141,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("adapters", help="List adapter descriptors").set_defaults(func=cmd_adapters)
+    sub.add_parser("version", help="Print the AEGL version").set_defaults(func=cmd_version)
 
     pi = sub.add_parser("inspect", help="Scan a project (read-only)")
     pi.add_argument("project")

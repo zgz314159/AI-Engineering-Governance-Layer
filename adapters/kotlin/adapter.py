@@ -14,7 +14,16 @@ import re
 import subprocess
 from pathlib import Path
 
-AEGL_VERSION = "1.1.0-dev"
+
+def _aegl_version() -> str:
+    """Single source of truth for the AEGL version: the top-level VERSION file."""
+    try:
+        return (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.0.0"
+
+
+AEGL_VERSION = _aegl_version()
 LANGUAGE = "kotlin"
 DETEKT_VERSION = "1.23.8"
 KONSIST_VERSION = "0.17.3"

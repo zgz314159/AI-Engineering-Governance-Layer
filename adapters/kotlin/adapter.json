@@ -3,7 +3,7 @@
   "language": "kotlin",
   "displayName": "Kotlin (Gradle)",
   "implemented": true,
-  "version": "1.1.0-dev",
+  "version": "1.1.0",
   "buildSystem": "gradle",
   "detection": {
     "anyOf": ["settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle"],
