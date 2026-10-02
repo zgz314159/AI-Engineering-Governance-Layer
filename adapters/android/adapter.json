@@ -2,16 +2,21 @@
   "id": "android",
   "language": "kotlin",
   "displayName": "Android (Gradle)",
-  "implemented": false,
-  "version": "0.0.0",
+  "implemented": true,
+  "version": "1.2.0-dev",
   "buildSystem": "gradle",
   "detection": {
     "anyOf": ["settings.gradle.kts", "settings.gradle"],
     "markers": {
-      "androidPlugin": ["build.gradle.kts", "build.gradle"]
+      "androidPlugin": ["com.android.application", "com.android.library"]
     }
   },
   "capabilities": {
-    "notes": "Planned: reuse the kotlin adapter plus Android-specific source sets. Not implemented in v1.1."
+    "architectureTests": "konsist",
+    "staticAnalysis": "detekt",
+    "lint": "android-lint",
+    "multiModule": true,
+    "injection": "gradle --init-script (no target build files modified)",
+    "notes": "Android/Gradle adapter: multi-module graph, Android governance model, Konsist + Detekt + Android Lint quality gate."
   }
 }

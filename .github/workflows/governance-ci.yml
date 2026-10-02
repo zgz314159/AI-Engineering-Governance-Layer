@@ -133,3 +133,180 @@ jobs:
           test ! -e fixtures/target-kotlin-bad/.aegl
           # No tracked target file may have changed.
           test -z "$(git status --porcelain fixtures/target-kotlin-good fixtures/target-kotlin-bad)"
+
+  # v1.2 Android adapter smoke tests on the sandbox Android fixtures. Kept as a
+  # separate job because the Android SDK + build cost differs sharply from the
+  # JVM-only target-adapter job; the Gradle cache is shared across fixtures.
+  android-adapter-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android platform and build-tools for the fixtures
+        run: |
+          sdkmanager --list | grep -E 'platforms;android-3[567]' || true
+          sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+
+      - name: Cache Gradle caches and wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: aegl-android-gradle-${{ hashFiles('fixtures/android-*/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            aegl-android-gradle-
+
+      - name: Make AEGL and fixture wrappers executable
+        run: chmod +x bin/aegl fixtures/android-*/gradlew
+
+      - name: Record business-file hashes (pre-attach)
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          fixtures = ["android-good", "android-bad-domain", "android-bad-ui-dao",
+                      "android-multimodule", "android-multimodule-bad"]
+          skip = {".aegl", ".github", "build", ".gradle", ".kotlin"}
+          out = {}
+          for fx in fixtures:
+              for dirpath, dirnames, files in os.walk(os.path.join("fixtures", fx)):
+                  dirnames[:] = [d for d in dirnames if d not in skip]
+                  for name in files:
+                      p = os.path.join(dirpath, name)
+                      out[p] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+          json.dump(out, open("/tmp/aegl-pre-hashes.json", "w"))
+          print("hashed", len(out), "business files")
+          PY
+
+      - name: android-good inspect is read-only
+        run: |
+          ./bin/aegl inspect fixtures/android-good >/dev/null
+          test ! -e fixtures/android-good/.aegl
+
+      - name: android-good attach dry-run writes nothing
+        run: |
+          ./bin/aegl attach fixtures/android-good --dry-run
+          test ! -e fixtures/android-good/.aegl
+
+      - name: android-good verify (must PASS, Android Lint included)
+        run: |
+          ./bin/aegl attach fixtures/android-good
+          ./bin/aegl verify fixtures/android-good > /tmp/good.json
+          cat /tmp/good.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/good.json"))
+          assert d["ok"] is True, d
+          for gate in ("moduleBoundary", "detekt", "lint", "unitTests", "build"):
+              assert d["gates"][gate] == "PASS", (gate, d["gates"])
+          assert d["architectureViolation"] is False, d
+          assert any(t.endswith(":lintDebug") for t in d["lintTasksExecuted"]), d
+          PY
+
+      - name: android-bad-domain verify (must be blocked by domain isolation)
+        run: |
+          ./bin/aegl attach fixtures/android-bad-domain
+          set +e
+          ./bin/aegl verify fixtures/android-bad-domain > /tmp/bad-domain.json
+          code=$?
+          set -e
+          cat /tmp/bad-domain.json
+          test "$code" -ne 0
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/bad-domain.json"))
+          assert d["architectureViolation"] is True, d
+          assert d["gates"]["unitTests"] == "FAIL", d["gates"]
+          # The block must be architectural, not a build/lint/config failure.
+          for gate in ("moduleBoundary", "detekt", "lint", "build"):
+              assert d["gates"][gate] == "PASS", (gate, d["gates"])
+          blob = " ".join(f.get("message", "") for f in d["architectureFailures"]).lower()
+          assert "domain" in blob and "android" in blob, blob
+          PY
+
+      - name: android-bad-ui-dao verify (must be blocked by UI to DAO boundary)
+        run: |
+          ./bin/aegl attach fixtures/android-bad-ui-dao
+          set +e
+          ./bin/aegl verify fixtures/android-bad-ui-dao > /tmp/bad-uid.json
+          code=$?
+          set -e
+          cat /tmp/bad-uid.json
+          test "$code" -ne 0
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/bad-uid.json"))
+          assert d["architectureViolation"] is True, d
+          assert d["gates"]["unitTests"] == "FAIL", d["gates"]
+          for gate in ("moduleBoundary", "detekt", "lint", "build"):
+              assert d["gates"][gate] == "PASS", (gate, d["gates"])
+          blob = " ".join(f.get("message", "") for f in d["architectureFailures"])
+          assert "UserDao" in blob or "UserScreen" in blob, blob
+          PY
+
+      - name: android-multimodule inspect and verify (must PASS)
+        run: |
+          ./bin/aegl inspect fixtures/android-multimodule > /tmp/mm-inspect.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/mm-inspect.json"))
+          graph = d["android"]["moduleGraph"]
+          assert ":core:domain" in graph[":feature:sample"], graph
+          assert ":core:domain" in graph[":core:data"], graph
+          assert graph[":app"], graph
+          PY
+          ./bin/aegl attach fixtures/android-multimodule
+          ./bin/aegl verify fixtures/android-multimodule > /tmp/mm.json
+          cat /tmp/mm.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/mm.json"))
+          assert d["ok"] is True, d
+          assert d["gates"]["moduleBoundary"] == "PASS", d["gates"]
+          assert d["gates"]["lint"] == "PASS", d["gates"]
+          PY
+
+      - name: android-multimodule-bad illegal dependency (must be blocked)
+        run: |
+          ./bin/aegl attach fixtures/android-multimodule-bad
+          set +e
+          ./bin/aegl verify fixtures/android-multimodule-bad > /tmp/mm-bad.json
+          code=$?
+          set -e
+          cat /tmp/mm-bad.json
+          test "$code" -ne 0
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/mm-bad.json"))
+          assert d["moduleBoundaryViolation"] is True, d
+          assert d["gates"]["moduleBoundary"] == "FAIL", d["gates"]
+          # A real architecture block, not a Gradle configuration/cycle error.
+          for gate in ("detekt", "lint", "build"):
+              assert d["gates"][gate] == "PASS", (gate, d["gates"])
+          PY
+
+      - name: detach and assert original business files are restored
+        run: |
+          for fx in android-good android-bad-domain android-bad-ui-dao android-multimodule android-multimodule-bad; do
+            ./bin/aegl detach "fixtures/$fx" >/dev/null
+            test ! -e "fixtures/$fx/.aegl"
+          done
+          python3 - <<'PY'
+          import hashlib, json
+          pre = json.load(open("/tmp/aegl-pre-hashes.json"))
+          post = {p: hashlib.sha256(open(p, "rb").read()).hexdigest() for p in pre}
+          assert pre == post, "business files changed"
+          print("restored", len(pre), "business files unchanged")
+          PY
+          test -z "$(git status --porcelain fixtures/)"
