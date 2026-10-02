@@ -29,6 +29,14 @@ fixture/.claude/
 fixtures/**/.aegl/
 fixtures/**/.github/
 
+# AEGL Continuity Layer (v1.3): local runtime state. Handoff snapshots are
+# local working artifacts; keeping them out of Git avoids noise and keeps
+# `aegl resume` deterministic (see reports/V1.3-CONTINUITY-LAYER-REPORT.md).
+.aegl/continuity/
+
+# Command Code session/tool state (never committed).
+.commandcode/
+
 # NOTE: governance-required artifacts stay tracked on purpose:
 #   governance/, scripts/, bridge/, fixture/ (project skeleton),
 #   fixture/.specify/{memory,templates,scripts,workflows,integrations,extensions.yml},

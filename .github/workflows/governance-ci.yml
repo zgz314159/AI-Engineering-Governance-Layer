@@ -310,3 +310,39 @@ jobs:
           print("restored", len(pre), "business files unchanged")
           PY
           test -z "$(git status --porcelain fixtures/)"
+
+  # v1.3 Continuity Layer smoke tests. Cheap and network-free: throwaway Git
+  # repos built from fixtures/continuity/, plus the real CLI on this checkout.
+  continuity-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Make AEGL executable
+        run: chmod +x bin/aegl
+
+      - name: Continuity smoke tests (handoff / resume valid+stale / schema / history / redaction)
+        run: python3 scripts/continuity-smoke.py
+
+      - name: Exercise the real CLI on this repository
+        env:
+          AEGL_CONTINUITY_SKIP_CI: "1"
+        run: |
+          ./bin/aegl status
+          ./bin/aegl handoff --goal "Verify the continuity layer in CI" \
+            --next "Confirm all jobs are green" \
+            --do-not-repeat "re-run completed releases"
+          ./bin/aegl resume
+          ./bin/aegl continuity history
+
+      - name: Assert the continuity runtime stays out of Git
+        run: |
+          test ! -e .aegl/continuity/state.json || git check-ignore -q .aegl/continuity/state.json
+          test -z "$(git status --porcelain | grep -v '^??' || true)"

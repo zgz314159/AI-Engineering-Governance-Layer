@@ -92,3 +92,43 @@ Architecture Guard 是 AI/SDD 编排治理层，不是编译器。自动化测�
 - RuleSync、Konsist、Detekt、Gradle Gate 能形成确定性闭环。
 
 真正执行 `/ag-governed-delivery`、`/ag-verify` 之类的**语义型 AI 工作流**需要再启动 Claude/Codex 等 Agent。`docs/AGENT-SMOKE-TEST.md` 给出了最后一项人工 Agent smoke test。
+
+## AEGL Continuity Layer（v1.3）
+
+Continuity Layer 把"当前工程真实状态 + 当前工作语义"压缩成一个可恢复的 Agent
+接力点，让新会话不依赖旧会话上下文即可继续工作。
+
+```text
+旧会话
+  └── aegl handoff      # 采集 Git/VERSION/CI，写入交接快照
+新会话
+  └── aegl resume       # 轻量一致性检查（branch / HEAD / working tree / version）
+```
+
+命令：
+
+```bash
+aegl status                        # 当前工程事实 + handoff 年龄
+aegl handoff [--goal ...] [--task ...] [--next ...] [--do-not-repeat ...]
+aegl resume [--json]               # HANDOFF VALID / STALE（STALE 只是警告）
+aegl continuity history            # 历史快照列表
+aegl continuity check              # 诊断（不参与 release gate）
+```
+
+产物（默认在 `.aegl/continuity/`，本地运行态、已被 `.gitignore` 忽略）：
+
+```text
+.aegl/continuity/
+├── state.json          # 机器事实主状态（canonical）
+├── HANDOFF.md          # 人/Agent 可读投影（warm）
+├── NEXT-SESSION.md     # 极短热上下文（hot）
+├── events.jsonl        # 追加式阶段事件
+├── config.json         # 配置（historyLimit / includeCi / memoryBackend ...）
+└── history/            # 每次 handoff 的不可变快照（json + md）
+```
+
+机器事实（Git / HEAD / branch / dirty / VERSION / CI）由程序采集；语义事实
+（goal / completed / inProgress / blocked / failedApproaches / doNotRepeat /
+nextAction 等）可由 Agent 通过 `--goal` 等参数或 `.aegl/continuity/work.json`
+提供。`resume` 只做一次轻量检查，CI 状态仅展示、不作为硬门禁。
+
