@@ -1,6 +1,6 @@
 # AI Engineering Governance Layer — Final Integration Report
 
-Generated: 2026-10-02T09:20:34.105780+00:00
+Generated: 2026-10-02T09:24:53.441539+00:00
 Status: **PASS**
 
 ## Platform & Environment
@@ -75,10 +75,17 @@ Architecture Guard (Spec Kit adapter) / RuleSync rules / Konsist test -> Gradle 
 - fixture/src/test/kotlin/com/example/governed/architecture/GeneratedArchitectureTest.kt (generated)
 
 ## GitHub Actions
-PENDING REMOTE VERIFICATION (workflow .github/workflows/governance-ci.yml present; not yet run on a remote)
+- **status**: PASS
+- **workflow**: Governance Layer CI (.github/workflows/governance-ci.yml)
+- **runId**: 36989276694
+- **url**: https://github.com/zgz46408212-jpg/AI-Engineering-Governance-Layer/actions/runs/36989276694
+- **verifiedCommit**: 134d38b
+- **conclusion**: success
+- **note**: The workflow runs actions/checkout@v6 (submodules recursive), actions/setup-java@v5 (temurin 21), the pinned local ./upstream/gradle-actions/setup-gradle (wrapper validation ENABLED), then ./gradlew qualityGate in fixture/.
+- **earlierFailedRun**: {'runId': '36988878770', 'cause': 'setup-gradle wrapper validation failed on deliberately-invalid 0-byte wrapper JARs shipped as test fixtures inside the vendored gradle-actions submodule', 'fix': 'exclude only those vendored test fixtures so wrapper validation stays enabled (commit 134d38b)'}
 
 ## Open issues
-- GitHub Actions workflow (.github/workflows/governance-ci.yml) is PENDING REMOTE VERIFICATION; it runs the fixture `./gradlew qualityGate` and is executed after push to GitHub.
+- GitHub Actions runs the fixture `./gradlew qualityGate` (Gradle wrapper validation enabled). It does not yet run the Linux bootstrap/negative tests; expanding CI coverage is planned for v1.1.
 - AGENT SEMANTIC SMOKE TEST was performed by the agent (see reports/agent-smoke-result.json); a full interactive /ag-review-implementation run via a Claude/Codex agent session remains a manual step (docs/AGENT-SMOKE-TEST.md).
 - PowerShell 7 not installed on this host, so the Windows entry (bootstrap.ps1) could not be executed here; the Linux bridge mirrors its stages.
 - RuleSync's own `prepare` lifecycle writes projections into the rulesync source tree during install (upstream behavior, harmless to the fixture).

@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "workflow": "Governance Layer CI (.github/workflows/governance-ci.yml)",
+  "runId": "36989276694",
+  "url": "https://github.com/zgz46408212-jpg/AI-Engineering-Governance-Layer/actions/runs/36989276694",
+  "verifiedCommit": "134d38b",
+  "conclusion": "success",
+  "note": "The workflow runs actions/checkout@v6 (submodules recursive), actions/setup-java@v5 (temurin 21), the pinned local ./upstream/gradle-actions/setup-gradle (wrapper validation ENABLED), then ./gradlew qualityGate in fixture/.",
+  "earlierFailedRun": {
+    "runId": "36988878770",
+    "cause": "setup-gradle wrapper validation failed on deliberately-invalid 0-byte wrapper JARs shipped as test fixtures inside the vendored gradle-actions submodule",
+    "fix": "exclude only those vendored test fixtures so wrapper validation stays enabled (commit 134d38b)"
+  }
+}

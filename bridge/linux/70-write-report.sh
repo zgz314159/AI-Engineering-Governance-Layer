@@ -82,6 +82,8 @@ negative = read_json(f"{reports}/negative-result.json", {
 })
 agent_smoke = read_json(f"{reports}/agent-smoke-result.json",
                         {"status": "NOT_RUN (requires an interactive AI agent session; see docs/AGENT-SMOKE-TEST.md)"})
+ci = read_json(f"{reports}/ci-result.json",
+               "PENDING REMOTE VERIFICATION (workflow .github/workflows/governance-ci.yml present; not yet run on a remote)")
 
 pos_ok = all(str(v).upper().endswith("PASS") or v is True for v in positive.values())
 neg_ok = (negative.get("negativeArchitectureViolation") == "BLOCKED_AS_EXPECTED"
@@ -107,7 +109,7 @@ modified = [
 ]
 
 open_issues = [
-    "GitHub Actions workflow (.github/workflows/governance-ci.yml) is PENDING REMOTE VERIFICATION; it runs the fixture `./gradlew qualityGate` and is executed after push to GitHub.",
+    "GitHub Actions runs the fixture `./gradlew qualityGate` (Gradle wrapper validation enabled). It does not yet run the Linux bootstrap/negative tests; expanding CI coverage is planned for v1.1.",
     "AGENT SEMANTIC SMOKE TEST was performed by the agent (see reports/agent-smoke-result.json); a full interactive /ag-review-implementation run via a Claude/Codex agent session remains a manual step (docs/AGENT-SMOKE-TEST.md).",
     "PowerShell 7 not installed on this host, so the Windows entry (bootstrap.ps1) could not be executed here; the Linux bridge mirrors its stages.",
     "RuleSync's own `prepare` lifecycle writes projections into the rulesync source tree during install (upstream behavior, harmless to the fixture).",
@@ -146,7 +148,7 @@ report = {
     "negativeTests": negative,
     "agentSemanticSmokeTest": agent_smoke,
     "modifiedBootstrapBridgeConfigFiles": modified,
-    "githubActions": "PENDING REMOTE VERIFICATION (workflow .github/workflows/governance-ci.yml present; not yet run on a remote)",
+    "githubActions": ci,
     "openIssues": open_issues,
     "final": status,
 }
@@ -196,7 +198,7 @@ Architecture Guard (Spec Kit adapter) / RuleSync rules / Konsist test -> Gradle 
 {chr(10).join('- ' + m for m in modified)}
 
 ## GitHub Actions
-{report['githubActions']}
+{bullets(ci) if isinstance(ci, dict) else ci}
 
 ## Open issues
 {chr(10).join('- ' + i for i in open_issues)}
