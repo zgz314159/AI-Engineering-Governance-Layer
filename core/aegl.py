@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ADAPTERS_DIR = ROOT / "adapters"
-IMPLEMENTED = ["kotlin"]  # detection priority order
+IMPLEMENTED = ["android", "kotlin"]  # detection priority order
 
 
 def _load_adapter(lang: str):
@@ -76,31 +76,21 @@ def cmd_inspect(args) -> int:
             "message": "No implemented adapter matched this project.",
             "adapters": _descriptors(),
         }, 3)
+    resolved = project.resolve()
+    # The technology-specific profile is owned by the adapter; the core stays
+    # technology-agnostic and only adds the fields common to every adapter.
+    summary = mod.inspect_summary(resolved, profile) if hasattr(mod, "inspect_summary") else {}
     result = {
         "matched": True,
         "adapter": lang,
-        "adapterVersion": profile["adapterVersion"],
-        "project": str(project.resolve()),
-        "technology": {
-            "language": "kotlin",
-            "buildSystem": "gradle",
-            "android": profile["indicators"]["androidPlugin"],
-        },
-        "governance": {
-            "existingDetekt": profile["indicators"]["existingDetekt"],
-            "existingKonsist": profile["indicators"]["existingKonsist"],
-            "existingCI": profile["indicators"]["existingCI"],
-            "existingClaude": profile["indicators"]["existingClaude"],
-            "existingAgents": profile["indicators"]["existingAgents"],
-            "existingArchitectureTests": profile["indicators"]["existingArchitectureTests"],
-        },
-        "indicators": profile["indicators"],
-        "packagePrefix": mod.package_prefix(project.resolve()),
-        "existingLayers": mod.existing_layers(project.resolve(), mod.package_prefix(project.resolve())),
+        "adapterVersion": profile.get("adapterVersion", "0.0.0"),
+        "project": str(resolved),
+        **summary,
+        "indicators": profile.get("indicators", {}),
         "attached": (project / ".aegl/manifest.json").exists(),
     }
     if args.write:
-        target = project.resolve() / ".aegl/project-profile.json"
+        target = resolved / ".aegl/project-profile.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         result["wroteProfile"] = str(target)

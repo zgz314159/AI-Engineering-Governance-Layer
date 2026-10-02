@@ -14,11 +14,11 @@ Each adapter directory contains:
 
 | Adapter     | Implemented | Notes                                                  |
 |-------------|-------------|--------------------------------------------------------|
+| `android`   | yes         | Android/Gradle: multi-module Konsist + Detekt + Android Lint |
 | `kotlin`    | yes         | Gradle + Kotlin: detekt + Konsist architecture test    |
-| `android`   | descriptor  | Android/Gradle — not implemented in v1.1               |
-| `java`      | descriptor  | Java/Gradle or Maven — not implemented in v1.1         |
-| `python`    | descriptor  | — not implemented in v1.1                              |
-| `typescript`| descriptor  | — not implemented in v1.1                              |
+| `java`      | descriptor  | Java/Gradle or Maven — not implemented                  |
+| `python`    | descriptor  | — not implemented                                       |
+| `typescript`| descriptor  | — not implemented                                       |
 
 Descriptor-only adapters are honest placeholders: `aegl` reports them as
 `implemented: false` and refuses to `attach`/`verify` rather than pretending to

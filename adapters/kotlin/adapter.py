@@ -87,7 +87,9 @@ def detect(project: Path) -> dict:
         for p in (project / "src/test").rglob("*.kt")
     ) if (project / "src/test").is_dir() else False
 
-    matched = indicators["settingsGradle"] and indicators["buildGradle"] and indicators["kotlinPlugin"]
+    # Android projects are handled by the android adapter; never claim them here.
+    matched = (indicators["settingsGradle"] and indicators["buildGradle"]
+               and indicators["kotlinPlugin"] and not indicators["androidPlugin"])
     return {
         "language": LANGUAGE,
         "adapterVersion": AEGL_VERSION,
@@ -536,6 +538,30 @@ def detach(project: Path, dry_run: bool = False) -> dict:
 
     return {"removed": sorted(to_delete + [".aegl/manifest.json"]),
             "restored": sorted(to_restore), "skipped": sorted(skipped)}
+
+
+def inspect_summary(project: Path, profile: dict) -> dict:
+    """Technology-specific part of `aegl inspect`, owned by the adapter."""
+    project = project.resolve()
+    prefix = package_prefix(project)
+    indicators = profile["indicators"]
+    return {
+        "technology": {
+            "language": "kotlin",
+            "buildSystem": "gradle",
+            "android": indicators["androidPlugin"],
+        },
+        "governance": {
+            "existingDetekt": indicators["existingDetekt"],
+            "existingKonsist": indicators["existingKonsist"],
+            "existingCI": indicators["existingCI"],
+            "existingClaude": indicators["existingClaude"],
+            "existingAgents": indicators["existingAgents"],
+            "existingArchitectureTests": indicators["existingArchitectureTests"],
+        },
+        "packagePrefix": prefix,
+        "existingLayers": existing_layers(project, prefix),
+    }
 
 
 def describe() -> dict:
