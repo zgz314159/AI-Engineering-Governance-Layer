@@ -1,0 +1,38 @@
+{
+  "projectName": "Governance Fixture",
+  "policyVersion": "1.0.0",
+  "principles": [
+    "Specifications and architecture rules are authoritative before implementation.",
+    "AI agents MUST NOT silently change architecture to make implementation easier.",
+    "A task is complete only after deterministic quality gates pass.",
+    "Generated AI rules are outputs; edit governance/policy.json instead."
+  ],
+  "layers": [
+    {
+      "name": "Presentation",
+      "package": "com.example.governed.presentation..",
+      "mayDependOn": [
+        "Domain"
+      ]
+    },
+    {
+      "name": "Data",
+      "package": "com.example.governed.data..",
+      "mayDependOn": [
+        "Domain"
+      ]
+    },
+    {
+      "name": "Domain",
+      "package": "com.example.governed.domain..",
+      "mayDependOn": []
+    }
+  ],
+  "qualityGates": [
+    "RuleSync generated files are current",
+    "Konsist architecture tests pass",
+    "Detekt reports zero issues",
+    "JUnit tests pass",
+    "Gradle qualityGate passes"
+  ]
+}

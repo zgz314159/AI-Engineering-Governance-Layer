@@ -1,0 +1,33 @@
+name: Governance Layer CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout governance layer and pinned upstream sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The downloaded Gradle Actions source tree is itself used as the local action.
+      - name: Setup Gradle from pinned local upstream source
+        uses: ./upstream/gradle-actions/setup-gradle
+        with:
+          cache-provider: basic
+
+      - name: Verify wrapper and run deterministic governance gate
+        working-directory: fixture
+        run: |
+          chmod +x ./gradlew
+          ./gradlew qualityGate

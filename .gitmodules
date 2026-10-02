@@ -1,0 +1,18 @@
+[submodule "upstream/spec-kit"]
+	path = upstream/spec-kit
+	url = https://github.com/github/spec-kit.git
+[submodule "upstream/architecture-guard"]
+	path = upstream/architecture-guard
+	url = https://github.com/DyanGalih/architecture-guard.git
+[submodule "upstream/konsist"]
+	path = upstream/konsist
+	url = https://github.com/LemonAppDev/konsist.git
+[submodule "upstream/detekt"]
+	path = upstream/detekt
+	url = https://github.com/detekt/detekt.git
+[submodule "upstream/rulesync"]
+	path = upstream/rulesync
+	url = https://github.com/dyoshikawa/rulesync.git
+[submodule "upstream/gradle-actions"]
+	path = upstream/gradle-actions
+	url = https://github.com/gradle/actions.git

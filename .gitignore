@@ -1,0 +1,28 @@
+# Build outputs and caches
+.cache/
+.gradle/
+**/build/
+**/dist/
+.kotlin/
+node_modules/
+*.log
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# RuleSync local cache
+fixture/.rulesync/.cache/
+
+# Installed third-party Spec Kit dev extension + agent projections.
+# These are full copies of upstream third-party source (Architecture Guard)
+# and are reproduced deterministically by bootstrap.sh, so they are NOT
+# committed into this repository.
+fixture/.specify/extensions/
+fixture/.claude/
+
+# NOTE: governance-required artifacts stay tracked on purpose:
+#   governance/, scripts/, bridge/, fixture/ (project skeleton),
+#   fixture/.specify/{memory,templates,scripts,workflows,integrations,extensions.yml},
+#   fixture/.rulesync/, reports/, versions.json, upstream-lock.json, .github/

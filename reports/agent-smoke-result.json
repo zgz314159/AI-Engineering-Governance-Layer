@@ -1,0 +1,10 @@
+{
+  "status": "PASS (agent semantic check, separate from deterministic gates)",
+  "performedBy": "Command Code agent (interactive session on this fixture)",
+  "adapterResolution": "PASS - .specify/extensions/architecture-guard/adapters/{resolve.md,spec-kit.md} present; the skill's constitution paths (.specify/memory/architecture_constitution.md) match the rendered files",
+  "skillsInstalled": "PASS - Architecture Guard ag-* skills projected into fixture/.claude/skills (e.g. speckit-architecture-guard-ag-review-implementation)",
+  "constitutionsRead": ["constitution.md", "architecture_constitution.md", "security_constitution.md"],
+  "semanticFinding": "Human/agent reading of governance/policy.json outputs: Domain imports nothing; Presentation and Data depend only on Domain. This is compliant. A Domain -> Presentation dependency is recognized as a blocking architecture violation (Domain is independent).",
+  "corroboration": "Agrees with the deterministic Konsist negative test (violation correctly blocked).",
+  "note": "A full interactive invocation of /ag-review-implementation via a Claude/Codex agent session is a manual step; here the semantic evaluation was executed directly by this agent against the rendered constitutions."
+}

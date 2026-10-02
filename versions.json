@@ -1,0 +1,33 @@
+{
+  "specKit": {
+    "repo": "https://github.com/github/spec-kit.git",
+    "ref": "v1.0.6"
+  },
+  "architectureGuard": {
+    "repo": "https://github.com/DyanGalih/architecture-guard.git",
+    "ref": "v2.3.6"
+  },
+  "konsist": {
+    "repo": "https://github.com/LemonAppDev/konsist.git",
+    "ref": "v0.17.3"
+  },
+  "detekt": {
+    "repo": "https://github.com/detekt/detekt.git",
+    "ref": "v1.23.8"
+  },
+  "ruleSync": {
+    "repo": "https://github.com/dyoshikawa/rulesync.git",
+    "ref": "v25.0.0"
+  },
+  "gradleActions": {
+    "repo": "https://github.com/gradle/actions.git",
+    "ref": "v6.1.0"
+  },
+  "gradle": {
+    "version": "8.12.1",
+    "distributionUrl": "https://services.gradle.org/distributions/gradle-8.12.1-bin.zip",
+    "sha256": "8d97a97984f6cbd2b85fe4c60a743440a347544bf18818048e611f5288d46c94"
+  },
+  "kotlin": "2.0.21",
+  "junit": "5.11.4"
+}

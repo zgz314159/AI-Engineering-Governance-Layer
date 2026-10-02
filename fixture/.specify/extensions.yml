@@ -1,0 +1,33 @@
+installed:
+- architecture-guard
+settings:
+  auto_execute_hooks: true
+hooks:
+  after_plan:
+  - extension: architecture-guard
+    command: speckit.architecture-guard.ag-violation-detection
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Would you like to scan the technical plan for architectural drift and
+      Constitution violations?
+    description: ''
+    condition: null
+  after_tasks:
+  - extension: architecture-guard
+    command: speckit.architecture-guard.ag-refactor-generator
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Would you like to generate architectural refactor tasks before implementation?
+    description: ''
+    condition: null
+  after_implement:
+  - extension: architecture-guard
+    command: speckit.architecture-guard.ag-review-implementation
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Would you like to run a post-implementation architecture review?
+    description: ''
+    condition: null

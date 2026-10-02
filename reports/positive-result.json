@@ -1,0 +1,7 @@
+{
+  "specKitRuntime": "PASS",
+  "architectureGuardRegistration": "PASS",
+  "architectureGuardCommands": "PASS",
+  "rulesyncDriftCheck": "PASS",
+  "gradleQualityGate": "PASS"
+}
