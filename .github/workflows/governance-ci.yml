@@ -14,6 +14,16 @@ jobs:
         with:
           submodules: recursive
 
+      # The vendored gradle-actions source ships deliberately-invalid Gradle
+      # wrapper JARs as its own test fixtures (0-byte files under
+      # sources/test/jest/wrapper-validation/data/invalid/). setup-gradle's
+      # wrapper validation scans the entire workspace and would fail on those
+      # third-party fixtures. Remove ONLY those fixtures so wrapper validation
+      # stays ENABLED and still validates our own fixture/gradle-wrapper.jar.
+      - name: Exclude vendored gradle-actions wrapper-validation test fixtures
+        run: |
+          find upstream/gradle-actions -path '*wrapper-validation/data/invalid*' -name '*.jar' -print -delete
+
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
