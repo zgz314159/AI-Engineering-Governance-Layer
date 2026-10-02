@@ -1,0 +1,17 @@
+{
+  "id": "android",
+  "language": "kotlin",
+  "displayName": "Android (Gradle)",
+  "implemented": false,
+  "version": "0.0.0",
+  "buildSystem": "gradle",
+  "detection": {
+    "anyOf": ["settings.gradle.kts", "settings.gradle"],
+    "markers": {
+      "androidPlugin": ["build.gradle.kts", "build.gradle"]
+    }
+  },
+  "capabilities": {
+    "notes": "Planned: reuse the kotlin adapter plus Android-specific source sets. Not implemented in v1.1."
+  }
+}

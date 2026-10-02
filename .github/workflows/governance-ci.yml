@@ -41,3 +41,95 @@ jobs:
         run: |
           chmod +x ./gradlew
           ./gradlew qualityGate
+
+  # v1.0 Linux bootstrap: Spec Kit + Architecture Guard + RuleSync + positive
+  # gates + negative architecture/Detekt enforcement.
+  bootstrap-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout governance layer and pinned upstream sources
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run full Linux bootstrap (positive + negative governance tests)
+        run: bash bootstrap.sh
+
+  # v1.1 target-project adapter smoke tests on the sandbox fixtures.
+  target-adapter-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Make AEGL and wrappers executable
+        run: chmod +x bin/aegl fixtures/target-kotlin-good/gradlew fixtures/target-kotlin-bad/gradlew
+
+      - name: List adapters
+        run: ./bin/aegl adapters
+
+      - name: inspect good (read-only)
+        run: |
+          ./bin/aegl inspect fixtures/target-kotlin-good
+          test ! -e fixtures/target-kotlin-good/.aegl
+
+      - name: attach dry-run good (must not write)
+        run: |
+          ./bin/aegl attach fixtures/target-kotlin-good --dry-run
+          test ! -e fixtures/target-kotlin-good/.aegl
+
+      - name: attach good
+        run: ./bin/aegl attach fixtures/target-kotlin-good
+
+      - name: verify good (must PASS)
+        run: ./bin/aegl verify fixtures/target-kotlin-good
+
+      - name: inspect + attach bad
+        run: |
+          ./bin/aegl inspect fixtures/target-kotlin-bad
+          ./bin/aegl attach fixtures/target-kotlin-bad
+
+      - name: verify bad (must FAIL with a Konsist architecture violation)
+        run: |
+          set +e
+          out="$(./bin/aegl verify fixtures/target-kotlin-bad)"
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -eq 0 ]; then
+            echo "ERROR: expected verify(bad) to fail"; exit 1
+          fi
+          echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['architectureViolation'] is True, d"
+
+      - name: detach sandboxes and verify original projects are restored
+        run: |
+          ./bin/aegl detach fixtures/target-kotlin-good
+          ./bin/aegl detach fixtures/target-kotlin-bad
+          test ! -e fixtures/target-kotlin-good/.aegl
+          test ! -e fixtures/target-kotlin-bad/.aegl
+          # No tracked target file may have changed.
+          test -z "$(git status --porcelain fixtures/target-kotlin-good fixtures/target-kotlin-bad)"

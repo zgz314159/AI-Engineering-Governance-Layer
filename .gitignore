@@ -6,6 +6,8 @@
 .kotlin/
 node_modules/
 *.log
+__pycache__/
+*.pyc
 
 # IDE / OS noise
 .idea/
@@ -21,6 +23,11 @@ fixture/.rulesync/.cache/
 # committed into this repository.
 fixture/.specify/extensions/
 fixture/.claude/
+
+# AEGL runtime overlays created by `aegl attach` on sandbox target fixtures.
+# These are generated at test time and removed by `aegl detach`.
+fixtures/**/.aegl/
+fixtures/**/.github/
 
 # NOTE: governance-required artifacts stay tracked on purpose:
 #   governance/, scripts/, bridge/, fixture/ (project skeleton),

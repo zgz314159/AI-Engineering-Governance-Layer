@@ -57,6 +57,17 @@ for i in "${!ITEMS[@]}"; do
         git submodule update --init --recursive -- "$path"
     fi
 
+    # If the submodule already sits at the commit recorded in the superproject
+    # gitlink, it is already pinned — skip network fetch/checkout. This is the
+    # normal case in CI (actions/checkout checks submodules out at the pinned
+    # commit but without the tag objects, so `checkout <tag>` would fail).
+    recorded="$(git ls-tree HEAD -- "$path" 2>/dev/null | awk '{print $3}')"
+    current="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$recorded" ] && [ "$recorded" = "$current" ]; then
+        echo "[PINNED] $name @ $current"
+        continue
+    fi
+
     # Resolve the pinned ref (tag or branch) with a shallow fetch.
     if [ -d "$path/.git" ]; then
         git -C "$path" fetch --depth 1 origin "refs/tags/$ref:refs/tags/$ref" 2>/dev/null \
