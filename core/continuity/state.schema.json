@@ -71,6 +71,21 @@
         "action": { "type": "string" },
         "command": { "type": "string" }
       }
+    },
+    "memory": {
+      "description": "Read-only reference to the optional persistent-memory backend (v1.4). Never a copy of the Beads work graph.",
+      "type": "object",
+      "properties": {
+        "backend": { "type": "string" },
+        "available": { "type": "boolean" },
+        "supported": { "type": "boolean" },
+        "initialized": { "type": "boolean" },
+        "beadsVersion": { "type": ["string", "null"] },
+        "dataDir": { "type": ["string", "null"] },
+        "readyCount": { "type": ["integer", "null"] },
+        "currentTask": { "type": ["string", "null"] },
+        "checkedAt": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "definitions": {

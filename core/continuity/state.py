@@ -23,6 +23,19 @@ DEFAULT_CONFIG: dict = {
     "includeCi": True,
     "redactSecrets": True,
     "memoryBackend": "none",
+    # v1.4 Persistent Work Memory. ``includeMemoryOnResume`` is off by default
+    # so `aegl resume` stays fast and independent; opt in with
+    # `aegl resume --with-memory` or by flipping this flag.
+    "includeMemoryOnResume": False,
+    "memory": {
+        "beads": {
+            "dir": ".aegl/beads",
+            "prefix": "bd",
+            "testedVersion": "1.3.1",
+            "readyLimit": 5,
+            "timeoutSeconds": 5,
+        },
+    },
 }
 
 _WORK_LIST_FIELDS = (
@@ -128,12 +141,22 @@ def write_json(path: Path, obj) -> None:
 # Config
 # --------------------------------------------------------------------------- #
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """One-level-aware merge so a partial saved config keeps nested defaults."""
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def load_config(root: Path) -> dict:
-    cfg = dict(DEFAULT_CONFIG)
     loaded = read_json(config_path(root), {})
     if isinstance(loaded, dict):
-        cfg.update(loaded)
-    return cfg
+        return _deep_merge(DEFAULT_CONFIG, loaded)
+    return dict(DEFAULT_CONFIG)
 
 
 def save_config(root: Path, cfg: dict) -> None:

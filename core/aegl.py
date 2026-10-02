@@ -11,9 +11,18 @@ Commands:
 Continuity Layer (v1.3):
   aegl status   [--root R] [--json]          Current machine facts + handoff age.
   aegl handoff  [--root R] [--goal ...] ...  Write a resumable session handoff.
-  aegl resume   [--root R] [--json]          Lightweight handoff consistency check.
+  aegl resume   [--root R] [--json] [--with-memory]  Lightweight consistency check.
   aegl continuity history [--root R] [--json]  List handoff snapshots.
   aegl continuity check    [--root R] [--json]  Diagnostic schema check (never a gate).
+
+Persistent Work Memory (v1.4, OPTIONAL — Beads via the official `bd` CLI):
+  aegl memory status [--root R] [--json]     Backend availability / health.
+  aegl memory setup beads [--root R]         Initialise Beads (stealth, no agent files).
+  aegl memory prime [--memories-only] [--json]  Inject Beads workflow + memories.
+  aegl memory remember [KEY] VALUE [--key K] [--value V]  Store a durable fact (redacted).
+  aegl memory ready [--limit N] [--json]     Ready work straight from `bd ready`.
+  aegl memory disable [--root R]             Switch backend off (never deletes data).
+  aegl bd <bd args...>                       Run `bd` with AEGL's environment applied.
 
 The core never scans a parent directory: it only touches the path the user names.
 """
@@ -31,6 +40,7 @@ IMPLEMENTED = ["android", "kotlin"]  # detection priority order
 
 # The Continuity Layer (v1.3) ships with the core.
 from continuity import commands as continuity  # noqa: E402
+from continuity import memory_commands  # noqa: E402
 
 
 def _load_adapter(lang: str):
@@ -155,7 +165,41 @@ def cmd_handoff(args) -> int:
 
 
 def cmd_resume(args) -> int:
-    return continuity.do_resume(_croot(args), args.json)
+    return continuity.do_resume(_croot(args), args.json,
+                                with_memory=getattr(args, "with_memory", False))
+
+
+def cmd_memory(args) -> int:
+    root = _croot(args)
+    sub = args.memory_command
+    if sub == "status":
+        return memory_commands.do_status(root, args.json)
+    if sub == "setup":
+        return memory_commands.do_setup(root, args.target, args.json)
+    if sub == "prime":
+        return memory_commands.do_prime(root, args.memories_only, args.json)
+    if sub == "remember":
+        if getattr(args, "value", None) is not None:
+            key, value = args.key, args.value
+        elif getattr(args, "extra", None) is not None:
+            key, value = args.content, args.extra
+        elif getattr(args, "content", None) is not None:
+            key, value = args.key, args.content
+        else:
+            return _emit({"error": "no memory content given"}, 2)
+        return memory_commands.do_remember(root, key, value, args.json)
+    if sub == "ready":
+        return memory_commands.do_ready(root, args.limit, args.json)
+    if sub == "disable":
+        return memory_commands.do_disable(root, args.json)
+    return _emit({"error": f"unknown memory command: {sub}"}, 2)
+
+
+def cmd_bd(args) -> int:
+    bd_args = list(getattr(args, "bd_args", []) or [])
+    if bd_args and bd_args[0] == "--":
+        bd_args = bd_args[1:]
+    return memory_commands.do_bd(_croot(args), bd_args)
 
 
 def cmd_continuity(args) -> int:
@@ -216,6 +260,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("resume", help="Lightweight handoff consistency check")
     add_continuity_args(pr)
+    pr.add_argument("--with-memory", dest="with_memory", action="store_true",
+                    help="Also print a bounded persistent-memory summary (opt-in)")
     pr.set_defaults(func=cmd_resume)
 
     pc = sub.add_parser("continuity", help="Continuity Layer utilities")
@@ -225,6 +271,45 @@ def build_parser() -> argparse.ArgumentParser:
         cp = csub.add_parser(name, help=help_text)
         add_continuity_args(cp)
     pc.set_defaults(func=cmd_continuity)
+
+    # --- Persistent Work Memory (v1.4, OPTIONAL) ----------------------------
+    pm = sub.add_parser("memory", help="Optional persistent work memory (Beads)")
+    msub = pm.add_subparsers(dest="memory_command", required=True)
+
+    ms = msub.add_parser("status", help="Show backend availability, version and health")
+    add_continuity_args(ms)
+
+    msetup = msub.add_parser("setup", help="Initialise a memory backend (stealth)")
+    msetup.add_argument("target", nargs="?", default="beads", help="Backend to set up (beads)")
+    add_continuity_args(msetup)
+
+    mprime = msub.add_parser("prime", help="Print Beads workflow context + memories")
+    mprime.add_argument("--memories-only", dest="memories_only", action="store_true",
+                        help="Print only the persistent-memories section")
+    add_continuity_args(mprime)
+
+    mrem = msub.add_parser("remember", help="Store a durable project fact (secret-redacted)")
+    mrem.add_argument("content", nargs="?", help="Memory content (or KEY when VALUE is given)")
+    mrem.add_argument("extra", nargs="?", help="Memory content when KEY is the first positional")
+    mrem.add_argument("--key", help="Explicit memory key")
+    mrem.add_argument("--value", help="Explicit memory content")
+    add_continuity_args(mrem)
+
+    mready = msub.add_parser("ready", help="Show ready work straight from `bd ready`")
+    mready.add_argument("--limit", type=int, default=None, help="Max ready items to show")
+    add_continuity_args(mready)
+
+    mdis = msub.add_parser("disable", help="Switch persistent memory off (data preserved)")
+    add_continuity_args(mdis)
+
+    pm.set_defaults(func=cmd_memory)
+
+    pbd = sub.add_parser("bd", help="Run the Beads CLI with AEGL's environment applied")
+    pbd.add_argument("--root", default=str(ROOT),
+                     help="Project root whose .aegl/beads is used (default: AEGL root)")
+    pbd.add_argument("bd_args", nargs=argparse.REMAINDER,
+                     help="Arguments passed through to bd (e.g. `aegl bd ready --json`)")
+    pbd.set_defaults(func=cmd_bd)
 
     return p
 

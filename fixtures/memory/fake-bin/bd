@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Minimal deterministic ``bd`` stub for AEGL Persistent Work Memory tests.
+
+This is NOT a Beads reimplementation and NOT a substitute for the real
+integration test — it exists so the runner, version parsing, JSON parsing,
+timeout handling and error mapping can be exercised hermetically in CI.
+
+Behaviour is switched with environment variables:
+
+  FAKE_BD_MODE     normal | timeout | fail | invalid-json | unsupported-version
+  FAKE_BD_VERSION  version string reported by ``--version`` (default 1.3.1)
+
+The stub keeps tiny state in ``$BEADS_DIR/.fake-state.json`` so create / dep /
+ready / remember round-trip within a single test.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+
+def beads_dir() -> Path:
+    return Path(os.environ.get("BEADS_DIR", ".beads"))
+
+
+def state_path() -> Path:
+    return beads_dir() / ".fake-state.json"
+
+
+def mode() -> str:
+    return os.environ.get("FAKE_BD_MODE", "normal")
+
+
+def load_state() -> dict:
+    path = state_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            return {}
+    return {"issues": [], "deps": [], "memories": {}, "counter": 0}
+
+
+def save_state(state: dict) -> None:
+    beads_dir().mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps(state), encoding="utf-8")
+
+
+def initialized() -> bool:
+    return (beads_dir() / "config.yaml").exists() or (beads_dir() / "metadata.json").exists()
+
+
+def emit(obj) -> None:
+    if mode() == "invalid-json":
+        print("this is not json { oops")
+        return
+    print(json.dumps(obj))
+
+
+def die(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def flag_value(args: list[str], name: str) -> str | None:
+    if name in args:
+        idx = args.index(name)
+        if idx + 1 < len(args):
+            return args[idx + 1]
+    return None
+
+
+def claimed_actor() -> str:
+    return os.environ.get("FAKE_BD_ACTOR", "fake-actor")
+
+
+def main(argv: list[str]) -> int:
+    if mode() == "timeout":
+        time.sleep(60)
+        return 0
+    if mode() == "fail":
+        print("fake bd: forced failure", file=sys.stderr)
+        return 1
+
+    if argv and argv[0] == "--version":
+        print(f"bd version {os.environ.get('FAKE_BD_VERSION', '1.3.1')} (fake)")
+        return 0
+    if not argv:
+        die("fake bd: no subcommand")
+
+    cmd, rest = argv[0], argv[1:]
+
+    if cmd == "where":
+        print(beads_dir())
+        return 0
+
+    if cmd == "init":
+        beads_dir().mkdir(parents=True, exist_ok=True)
+        (beads_dir() / "config.yaml").write_text("no-git-ops: true\n", encoding="utf-8")
+        (beads_dir() / "metadata.json").write_text('{"database": "dolt"}\n', encoding="utf-8")
+        save_state({"issues": [], "deps": [], "memories": {}, "counter": 0})
+        print("Initialized beads workspace (fake, stealth)")
+        return 0
+
+    if cmd in ("status", "stats"):
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        issues = state["issues"]
+        counts = {s: sum(1 for i in issues if i["status"] == s) for s in ("open", "in_progress", "blocked", "closed", "deferred")}
+        blocked_ids = {d["blocked"] for d in state["deps"]}
+        ready = [i for i in issues if i["status"] == "open" and i["id"] not in blocked_ids]
+        emit({"schema_version": 1, "summary": {
+            "ready_issues": len(ready), "open_issues": counts["open"],
+            "in_progress_issues": counts["in_progress"], "blocked_issues": len(blocked_ids),
+            "closed_issues": counts["closed"], "deferred_issues": counts["deferred"],
+            "total_issues": len(issues),
+        }})
+        return 0
+
+    if cmd == "ready":
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        blocked_ids = {d["blocked"] for d in state["deps"]}
+        ready = [i for i in state["issues"]
+                 if i["status"] == "open" and i["id"] not in blocked_ids]
+        limit = flag_value(rest, "--limit")
+        if limit is not None:
+            try:
+                ready = ready[:int(limit)]
+            except ValueError:
+                pass
+        if "--json" in rest:
+            emit(ready)
+        else:
+            for item in ready:
+                print(f"{item['id']}  P{item['priority']}  {item['title']}")
+        return 0
+
+    if cmd == "list":
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        wanted = flag_value(rest, "--status") or flag_value(rest, "-s")
+        wanted_set = set(wanted.split(",")) if wanted else None
+        items = [i for i in state["issues"]
+                 if wanted_set is None or i["status"] in wanted_set]
+        if wanted is None:
+            items = [i for i in items if i["status"] != "closed"]
+        limit = flag_value(rest, "--limit")
+        if limit is not None:
+            try:
+                items = items[:int(limit)]
+            except ValueError:
+                pass
+        if "--json" in rest:
+            emit(items)
+        else:
+            for item in items:
+                print(f"{item['id']}  {item['status']}  {item['title']}")
+        return 0
+
+    if cmd == "create":
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        title = rest[0] if rest else "untitled"
+        state["counter"] += 1
+        issue = {"id": f"bd-fake{state['counter']}", "title": title, "status": "open",
+                 "priority": 2, "issue_type": flag_value(rest, "-t") or "task"}
+        state["issues"].append(issue)
+        save_state(state)
+        if "--json" in rest:
+            emit(issue)
+        else:
+            print(f"✓ Created issue: {issue['id']} — {title}")
+        return 0
+
+    if cmd == "dep":
+        state = load_state()
+        if rest and rest[0] == "add" and len(rest) >= 3:
+            state["deps"].append({"blocked": rest[1], "blocker": rest[2]})
+            save_state(state)
+            print(f"✓ Added dependency: {rest[1]} depends on {rest[2]}")
+            return 0
+        die("fake bd: unsupported dep form")
+
+    if cmd == "update":
+        state = load_state()
+        if "--claim" in rest and rest:
+            target = rest[0]
+            for issue in state["issues"]:
+                if issue["id"] == target:
+                    issue["status"] = "in_progress"
+                    issue["assignee"] = claimed_actor()
+            save_state(state)
+            print(f"✓ Updated issue: {target}")
+            return 0
+        die("fake bd: unsupported update form")
+
+    if cmd == "close":
+        state = load_state()
+        target = rest[0] if rest else None
+        for issue in state["issues"]:
+            if issue["id"] == target:
+                issue["status"] = "closed"
+        save_state(state)
+        print(f"✓ Closed {target}")
+        return 0
+
+    if cmd == "show":
+        state = load_state()
+        target = rest[0] if rest else None
+        match = [i for i in state["issues"] if i["id"] == target]
+        if not match:
+            die(f"Error: issue {target} not found")
+        emit(match)
+        return 0
+
+    if cmd == "memories":
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        emit({**state["memories"], "schema_version": 1})
+        return 0
+
+    if cmd == "remember":
+        if not initialized():
+            die("Error: no beads database found")
+        state = load_state()
+        content = None
+        for token in rest:
+            if not token.startswith("-"):
+                content = token
+                break
+        if content is None:
+            die("Error: remember requires content")
+        key = flag_value(rest, "--key") or content.lower().replace(" ", "-")[:60]
+        state["memories"][key] = content
+        save_state(state)
+        if "--json" in rest:
+            emit({"schema_version": 1, "action": "remembered", "key": key, "value": content})
+        else:
+            print(f"Remembered [{key}]: {content}")
+        return 0
+
+    if cmd == "forget":
+        state = load_state()
+        key = rest[0] if rest else None
+        state["memories"].pop(key, None)
+        save_state(state)
+        print(f"Forgot [{key}]")
+        return 0
+
+    if cmd == "prime":
+        state = load_state()
+        memories = state["memories"]
+        if "--memories-only" in rest:
+            print(f"## Persistent Memories ({len(memories)})")
+            for key, value in sorted(memories.items()):
+                print(f"### {key}\n{value}")
+            return 0
+        print("# Beads Workflow Context (fake)")
+        print(f"## Persistent Memories ({len(memories)})")
+        for key, value in sorted(memories.items()):
+            print(f"### {key}\n{value}")
+        print("## Core Rules\n- use bd for task tracking")
+        return 0
+
+    die(f"fake bd: unsupported command: {cmd}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

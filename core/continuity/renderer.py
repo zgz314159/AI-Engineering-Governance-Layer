@@ -100,6 +100,25 @@ def render_handoff(snapshot: dict) -> str:
         "",
         _bullets(work.get("openQuestions")),
         "",
+    ])
+
+    memory = snapshot.get("memory")
+    if isinstance(memory, dict):
+        ready = memory.get("readyCount")
+        lines.extend([
+            "## Persistent Memory (reference)",
+            "",
+            f"Backend: {_clean(memory.get('backend'))}",
+            f"Available: {str(bool(memory.get('available'))).lower()}",
+            f"Beads version: {_clean(memory.get('beadsVersion'))}",
+            f"Ready count: {ready if ready is not None else '(n/a)'}",
+            f"Current task: {_clean(memory.get('currentTask'))}",
+            "",
+            "> Reference only. Beads owns the work graph; this is a snapshot, not a copy.",
+            "",
+        ])
+
+    lines.extend([
         "> HANDOFF.md is a projection of `.aegl/continuity/state.json` (canonical).",
         "",
     ])

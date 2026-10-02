@@ -346,3 +346,48 @@ jobs:
         run: |
           test ! -e .aegl/continuity/state.json || git check-ignore -q .aegl/continuity/state.json
           test -z "$(git status --porcelain | grep -v '^??' || true)"
+
+  # v1.4 Persistent Work Memory (Beads adapter). Downloads the checksum-pinned
+  # real Beads release, then runs the stub + real integration suites. Asserts:
+  # no AGENTS.md/CLAUDE.md mutation, no git-hook install, no auto-commit,
+  # telemetry disabled, BEADS_DIR isolation, DAG/ready semantics, secret
+  # rejection, and graceful fallback (missing/unsupported/timed-out bd).
+  persistent-memory-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download and verify the pinned Beads release
+        run: |
+          set -euo pipefail
+          mkdir -p .beads-bin
+          python3 - <<'PY'
+          import hashlib, io, json, tarfile, urllib.request
+
+          pin = json.load(open("versions.json"))["beads"]
+          asset = pin["linuxAmd64"]
+          req = urllib.request.Request(asset["url"], headers={"User-Agent": "aegl-ci"})
+          data = urllib.request.urlopen(req).read()
+          digest = hashlib.sha256(data).hexdigest()
+          assert digest == asset["sha256"], f"checksum mismatch: {digest} != {asset['sha256']}"
+          with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+              tar.extract("bd", path=".beads-bin", filter="data")
+          print(f"beads {pin['version']} sha256 OK")
+          PY
+          chmod +x .beads-bin/bd
+          ./.beads-bin/bd --version
+
+      - name: Make AEGL and the stub bd executable
+        run: |
+          chmod +x bin/aegl scripts/memory-smoke.py
+          chmod +x fixtures/memory/fake-bin/bd
+
+      - name: Persistent work memory smoke tests (stub + real Beads)
+        run: python3 scripts/memory-smoke.py --bd "$PWD/.beads-bin/bd"

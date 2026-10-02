@@ -132,3 +132,58 @@ aegl continuity check              # 诊断（不参与 release gate）
 nextAction 等）可由 Agent 通过 `--goal` 等参数或 `.aegl/continuity/work.json`
 提供。`resume` 只做一次轻量检查，CI 状态仅展示、不作为硬门禁。
 
+## AEGL Persistent Work Memory（v1.4，可选）
+
+v1.4 通过 **Beads 官方 `bd` CLI（subprocess）** 引入一个**可选**的持久化
+工作记忆 / 长期工作图后端。它填补 Continuity Layer 不负责的长期任务、
+依赖、阻塞与持久 memory，但**不是必需依赖**。
+
+职责边界（固定，不互相复制）：
+
+```text
+AEGL Continuity  owns  session continuity   (branch/HEAD/CI/handoff/resume/history)
+RuleSync         owns  agent rules          (AGENTS.md / CLAUDE.md / Cursor rules)
+Beads            owns  long-horizon work graph + durable memory (Dolt, via bd)
+```
+
+- **Beads ≠ Handoff。** `aegl resume` 回答“这个 checkout 是否是上次交接的、
+  下一步做什么”；`bd ready` 回答“长期工作里现在可以做哪些”。
+- 没安装 Beads：`aegl resume` / `handoff` / `status` **完全照常工作**（`none`
+  后端是 v1.3 基线，始终是兜底）。
+- 有 Beads：增加长期 tasks / dependencies / blocked work / persistent memory。
+
+命令：
+
+```bash
+aegl memory status                 # 后端可用性 / 版本 / 健康（后端缺失也不崩）
+aegl memory setup beads            # 初始化 Beads（--stealth，绝不碰 Agent 文件）
+aegl memory prime [--memories-only]# Beads workflow + persistent memories
+aegl memory remember KEY VALUE     # 只存长期项目知识（先做 secret 脱敏）
+aegl memory remember VALUE --key K
+aegl memory ready [--limit N]      # 直接来自 bd ready，不重算 DAG
+aegl memory disable                # 关闭后端，但【不删除】Beads 数据
+aegl bd <bd args...>               # 用 AEGL 环境直通 bd（create/claim/close/dep/show）
+```
+
+`aegl resume --with-memory`（或 config `includeMemoryOnResume`）会附加一个
+**有长度上限**的 memory 摘要（后端 / 版本 / ready 数 / 当前任务），默认关闭，
+以免 `resume` 变慢或撑爆 context。
+
+隔离与安全：
+
+- 数据目录：`BEADS_DIR=<repo>/.aegl/beads`（父目录 `.aegl/` 由 AEGL 预创建）。
+- `bd init --stealth`：不写 AGENTS.md / CLAUDE.md / `.claude` / `.codex` /
+  `.cursor`，不装 Git hooks，不产生 commit。**RuleSync 仍是 Agent 规则的唯一来源。**
+- 绝不执行 `bd setup claude|codex|cursor|...`。
+- AEGL 调用的每次 `bd` 都注入 `BD_DISABLE_METRICS=1` + `DO_NOT_TRACK=1`
+  （默认关闭遥测），并设置超时。
+- 进入 `bd remember` 的内容先经过 `core/continuity/secrets.py`；命中疑似
+  credential 直接**拒绝写入**，绝不静默存 secret。
+- 版本兼容窗口窄（测试基线 Beads v1.3.1，支持 1.3.x）；不兼容时后端降级为
+  warning，Continuity 继续工作。
+- `state.json` 只保存**引用摘要**（backend / version / readyCount / currentTask），
+  **绝不复制** Beads 的任务图。
+
+Beads 的版本、下载地址与 sha256 固定在 `versions.json["beads"]`（单一来源）。
+设计依据见 `docs/research/AEGL-v1.4-BEADS-INTEGRATION-ANALYSIS.md`。
+

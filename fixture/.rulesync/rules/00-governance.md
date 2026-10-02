@@ -49,3 +49,15 @@ To change a layer boundary, update `governance/policy.json`, regenerate governan
 
 > GENERATED from `governance/policy.json`. Do not edit directly.
 
+
+# Persistent Work Memory (optional)
+
+AEGL can use Beads (bd) as an OPTIONAL long-horizon work graph and persistent
+memory backend. AEGL owns session continuity; Beads owns the work graph;
+RuleSync owns agent rules. When persistent work memory is enabled:
+- aegl memory status   - check backend availability
+- aegl memory ready    - long-horizon ready work (from bd ready)
+- aegl bd ...          - task lifecycle (create / dep / update --claim / close / show)
+- aegl memory remember - durable project knowledge only; secrets are rejected
+- aegl handoff         - session continuity
+Never run bd setup: it writes AGENTS.md / CLAUDE.md and would collide with RuleSync.

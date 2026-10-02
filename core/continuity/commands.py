@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import collector, events, history, memory, renderer, resume, state
+from . import collector, events, history, memory, memory_commands, renderer, resume, state
 
 
 # --------------------------------------------------------------------------- #
@@ -65,6 +65,37 @@ def _merge_next(root: Path, args) -> dict:
     return nxt
 
 
+def _normalize_next_action(snapshot: dict) -> dict:
+    """A next-action must not also be listed under doNotRepeat (v1.4 fix).
+
+    The v1.3 semantics allowed the same string to appear in both, which reads
+    as a contradiction ("next: publish" + "do not repeat: publish"). This is a
+    minimal normalization, not a semantic validator.
+    """
+    action = (snapshot.get("next", {}) or {}).get("action", "")
+    action_key = action.strip().lower() if isinstance(action, str) else ""
+    if not action_key:
+        return snapshot
+    work = snapshot.get("work", {}) or {}
+    items = work.get("doNotRepeat") or []
+    filtered = [item for item in items if str(item).strip().lower() != action_key]
+    if len(filtered) != len(items):
+        work["doNotRepeat"] = filtered
+    return snapshot
+
+
+def _attach_memory_block(root: Path, snapshot: dict, cfg: dict) -> dict:
+    """Attach a read-only backend summary to the snapshot (never a copy)."""
+    backend = memory.load_backend(cfg, root)
+    if backend.name == "none":
+        return snapshot
+    try:
+        snapshot["memory"] = backend.reference_summary()
+    except Exception:  # pragma: no cover - backends are fail-soft already
+        snapshot["memory"] = {"backend": backend.name, "available": False}
+    return snapshot
+
+
 def build_snapshot(root: Path, args) -> tuple[dict, dict]:
     """Collect machine facts and merge the agent-provided semantic state."""
     # Read config without writing it: any write here would dirty the working
@@ -91,6 +122,8 @@ def build_snapshot(root: Path, args) -> tuple[dict, dict]:
         "work": _merge_work(root, args),
         "next": _merge_next(root, args),
     }
+    snapshot = _normalize_next_action(snapshot)
+    snapshot = _attach_memory_block(root, snapshot, cfg)
     # Persist defaults only after the facts have been collected.
     if not state.config_path(root).exists():
         state.save_config(root, state.DEFAULT_CONFIG)
@@ -217,7 +250,24 @@ def do_handoff(root: Path, args) -> int:
 # resume
 # --------------------------------------------------------------------------- #
 
-def do_resume(root: Path, as_json: bool = False) -> int:
+def _render_memory_brief(brief: dict) -> str:
+    """Bounded memory summary for `aegl resume --with-memory` (never `bd prime`)."""
+    lines = ["", "Persistent Memory", "-----------------"]
+    if brief.get("backend") == "none":
+        lines.append("Backend: none (enable with: aegl memory setup beads)")
+    elif not brief.get("available"):
+        lines.append("Backend: beads  UNAVAILABLE (bd missing or unsupported version)")
+        lines.append("WARNING: Continuity is unaffected.")
+    else:
+        version = brief.get("version") or "?"
+        lines.append(f"Backend: beads {version}")
+        ready = brief.get("readyCount")
+        lines.append(f"Ready count: {ready if ready is not None else '(n/a)'}")
+        lines.append(f"Current task: {brief.get('currentTask') or '(none)'}")
+    return "\n".join(lines)
+
+
+def do_resume(root: Path, as_json: bool = False, with_memory: bool = False) -> int:
     snapshot = state.read_state(root)
     if snapshot is None:
         message = "NO HANDOFF FOUND. Run: aegl handoff"
@@ -234,15 +284,25 @@ def do_resume(root: Path, as_json: bool = False) -> int:
     comparison = resume.compare(snapshot, current)
     events.append_event(root, "resume_completed", status=comparison["status"])
 
+    cfg = state.load_config(root)
+    include_memory = bool(with_memory or cfg.get("includeMemoryOnResume"))
+    brief = memory_commands.brief(root) if include_memory else None
+
     if as_json:
-        _emit({**comparison,
-               "goal": (snapshot.get("work", {}) or {}).get("goal"),
-               "doNotRepeat": (snapshot.get("work", {}) or {}).get("doNotRepeat", []),
-               "blocked": (snapshot.get("work", {}) or {}).get("blocked", []),
-               "nextAction": (snapshot.get("next", {}) or {}).get("action")})
+        payload = {**comparison,
+                   "goal": (snapshot.get("work", {}) or {}).get("goal"),
+                   "doNotRepeat": (snapshot.get("work", {}) or {}).get("doNotRepeat", []),
+                   "blocked": (snapshot.get("work", {}) or {}).get("blocked", []),
+                   "nextAction": (snapshot.get("next", {}) or {}).get("action")}
+        if brief is not None:
+            payload["memory"] = brief
+        _emit(payload)
         return 0
 
-    print(resume.render_resume(snapshot, comparison, current))
+    text = resume.render_resume(snapshot, comparison, current)
+    if brief is not None:
+        text += "\n" + _render_memory_brief(brief)
+    print(text)
     return 0
 
 

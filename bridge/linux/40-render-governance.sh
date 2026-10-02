@@ -85,6 +85,19 @@ This fixture intentionally contains only baseline governance:
 """
 w(f"{fx}/.specify/memory/security_constitution.md", security)
 
+memory_guidance = """# Persistent Work Memory (optional)
+
+AEGL can use Beads (bd) as an OPTIONAL long-horizon work graph and persistent
+memory backend. AEGL owns session continuity; Beads owns the work graph;
+RuleSync owns agent rules. When persistent work memory is enabled:
+- aegl memory status   - check backend availability
+- aegl memory ready    - long-horizon ready work (from bd ready)
+- aegl bd ...          - task lifecycle (create / dep / update --claim / close / show)
+- aegl memory remember - durable project knowledge only; secrets are rejected
+- aegl handoff         - session continuity
+Never run bd setup: it writes AGENTS.md / CLAUDE.md and would collide with RuleSync.
+"""
+
 rule = f"""---
 targets:
   - "*"
@@ -97,7 +110,8 @@ description: "Generated governance policy shared across AI coding agents."
 {constitution}
 
 {architecture}
-"""
+
+{memory_guidance}"""
 w(f"{fx}/.rulesync/rules/00-governance.md", rule)
 
 def var(name):

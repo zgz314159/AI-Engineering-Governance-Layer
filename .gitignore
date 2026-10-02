@@ -34,6 +34,13 @@ fixtures/**/.github/
 # `aegl resume` deterministic (see reports/V1.3-CONTINUITY-LAYER-REPORT.md).
 .aegl/continuity/
 
+# AEGL Persistent Work Memory (v1.4): Beads/Dolt runtime data is a local,
+# machine-specific database. Never commit the DB, gate locks or caches — a
+# fresh clone starts with no work graph (BEADS_DIR=<root>/.aegl/beads).
+.aegl/beads/
+.aegl/beads.gate.lock
+.aegl/*.gate.lock*
+
 # Command Code session/tool state (never committed).
 .commandcode/
 
