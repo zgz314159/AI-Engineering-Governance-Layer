@@ -8,6 +8,13 @@ Commands:
   aegl verify  <project>            Run the adapter's governance gate.
   aegl detach  <project> [--dry-run] Remove only AEGL-created integration.
 
+Continuity Layer (v1.3):
+  aegl status   [--root R] [--json]          Current machine facts + handoff age.
+  aegl handoff  [--root R] [--goal ...] ...  Write a resumable session handoff.
+  aegl resume   [--root R] [--json]          Lightweight handoff consistency check.
+  aegl continuity history [--root R] [--json]  List handoff snapshots.
+  aegl continuity check    [--root R] [--json]  Diagnostic schema check (never a gate).
+
 The core never scans a parent directory: it only touches the path the user names.
 """
 from __future__ import annotations
@@ -21,6 +28,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ADAPTERS_DIR = ROOT / "adapters"
 IMPLEMENTED = ["android", "kotlin"]  # detection priority order
+
+# The Continuity Layer (v1.3) ships with the core.
+from continuity import commands as continuity  # noqa: E402
 
 
 def _load_adapter(lang: str):
@@ -132,9 +142,39 @@ def cmd_detach(args) -> int:
     return _emit({"adapter": lang, **result}, 0 if "error" not in result else 4)
 
 
+def _croot(args) -> Path:
+    return Path(args.root).resolve()
+
+
+def cmd_status(args) -> int:
+    return continuity.do_status(_croot(args), args.json)
+
+
+def cmd_handoff(args) -> int:
+    return continuity.do_handoff(_croot(args), args)
+
+
+def cmd_resume(args) -> int:
+    return continuity.do_resume(_croot(args), args.json)
+
+
+def cmd_continuity(args) -> int:
+    root = _croot(args)
+    if args.continuity_command == "history":
+        return continuity.do_history(root, args.json)
+    if args.continuity_command == "check":
+        return continuity.do_check(root, args.json)
+    return _emit({"error": f"unknown continuity command: {args.continuity_command}"}, 2)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aegl", description="AEGL target-project governance CLI")
     sub = p.add_subparsers(dest="command", required=True)
+
+    def add_continuity_args(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--root", default=str(ROOT),
+                            help="Project root whose .aegl/continuity is used (default: AEGL root)")
+        parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
 
     sub.add_parser("adapters", help="List adapter descriptors").set_defaults(func=cmd_adapters)
     sub.add_parser("version", help="Print the AEGL version").set_defaults(func=cmd_version)
@@ -157,6 +197,34 @@ def build_parser() -> argparse.ArgumentParser:
     pd.add_argument("project")
     pd.add_argument("--dry-run", action="store_true", dest="dry_run")
     pd.set_defaults(func=cmd_detach)
+
+    # --- Continuity Layer (v1.3) --------------------------------------------
+    ps = sub.add_parser("status", help="Show current project facts and handoff age")
+    add_continuity_args(ps)
+    ps.set_defaults(func=cmd_status)
+
+    ph = sub.add_parser("handoff", help="Write a resumable session handoff")
+    add_continuity_args(ph)
+    ph.add_argument("--goal", help="Current goal (semantic)")
+    ph.add_argument("--task", help="Current task (semantic)")
+    ph.add_argument("--phase", help="Current phase name (semantic)")
+    ph.add_argument("--next", help="Next action (semantic)")
+    ph.add_argument("--next-command", dest="next_command", help="Command to run next")
+    ph.add_argument("--do-not-repeat", dest="do_not_repeat", action="append",
+                    help="Add a 'do not repeat' item (repeatable)")
+    ph.set_defaults(func=cmd_handoff)
+
+    pr = sub.add_parser("resume", help="Lightweight handoff consistency check")
+    add_continuity_args(pr)
+    pr.set_defaults(func=cmd_resume)
+
+    pc = sub.add_parser("continuity", help="Continuity Layer utilities")
+    csub = pc.add_subparsers(dest="continuity_command", required=True)
+    for name, help_text in (("history", "List handoff snapshots"),
+                            ("check", "Diagnose the handoff (never a release gate)")):
+        cp = csub.add_parser(name, help=help_text)
+        add_continuity_args(cp)
+    pc.set_defaults(func=cmd_continuity)
 
     return p
 
