@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# aegl-ai — the REAL AI launch entry.
+#
+# The AI process itself AND every child it spawns run inside the OS sandbox under
+# this entry (unlike `controller probe`, which is a trusted-controller primitive,
+# not an AI entry). Canonical projects are read-only, host credential paths are
+# masked, and the environment is a fixed whitelist.
+#
+# Cloud models need network + credentials. This entry handles them explicitly and
+# FAILS CLOSED where it cannot be done safely:
+#   * credential: only from a per-task file `<task>/model-credential` (mode 600),
+#     bound into the sandbox and referenced by $AEGL_MODEL_CREDENTIAL_FILE — never
+#     from the host environment;
+#   * network: `--net off` (default) unshares the network namespace. `--net cloud`
+#     requires egress filtering, which bubblewrap cannot provide and which needs a
+#     host firewall/netns privilege this user does not have -> BLOCKED.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+PROJECTS_ROOT="${PROJECTS_ROOT:-$(cd "$AEGL_ROOT/.." && pwd)}"
+TASKS_ROOT="${AEGL_TASKS_ROOT:-${AEGL_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/aegl}/tasks}"
+BWRAP="${BWRAP:-/usr/bin/bwrap}"
+SANDBOX_PATH="${SANDBOX_PATH:-$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+MASK_DIRS=(.ssh .aws .gnupg .config .commandcode .hermes .local/share/keyrings .docker .kube .password-store .mozilla)
+MASK_FILES=(.netrc .git-credentials .bash_history .zsh_history .python_history .pgpass .npmrc)
+
+say() { printf '%s\n' "$*"; }
+die() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
+task_field() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2"; }
+
+# sandbox_exec <worktree> <scratch> <gradle_home> <net off|cloud> <cmd...>
+sandbox_exec() {
+  local wt="$1" scratch="$2" gh="$3" net="$4"; shift 4
+  [ -x "$BWRAP" ] || die "sandbox backend absent ($BWRAP) — refusing to launch the AI unsandboxed"
+  mkdir -p "$scratch/home" "$scratch/tmp" "$gh"
+  local args=( --ro-bind / / --dev /dev --proc /proc
+               --bind "$wt" "$wt" --bind "$scratch" "$scratch" --bind "$gh" "$gh" )
+  local p
+  for p in "${MASK_DIRS[@]}";  do [ -d "$HOME/$p" ] && args+=( --tmpfs "$HOME/$p" ); done
+  for p in "${MASK_FILES[@]}"; do [ -e "$HOME/$p" ] && args+=( --ro-bind /dev/null "$HOME/$p" ); done
+  # mask the controller token so the sandboxed AI can never read it
+  local tf="${AEGL_CONTROLLER_TOKEN_FILE:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/aegl-controller.token}"
+  [ -e "$tf" ] && args+=( --ro-bind /dev/null "$tf" )
+  args+=( --clearenv
+          --setenv PATH "$SANDBOX_PATH"
+          --setenv HOME "$scratch/home"
+          --setenv TMPDIR "$scratch/tmp"
+          --setenv GRADLE_USER_HOME "$gh"
+          --setenv LANG "${LANG:-C.UTF-8}"
+          --setenv USER sandbox
+          --setenv AEGL_AI_SANDBOX 1
+          --setenv MISE_DATA_DIR "${MISE_DATA_DIR:-$HOME/.local/share/mise}"
+          --setenv MISE_CACHE_DIR "${MISE_CACHE_DIR:-$HOME/.cache/mise}" )
+  [ -n "${AEGL_MODEL_CREDENTIAL_FILE:-}" ] && args+=( --setenv AEGL_MODEL_CREDENTIAL_FILE "$AEGL_MODEL_CREDENTIAL_FILE" )
+  # network: unshare unless the caller explicitly requests cloud egress
+  if [ "$net" = "cloud" ]; then args+=( --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup )
+  else args+=( --unshare-all ); fi
+  args+=( --die-with-parent --chdir "$wt" )
+  "$BWRAP" "${args[@]}" "$@"
+}
+
+ai_run() {
+  local task="" net="off" cmd=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --task) task="$2"; shift 2 ;;
+      --net) net="$2"; shift 2 ;;
+      --) shift; cmd=("$@"); break ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -n "$task" ] || die "usage: aegl-ai run --task <id> [--net off|cloud] -- <ai-cmd...>"
+  [ "${#cmd[@]}" -gt 0 ] || die "no AI command given"
+  local td="$TASKS_ROOT/$task"
+  [ -f "$td/task.json" ] || die "no such task: $task"
+  local wt scratch gh
+  wt="$(task_field "$td/task.json" worktree)"; scratch="$(task_field "$td/task.json" scratch)"; gh="$(task_field "$td/task.json" gradle_home)"
+
+  local cred="$td/model-credential"
+  if [ -f "$cred" ]; then
+    [ "$(stat -c '%a' "$cred")" = "600" ] || die "model credential $cred must be mode 600"
+    # expose a copy inside the sandbox scratch (never the host env)
+    install -m 0400 "$cred" "$scratch/model-credential"
+    export AEGL_MODEL_CREDENTIAL_FILE="$scratch/model-credential"
+  fi
+
+  if [ "$net" = "cloud" ]; then
+    die "cloud/network mode cannot be made safe: bubblewrap cannot filter egress, and an egress proxy/firewall needs a host privilege this user lacks (no sudo, no netns capability). Precise condition to unblock: a host-level allowlist egress proxy (e.g. a per-task HTTP(S) proxy on loopback) plus firewall rules restricting the sandbox to it. Until then cloud models must run with --net off."
+  fi
+
+  say "AI_ENTRY sandbox=on net=$net task=$task"
+  sandbox_exec "$wt" "$scratch" "$gh" "$net" "${cmd[@]}"
+}
+
+case "${1:-}" in
+  run) shift; ai_run "$@" ;;
+  *) sed -n '2,8p' "$0"; exit 2 ;;
+esac
