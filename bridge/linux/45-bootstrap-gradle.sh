@@ -11,7 +11,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE="$ROOT/fixture"
 
 GRADLE_VERSION="$(python3 -c 'import json;print(json.load(open("'"$ROOT"'/versions.json"))["gradle"]["version"])')"
-ZIP_URL="$(python3 -c 'import json;print(json.load(open("'"$ROOT"'/versions.json"))["gradle"]["distributionUrl"])')"
+MIRROR_URL="$(python3 -c 'import json;print(json.load(open("'"$ROOT"'/versions.json"))["gradle"]["distributionUrl"])')"
+OFFICIAL_URL="$(python3 -c 'import json;d=json.load(open("'"$ROOT"'/versions.json"))["gradle"];print(d.get("officialDistributionUrl", d["distributionUrl"]))')"
 EXPECTED_SHA="$(python3 -c 'import json;print(json.load(open("'"$ROOT"'/versions.json"))["gradle"]["sha256"])')"
 
 if [ -f "$FIXTURE/gradlew" ]; then
@@ -19,14 +20,22 @@ if [ -f "$FIXTURE/gradlew" ]; then
     exit 0
 fi
 
-CACHE="$ROOT/.cache"
+# Downloads/caches resolve outside the project tree (XDG cache) so bootstrap
+# never writes generated content into the checkout. Override with AEGL_GRADLE_CACHE_DIR.
+AEGL_CACHE_HOME="${AEGL_CACHE_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/aegl"
+CACHE="${AEGL_GRADLE_CACHE_DIR:-$AEGL_CACHE_HOME/gradle}"
 mkdir -p "$CACHE"
 ZIP="$CACHE/gradle-$GRADLE_VERSION-bin.zip"
 UNPACK="$CACHE/gradle-$GRADLE_VERSION"
 
 if [ ! -f "$ZIP" ]; then
-    echo "[Gradle] downloading $ZIP_URL"
-    curl -fL --retry 5 --retry-delay 3 -o "$ZIP" "$ZIP_URL"
+    echo "[Gradle] downloading $MIRROR_URL (mainland mirror)"
+    if ! curl -fL --retry 5 --retry-delay 3 -o "$ZIP" "$MIRROR_URL"; then
+        echo "[Gradle] mirror failed; one official fallback: $OFFICIAL_URL"
+        rm -f "$ZIP"
+        curl -fL --retry 5 --retry-delay 3 -o "$ZIP" "$OFFICIAL_URL" \
+            || { echo "ERROR: Gradle download failed from mirror and official source" >&2; exit 1; }
+    fi
 fi
 
 ACTUAL_SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
@@ -46,6 +55,10 @@ if [ ! -x "$GRADLE_BIN" ]; then
     exit 1
 fi
 
-"$GRADLE_BIN" -p "$FIXTURE" wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
-echo "[OK] Gradle wrapper generated."
+"$GRADLE_BIN" -p "$FIXTURE" wrapper \
+    --gradle-version "$GRADLE_VERSION" \
+    --distribution-type bin \
+    --gradle-distribution-url "$MIRROR_URL" \
+    --gradle-distribution-sha256-sum "$EXPECTED_SHA"
+echo "[OK] Gradle wrapper generated (mirror URL + official SHA-256)."
 echo "GRADLE-WRAPPER: PASS"

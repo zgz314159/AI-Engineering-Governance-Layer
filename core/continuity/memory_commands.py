@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import memory, secrets, state
+from . import memory, paths, secrets, state
 
 INSTALL_GUIDANCE = (
     "Beads CLI ('bd') is not available. AEGL Continuity still works fully.\n"
@@ -283,7 +283,7 @@ def do_disable(root: Path, as_json: bool = False) -> int:
     cfg["memoryBackend"] = "none"
     state.save_config(root, cfg)
 
-    beads_dir = (cfg.get("memory", {}) or {}).get("beads", {}).get("dir", ".aegl/beads")
+    beads_dir = (cfg.get("memory", {}) or {}).get("beads", {}).get("dir") or str(paths.beads_dir(root))
     if as_json:
         _emit({"ok": True, "backend": "none", "previous": previous,
                "dataPreserved": beads_dir})

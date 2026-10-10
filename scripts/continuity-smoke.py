@@ -42,6 +42,8 @@ class Failure(Exception):
 def aegl(root: Path, *args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["AEGL_CONTINUITY_SKIP_CI"] = "1"
+    # Pin continuity to the isolated test root (production defaults to XDG state).
+    env["AEGL_CONTINUITY_DIR"] = str(root / ".aegl" / "continuity")
     env.pop("PYTHONPATH", None)
     return subprocess.run(
         [sys.executable, str(AEGL_PY), *args, "--root", str(root)],

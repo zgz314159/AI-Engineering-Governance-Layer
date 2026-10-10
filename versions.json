@@ -25,8 +25,15 @@
   },
   "gradle": {
     "version": "8.12.1",
-    "distributionUrl": "https://services.gradle.org/distributions/gradle-8.12.1-bin.zip",
+    "distributionUrl": "https://mirrors.cloud.tencent.com/gradle/gradle-8.12.1-bin.zip",
+    "officialDistributionUrl": "https://services.gradle.org/distributions/gradle-8.12.1-bin.zip",
     "sha256": "8d97a97984f6cbd2b85fe4c60a743440a347544bf18818048e611f5288d46c94"
+  },
+  "gradleAndroidFixture": {
+    "version": "8.13",
+    "distributionUrl": "https://mirrors.cloud.tencent.com/gradle/gradle-8.13-bin.zip",
+    "officialDistributionUrl": "https://services.gradle.org/distributions/gradle-8.13-bin.zip",
+    "sha256": "20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78"
   },
   "kotlin": "2.0.21",
   "junit": "5.11.4",

@@ -1,0 +1,32 @@
+# AEGL recovery toolchain pins (single source of truth).
+#
+# `mise` provisions these command-line tools for the three systems. It does NOT
+# replace the Gradle Wrapper (KeepLab-Relay/gradle/wrapper) or the Android SDK —
+# those stay authoritative and are provisioned by the recovery driver.
+#
+# Versions match the verified baseline. The recovery driver runs the gates under
+# `mise exec`, so a system PATH tool of a different version can never be used by
+# accident.
+[tools]
+java = "temurin-21.0.12+8.0.LTS"
+python = "3.14.4"
+node = "24.21.0"
+uv = "0.12.23"
+pnpm = "11.20.0"
+
+# NOTE: no [env] overrides here on purpose. AEGL state/data/cache resolve through
+# core/continuity/paths.py: ${AEGL_*_HOME} (full root) or ${XDG_*_HOME}/aegl.
+# Setting AEGL_*_HOME here would both force writes into $HOME (breaking isolated
+# test workspaces) and produce a duplicated `aegl/aegl` segment.
+
+[tasks.doctor]
+description = "Read-only diagnosis of the three systems (REQUIRED vs OPTIONAL)"
+run = "bash bin/aegl-recovery doctor"
+
+[tasks.bootstrap]
+description = "Provision the locked toolchain (mise install --locked), fail-closed"
+run = "bash bin/aegl-recovery bootstrap"
+
+[tasks.test]
+description = "Bounded clean-copy verification of the three systems"
+run = "bash bin/aegl-recovery test"

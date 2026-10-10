@@ -51,17 +51,25 @@ def _base_env(env: dict | None) -> dict:
     return out
 
 
+def _pinned_env(root: Path, env: dict | None) -> dict:
+    out = _base_env(env)
+    # Pin continuity/beads to the isolated test root (production defaults to XDG state).
+    out["AEGL_CONTINUITY_DIR"] = str(root / ".aegl" / "continuity")
+    out["AEGL_BEADS_DIR"] = str(root / ".aegl" / "beads")
+    return out
+
+
 def aegl(root: Path, *args: str, env: dict | None = None, timeout: int = 180):
     return subprocess.run(
         [sys.executable, str(AEGL_PY), *args, "--root", str(root)],
-        text=True, capture_output=True, env=_base_env(env), timeout=timeout,
+        text=True, capture_output=True, env=_pinned_env(root, env), timeout=timeout,
     )
 
 
 def aegl_bd(root: Path, *args: str, env: dict | None = None, timeout: int = 180):
     return subprocess.run(
         [sys.executable, str(AEGL_PY), "bd", "--root", str(root), *args],
-        text=True, capture_output=True, env=_base_env(env), timeout=timeout,
+        text=True, capture_output=True, env=_pinned_env(root, env), timeout=timeout,
     )
 
 

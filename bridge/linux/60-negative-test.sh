@@ -9,7 +9,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE="$ROOT/fixture"
-REPORTS="$ROOT/reports"
+# Generated reports resolve outside the project tree (XDG data). Override with AEGL_REPORTS_DIR.
+AEGL_DATA_HOME="${AEGL_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/aegl"
+REPORTS="${AEGL_REPORTS_DIR:-$AEGL_DATA_HOME/reports}"
 mkdir -p "$REPORTS"
 
 BAD_ARCH="$FIXTURE/src/main/kotlin/com/example/governed/domain/IllegalDependency.kt"

@@ -28,7 +28,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import secrets, state
+from .. import paths, secrets, state
 
 # Exact version the adapter was tested against (see versions.json["beads"]).
 TESTED_VERSION = "1.3.1"
@@ -37,6 +37,8 @@ TESTED_VERSION = "1.3.1"
 SUPPORTED_MAJOR = 1
 SUPPORTED_MINOR = 3
 
+# Legacy in-repo default; the live default resolves through ``paths.beads_dir``
+# (XDG state) unless AEGL_BEADS_DIR or the config ``memory.beads.dir`` pins it.
 DEFAULT_BEADS_DIR = ".aegl/beads"
 DEFAULT_PREFIX = "bd"
 
@@ -116,7 +118,7 @@ class BeadsRunner:
                  binary: str | None = None, env: dict | None = None,
                  timeout: int = TIMEOUT_DEFAULT):
         self.root = Path(root)
-        self.beads_dir = Path(beads_dir) if beads_dir else self.root / DEFAULT_BEADS_DIR
+        self.beads_dir = Path(beads_dir) if beads_dir else paths.beads_dir(self.root)
         self._binary = binary
         self._env_extra = dict(env or {})
         self.timeout = timeout
@@ -235,7 +237,7 @@ class BeadsMemoryBackend:
         self.config = config or {}
         self.root = Path(root) if root else Path.cwd()
         beads_cfg = (self.config.get("memory", {}) or {}).get("beads", {}) or {}
-        rel = beads_cfg.get("dir") or DEFAULT_BEADS_DIR
+        rel = beads_cfg.get("dir") or str(paths.beads_dir(self.root))
         beads_dir = Path(rel)
         if not beads_dir.is_absolute():
             beads_dir = self.root / beads_dir

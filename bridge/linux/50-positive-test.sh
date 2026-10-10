@@ -13,7 +13,10 @@ export PATH="$HOME/.local/bin:$PATH"
 
 cd "$FIXTURE"
 
-mkdir -p "$ROOT/reports"
+# Generated reports resolve outside the project tree (XDG data). Override with AEGL_REPORTS_DIR.
+AEGL_DATA_HOME="${AEGL_DATA_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}}/aegl"
+REPORTS="${AEGL_REPORTS_DIR:-$AEGL_DATA_HOME/reports}"
+mkdir -p "$REPORTS"
 
 echo "[1] Spec Kit runtime"
 uv run --project "$SPEC_KIT" specify version >/dev/null
@@ -52,7 +55,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-python3 - "$ROOT/reports/positive-result.json" <<'PY'
+python3 - "$REPORTS/positive-result.json" <<'PY'
 import json, sys
 json.dump({
     "specKitRuntime": "PASS",

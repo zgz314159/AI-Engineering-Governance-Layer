@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# AEGL task boundary — boundary audit | boundary rulesync deploy | task start|verify|promote|discard
+#                       | controller probe (trusted-controller only)
+#
+# AI work runs ONLY inside a disposable worktree created outside the project under
+# the AEGL XDG state root, under an OS sandbox (bubblewrap) that is fail-closed:
+#   * the whole task process tree runs inside the sandbox (no unsandboxed execution),
+#   * the canonical projects are read-only,
+#   * host credential paths are masked (unreadable),
+#   * the environment is a fixed whitelist (`--clearenv` + explicit --setenv).
+# A promotion gate RE-CLASSIFIES the candidate content at promote time and requires
+# it to be byte-identical to what was verified (no "modified after verify"), covering
+# untracked and ignored files. Only the trusted controller applies the diff.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+PROJECTS_ROOT="${PROJECTS_ROOT:-$(cd "$AEGL_ROOT/.." && pwd)}"
+TASKS_ROOT="${AEGL_TASKS_ROOT:-${AEGL_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/aegl}/tasks}"
+
+BWRAP="${BWRAP:-/usr/bin/bwrap}"
+SANDBOX_PATH="${SANDBOX_PATH:-$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+say() { printf '%s\n' "$*"; }
+die() { printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
+
+resolve_project() {
+  local p="$1"
+  case "$p" in
+    /*) [ -d "$p" ] && { printf '%s' "$p"; return; } ;;
+    *) [ -d "$PROJECTS_ROOT/$p" ] && { printf '%s' "$PROJECTS_ROOT/$p"; return; } ;;
+  esac
+  die "unknown project: $p"
+}
+task_dir() { printf '%s' "$TASKS_ROOT/$1"; }
+task_field() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2"; }
+
+# --------------------------------------------------------------------------- #
+# sandbox (fail closed; whole task tree inside; credentials masked; env whitelisted)
+# --------------------------------------------------------------------------- #
+# Host credential paths that must be UNREADABLE inside the sandbox.
+MASK_DIRS=(.ssh .aws .gnupg .config .commandcode .hermes .local/share/keyrings .docker .kube .password-store .mozilla)
+MASK_FILES=(.netrc .git-credentials .bash_history .zsh_history .python_history .pgpass .npmrc)
+
+sandbox_run() { # sandbox_run <worktree> <scratch> <gradle_home> <cmd...>
+  local wt="$1" scratch="$2" gh="$3"; shift 3
+  [ -x "$BWRAP" ] || die "sandbox backend absent ($BWRAP) — refusing to run unsandboxed"
+  mkdir -p "$scratch/home" "$scratch/tmp" "$gh"
+  local args=( --ro-bind / / --dev /dev --proc /proc
+               --bind "$wt" "$wt" --bind "$scratch" "$scratch" --bind "$gh" "$gh" )
+  # mask credentials (make unreadable)
+  local p
+  for p in "${MASK_DIRS[@]}"; do  [ -d "$HOME/$p" ] && args+=( --tmpfs "$HOME/$p" ); done
+  for p in "${MASK_FILES[@]}"; do [ -e "$HOME/$p" ] && args+=( --ro-bind /dev/null "$HOME/$p" ); done
+  # fixed environment whitelist (no inherited env)
+  args+=( --clearenv
+          --setenv PATH "$SANDBOX_PATH"
+          --setenv HOME "$scratch/home"
+          --setenv TMPDIR "$scratch/tmp"
+          --setenv GRADLE_USER_HOME "$gh"
+          --setenv LANG "${LANG:-C.UTF-8}"
+          --setenv USER sandbox
+          --setenv MISE_DATA_DIR "${MISE_DATA_DIR:-$HOME/.local/share/mise}"
+          --setenv MISE_CACHE_DIR "${MISE_CACHE_DIR:-$HOME/.cache/mise}"
+          --unshare-all --die-with-parent --chdir "$wt" )
+  "$BWRAP" "${args[@]}" "$@"
+}
+
+# manifest of the whole candidate worktree (incl. untracked/ignored), excluding .git
+worktree_manifest() { # <worktree> <outfile>
+  ( cd "$1" && find . -name .git -prune -o -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum 2>/dev/null ) > "$2"
+}
+
+# --------------------------------------------------------------------------- #
+# boundary audit  (returns non-zero when a violation is found)
+# --------------------------------------------------------------------------- #
+boundary_audit() {
+  local bad=0
+  say "AEGL BOUNDARY AUDIT (read-only)"
+  say "tasks_root=$TASKS_ROOT"
+  say "sandbox=$BWRAP ($( "$BWRAP" --version 2>/dev/null || echo missing))"
+  [ -x "$BWRAP" ] || { say "  sandbox missing"; bad=$((bad+1)); }
+  for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do
+    local d="$PROJECTS_ROOT/$p"
+    [ -d "$d" ] || { say "  MISSING project: $p"; bad=$((bad+1)); continue; }
+    local dirty; dirty="$(git -C "$d" status --porcelain 2>/dev/null | grep -vE '^ M references/' | wc -l)"
+    say "  $p: git=$([ -d "$d/.git" ] && echo yes || echo no) dirty=$dirty"
+  done
+  if [ -f "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack/scripts/verify-layout.sh" ]; then
+    local v; v="$(bash "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack/scripts/verify-layout.sh" --root "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack" 2>&1 | tail -1)"
+    say "  stack layout: $v"
+    case "$v" in *violations=0*) : ;; *) say "  layout violations present"; bad=$((bad+1));; esac
+  fi
+  local rsp; rsp="$(python3 -c "import json;print(json.load(open('$AEGL_ROOT/versions.json'))['ruleSync']['ref'])" 2>/dev/null)"
+  say "  rulesync pin: $rsp"
+  if grep -rIl 'ruler' "$AEGL_ROOT/governance" "$AEGL_ROOT/bridge" "$AEGL_ROOT/scripts" "$AEGL_ROOT/core" 2>/dev/null | grep -q .; then
+    say "  ruler: PRESENT (unexpected)"; bad=$((bad+1))
+  else say "  ruler: absent (RuleSync only)"; fi
+  say "BOUNDARY_AUDIT_BAD=$bad"
+  [ "$bad" -eq 0 ]
+}
+
+# --------------------------------------------------------------------------- #
+# RuleSync: deploy the AEGL governance rules to the target agents
+# --------------------------------------------------------------------------- #
+rulesync_deploy() {
+  local cli="$AEGL_ROOT/upstream/rulesync/dist/cli/index.js"
+  local src="$AEGL_ROOT/fixture/.rulesync/rules/00-governance.md"
+  [ -f "$src" ] || { say "RULESYNC_DEPLOY=NOT_DONE (no rendered governance rule at $src; run AEGL bootstrap)"; return 1; }
+  if [ ! -f "$cli" ]; then
+    say "RULESYNC_DEPLOY rebooting rulesync CLI (pnpm install + build) ..."
+    ( cd "$AEGL_ROOT/upstream/rulesync" && CI=true npx --yes pnpm@11.20.0 install --frozen-lockfile >/dev/null 2>&1 && CI=true npx --yes pnpm@11.20.0 run build >/dev/null 2>&1 ) \
+      || { say "RULESYNC_DEPLOY=NOT_DONE (could not rebuild the pinned RuleSync v25 CLI)"; return 1; }
+  fi
+  # clobber-safe: refuse to overwrite an existing, non-RuleSync agent file
+  local p d
+  for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do
+    d="$PROJECTS_ROOT/$p"
+    for f in AGENTS.md CLAUDE.md; do
+      if [ -f "$d/$f" ] && ! head -2 "$d/$f" 2>/dev/null | grep -qi 'rulesync\|generated'; then
+        say "RULESYNC_DEPLOY=NOT_DONE (would clobber existing $p/$f)"; return 1
+      fi
+    done
+  done
+  local deployed=0
+  for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do
+    d="$PROJECTS_ROOT/$p"
+    mkdir -p "$d/.rulesync/rules"
+    cp "$src" "$d/.rulesync/rules/00-governance.md"
+    cat > "$d/rulesync.jsonc" <<'EOF'
+{ "targets": ["claudecode","codexcli","cursor"], "features": ["rules"], "outputRoots": ["."], "delete": true }
+EOF
+    ( cd "$d" && node "$cli" generate --targets claudecode --features rules >/dev/null 2>&1 \
+                 && node "$cli" generate --targets codexcli  --features rules >/dev/null 2>&1 \
+                 && node "$cli" generate --targets cursor    --features rules >/dev/null 2>&1 ) \
+      && deployed=$((deployed+1)) || say "  deploy failed: $p"
+  done
+  say "RULESYNC_DEPLOY=OK projects=$deployed"
+  [ "$deployed" -ge 1 ]
+}
+
+# --------------------------------------------------------------------------- #
+# task start
+# --------------------------------------------------------------------------- #
+task_start() {
+  local proj name
+  proj="$(resolve_project "${1:?task start <project> <name>}")"; name="${2:?name required}"
+  case "$name" in *[!A-Za-z0-9._-]*) die "name must be [A-Za-z0-9._-]" ;; esac
+  [ -d "$proj/.git" ] || die "project is not a git baseline: $proj"
+  git -C "$proj" rev-parse HEAD >/dev/null 2>&1 || die "no baseline commit in $proj"
+  local id="$name-$(date +%s)"; local td; td="$(task_dir "$id")"; local wt="$td/worktree"
+  mkdir -p "$td" "$td/scratch" "$td/gradle-home"
+  git -C "$proj" worktree add -q -b "aegl-task/$name" "$wt" HEAD || die "worktree create failed"
+  python3 - "$td/task.json" "$id" "$proj" "$name" "$wt" "$td/scratch" "$td/gradle-home" "$(git -C "$proj" rev-parse HEAD)" <<'PY'
+import json,sys
+p,id_,proj,name,wt,scratch,gh,base=sys.argv[1:9]
+json.dump({"id":id_,"project":proj,"name":name,"worktree":wt,"scratch":scratch,
+           "gradle_home":gh,"base":base,"branch":f"aegl-task/{name}"}, open(p,"w"), indent=2)
+PY
+  say "TASK_STARTED id=$id"; say "  worktree=$wt"; say "  scratch=$td/scratch"
+}
+
+# --------------------------------------------------------------------------- #
+# sandboxed task execution (shared by task verify and the trusted controller)
+# --------------------------------------------------------------------------- #
+_verify_paths() { td="$(task_dir "$1")"; [ -f "$td/task.json" ] || die "no such task: $1"
+  wt="$(task_field "$td/task.json" worktree)"; scratch="$(task_field "$td/task.json" scratch)"
+  gh="$(task_field "$td/task.json" gradle_home)"; proj="$(task_field "$td/task.json" project)"; }
+
+_run_sandboxed() { # <id> <cmd>  -> writes $td/verify.log, verify.manifest, verify.status
+  local id="$1" cmd="$2" td wt scratch gh proj
+  _verify_paths "$id"
+  # sandbox smoke + credential/env assertions, fail closed.
+  # Host paths are expanded by the CONTROLLER here, then evaluated inside the sandbox.
+  local smoke
+  # canonical read-only (11), credential masked (12), env whitelist present (13)
+  smoke="set -e; echo ok > \"\$TMPDIR/probe\"; [ ! -w '$PROJECTS_ROOT' ] || exit 11; [ ! -r '$HOME/.commandcode/auth.json' ] || exit 12; env | grep -q '^PATH=' || exit 13; echo SANDBOX_OK"
+  sandbox_run "$wt" "$scratch" "$gh" bash -c "$smoke" >"$td/sandbox-smoke.log" 2>&1 \
+    || { grep -q SANDBOX_OK "$td/sandbox-smoke.log" || die "sandbox smoke failed (see $td/sandbox-smoke.log)"; }
+  grep -q SANDBOX_OK "$td/sandbox-smoke.log" || die "sandbox smoke failed (see $td/sandbox-smoke.log)"
+  local rc=0
+  sandbox_run "$wt" "$scratch" "$gh" bash -lc "$cmd" >"$td/verify.log" 2>&1 || rc=$?
+  worktree_manifest "$wt" "$td/verify.manifest"
+  if [ "$rc" = 0 ]; then printf 'PASS\n' > "$td/verify.status"; else printf 'FAIL\n' > "$td/verify.status"; fi
+  return "$rc"
+}
+
+# task verify — the AI-facing action. The test command is the PROJECT's declared task
+# only; no caller-supplied override is honoured here.
+task_verify() {
+  local id="${1:?task verify <id>}" td wt
+  _verify_paths "$id"
+  local cmd
+  if [ -f "$wt/mise.toml" ] && have mise; then cmd='mise run test'
+  else
+    case "$(basename "$proj")" in
+      KeepLab-Relay) cmd='./gradlew -p backend test build --no-daemon --console=plain' ;;
+      *)             cmd='bash scripts/run-tests.sh --root "$PWD"' ;;
+    esac
+  fi
+  say "TASK_VERIFY sandbox=on id=$id"
+  _run_sandboxed "$id" "$cmd" || { say "TASK_VERIFY=FAIL (tests rc)"; return 1; }
+  local nrej; nrej="$(classify "$id" "$td/verify-changes.json" | tail -1)"
+  say "TASK_VERIFY rejected_changes=$nrej"
+  say "TASK_VERIFY=PASS"
+}
+
+# trusted-controller primitive: run an arbitrary command in the sandbox for a task.
+# Guarded by an operator-set token; it is NOT part of the AI-facing boundary.
+controller_probe() {
+  [ "${AEGL_TRUSTED_CONTROLLER:-}" = "1" ] || die "controller probe requires AEGL_TRUSTED_CONTROLLER=1 (operator only)"
+  local id="${1:?controller probe <id> <cmd>}"; shift
+  local td wt scratch gh proj
+  _verify_paths "$id"
+  sandbox_run "$wt" "$scratch" "$gh" bash -lc "$1"
+}
+
+# --------------------------------------------------------------------------- #
+# classification (fresh, at promote time) — includes ignored + untracked
+# --------------------------------------------------------------------------- #
+classify() { # <id> <outfile>  -> prints rejected count (last line)
+  local id="$1" out="$2" td wt scratch gh proj
+  _verify_paths "$id"
+  python3 - "$wt" "$out" <<'PY'
+import json,os,re,subprocess,sys
+wt,out=sys.argv[1],sys.argv[2]
+st=subprocess.run(["git","-C",wt,"status","--porcelain","--ignored"],capture_output=True,text=True).stdout
+rows=[]
+for line in st.splitlines():
+    code,path=line[:2],line[3:].strip()
+    if path.startswith(".git") or path==".git": continue
+    rows.append({"status":code,"path":path})
+GEN=re.compile(r'(^|/)(build|\.gradle|\.kotlin|node_modules|\.cache|\.pytest_cache)/|\.(apk|aab|class|pyc|log|png|jpe?g|keystore|pem|p12)$|(^|/)secrets\.json$|(^|/)credentials\.json$|(^|/)\.env($|\.)')
+WT=os.path.realpath(wt)
+def bad(r):
+    p=r["path"]; code=r["status"]
+    if p.startswith("/") or ".." in p.split("/"): return "path_escape"
+    if code.strip()=="!!": return "ignored_file_present"
+    if GEN.search(p): return "generated_or_secret"
+    fp=os.path.join(wt,p)
+    if os.path.islink(fp) and not os.path.realpath(fp).startswith(WT+os.sep): return "symlink_escape"
+    if os.path.isfile(fp) and os.path.getsize(fp) > 5_000_000: return "oversize"
+    if "D" in code: return "deleted_project_body"
+    return None
+for r in rows: r["reject"]=bad(r)
+json.dump({"changes":rows,"rejected":[r for r in rows if r["reject"]]}, open(out,"w"), indent=2)
+print(len([r for r in rows if r["reject"]]))
+PY
+}
+
+# --------------------------------------------------------------------------- #
+# task promote — re-classify + content-pin before applying
+# --------------------------------------------------------------------------- #
+task_promote() {
+  local id="${1:?task promote <id>}" td wt proj branch
+  _verify_paths "$id"
+  branch="$(task_field "$td/task.json" branch)"
+  [ "$(cat "$td/verify.status" 2>/dev/null)" = "PASS" ] || die "task verify has not PASSed"
+  [ -f "$td/verify.manifest" ] || die "no verify manifest (re-run task verify)"
+  # "modified after verify": candidate content must be byte-identical to what was verified
+  worktree_manifest "$wt" "$td/promote.manifest"
+  if ! cmp -s "$td/verify.manifest" "$td/promote.manifest"; then
+    say "PROMOTE_REJECTED modified_after_verify"; return 3
+  fi
+  # fresh classification over changed + ignored + untracked
+  local nrej; nrej="$(classify "$id" "$td/promote-changes.json" | tail -1)"
+  [ "$nrej" = 0 ] || { say "PROMOTE_REJECTED reasons=$(python3 -c "import json;print(sorted({c['reject'] for c in json.load(open('$td/promote-changes.json'))['rejected']}))")"; return 3; }
+  if [ -f "$wt/scripts/verify-layout.sh" ]; then
+    bash "$wt/scripts/verify-layout.sh" --root "$wt" --quiet || { say "PROMOTE_REJECTED layout"; return 3; }
+  fi
+  git -C "$wt" add -A || { say "PROMOTE_FAILED add"; return 4; }
+  git -C "$wt" -c user.email=aegl@local.invalid -c user.name="AEGL Controller" \
+      commit -qm "aegl-task($id): approved change" || { say "PROMOTE_FAILED commit"; return 4; }
+  git -C "$proj" merge --no-ff -m "aegl-promote: $id" "$branch" >/dev/null 2>&1 || { say "PROMOTE_FAILED merge"; return 4; }
+  say "PROMOTE=APPLIED id=$id project=$proj"
+  task_discard "$id" >/dev/null 2>&1 || true
+}
+
+task_discard() {
+  local id="${1:?task discard <id>}" td wt proj branch
+  _verify_paths "$id"
+  branch="$(task_field "$td/task.json" branch)"
+  git -C "$proj" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+  git -C "$proj" branch -D "$branch" >/dev/null 2>&1 || true
+  rm -rf "$td"
+  say "TASK_DISCARDED id=$id"
+}
+
+case "${1:-}" in
+  boundary) shift; sub="${1:-}"; shift || true
+            case "$sub" in
+              audit) boundary_audit ;;
+              rulesync) [ "${1:-}" = deploy ] || die "usage: boundary rulesync deploy"; rulesync_deploy ;;
+              *) die "usage: boundary {audit|rulesync deploy}" ;;
+            esac ;;
+  task) shift; sub="${1:-}"; shift || true
+        case "$sub" in
+          start) task_start "$@" ;; verify) task_verify "$@" ;;
+          promote) task_promote "$@" ;; discard) task_discard "$@" ;;
+          *) die "usage: task {start|verify|promote|discard}" ;;
+        esac ;;
+  controller) shift; [ "${1:-}" = probe ] || die "usage: controller probe <id> <cmd>"; shift; controller_probe "$@" ;;
+  *) sed -n '2,18p' "$0"; exit 2 ;;
+esac

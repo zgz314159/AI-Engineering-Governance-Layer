@@ -15,6 +15,9 @@ SPEC_KIT="$ROOT/upstream/spec-kit"
 AG="$ROOT/upstream/architecture-guard"
 RULESYNC="$ROOT/upstream/rulesync"
 export PATH="$HOME/.local/bin:$PATH"
+# pnpm aborts removing an existing node_modules without a TTY; force non-interactive
+# (CI) mode so the recovery bootstrap runs headless.
+export CI="${CI:-true}"
 
 echo "[Spec Kit] preparing local uv environment"
 uv sync --project "$SPEC_KIT"

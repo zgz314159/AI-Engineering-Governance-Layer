@@ -5,7 +5,8 @@ $Root = Resolve-Path "$PSScriptRoot\.."
 $Fixture = "$Root\fixture"
 $Versions = Get-Content "$Root\versions.json" -Raw | ConvertFrom-Json
 $GradleVersion = $Versions.gradle.version
-$ZipUrl = $Versions.gradle.distributionUrl
+$MirrorUrl = $Versions.gradle.distributionUrl
+$OfficialUrl = if ($Versions.gradle.officialDistributionUrl) { $Versions.gradle.officialDistributionUrl } else { $MirrorUrl }
 $ExpectedSha = $Versions.gradle.sha256
 
 if (Test-Path "$Fixture\gradlew.bat") {
@@ -19,8 +20,14 @@ $Zip = "$Cache\gradle-$GradleVersion-bin.zip"
 $Unpack = "$Cache\gradle-$GradleVersion"
 
 if (-not (Test-Path $Zip)) {
-    Write-Host "[Gradle] downloading $ZipUrl"
-    Invoke-WebRequest -Uri $ZipUrl -OutFile $Zip
+    Write-Host "[Gradle] downloading $MirrorUrl (mainland mirror)"
+    try {
+        Invoke-WebRequest -Uri $MirrorUrl -OutFile $Zip
+    } catch {
+        Write-Host "[Gradle] mirror failed; one official fallback: $OfficialUrl"
+        Remove-Item -Force -ErrorAction SilentlyContinue $Zip
+        Invoke-WebRequest -Uri $OfficialUrl -OutFile $Zip
+    }
 }
 
 $ActualSha = (Get-FileHash $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -38,5 +45,5 @@ if (-not (Test-Path $GradleBat)) {
     throw "Cannot find $GradleBat"
 }
 
-& $GradleBat -p $Fixture wrapper --gradle-version $GradleVersion --distribution-type bin
-Write-Host "[OK] Gradle wrapper generated."
+& $GradleBat -p $Fixture wrapper --gradle-version $GradleVersion --distribution-type bin --gradle-distribution-url $MirrorUrl --gradle-distribution-sha256-sum $ExpectedSha
+Write-Host "[OK] Gradle wrapper generated (mirror URL + official SHA-256)."

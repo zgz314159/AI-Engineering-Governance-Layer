@@ -1,0 +1,11 @@
+{
+  "mise": {
+    "version": "2026.10.3",
+    "installNote": "The bootstrap installs mise ONLY from this pinned release asset and verifies the official SHA-256 before use. There is no unverified `curl | sh` path; if the asset or checksum is unavailable the bootstrap fails closed.",
+    "linuxAmd64": {
+      "asset": "mise-v2026.10.3-linux-x64.tar.gz",
+      "url": "https://github.com/jdx/mise/releases/download/v2026.10.3/mise-v2026.10.3-linux-x64.tar.gz",
+      "sha256": "04147c68e946902f5226dfdcd54d19907aed3cf54d95b2f27d2b9c778bb26f9e"
+    }
+  }
+}

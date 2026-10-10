@@ -11,9 +11,11 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import secrets
+from . import paths, secrets
 
 SCHEMA_VERSION = 1
+# Legacy in-repo location; continuity now resolves through ``paths`` (XDG state)
+# unless AEGL_CONTINUITY_DIR pins it (see core/continuity/paths.py).
 CONTINUITY_REL = Path(".aegl") / "continuity"
 
 DEFAULT_CONFIG: dict = {
@@ -29,7 +31,7 @@ DEFAULT_CONFIG: dict = {
     "includeMemoryOnResume": False,
     "memory": {
         "beads": {
-            "dir": ".aegl/beads",
+            "dir": "",
             "prefix": "bd",
             "testedVersion": "1.3.1",
             "readyLimit": 5,
@@ -58,7 +60,7 @@ _HEX_RE = re.compile(r"^[0-9a-fA-F]{4,40}$")
 # --------------------------------------------------------------------------- #
 
 def continuity_dir(root: Path) -> Path:
-    return root / CONTINUITY_REL
+    return paths.continuity_dir(root)
 
 
 def state_path(root: Path) -> Path:

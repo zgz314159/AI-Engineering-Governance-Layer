@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# AEGL recovery driver — doctor | bootstrap | test
+#
+#   doctor     read-only diagnosis. Separates REQUIRED from OPTIONAL host
+#              prerequisites (Docker/Compose is OPTIONAL) and reports resolved
+#              XDG roots, the Gradle mirror/checksum, and the Hermes pin. It
+#              never changes the host.
+#   bootstrap  idempotent provisioning of the REQUIRED prerequisites only, via
+#              `mise install --locked`. mise itself is installed only from the
+#              pinned release asset in recovery/toolchain-pins.json and verified
+#              against its official SHA-256; there is no unverified `curl | sh`
+#              path. Any required-prerequisite failure exits non-zero.
+#   test       bounded verification. It creates a mktemp workspace OUTSIDE the
+#              canonical Projects root, builds three project-body-only clean copies
+#              there, points every XDG/HERMES/GRADLE/output root at the workspace
+#              (or an external XDG dir), runs the gates ONLY inside the copies,
+#              and diffs a read-only inventory of the three canonical projects
+#              before/after (new + modified + deleted must be 0). It never cd's
+#              into a canonical project to build/test, and it deletes only its
+#              own temporary copies.
+#
+# Project roots resolve from this file's location (or PROJECTS_ROOT); no
+# host-specific absolute path is baked in.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+PROJECTS_ROOT="${PROJECTS_ROOT:-$(cd "$AEGL_ROOT/.." && pwd)}"
+STACK="$PROJECTS_ROOT/Google-Android-Agent-Development-Stack"
+KEEPLAB="$PROJECTS_ROOT/KeepLab-Relay"
+PINS="$AEGL_ROOT/recovery/toolchain-pins.json"
+
+ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
+export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"
+
+# Workspace for `test` (global so the EXIT trap can always clean it up).
+WS=""
+
+# `test --only <csv>` restricts the run to the named gates (default: all).
+ONLY=""
+want() { [ -z "$ONLY" ] && return 0; case ",$ONLY," in *",$1,"*) return 0;; *) return 1;; esac; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'FATAL: %s\n' "$*" >&2; return 1; }
+
+pin() { python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(eval('d'+sys.argv[2]))" "$PINS" "$1" 2>/dev/null; }
+
+# --------------------------------------------------------------------------- #
+# doctor
+# --------------------------------------------------------------------------- #
+doctor() {
+  local req_missing=0 opt_missing=0
+  say "AEGL RECOVERY DOCTOR (read-only)"
+  say "projects_root=$PROJECTS_ROOT"
+  say "stack=$STACK"
+  say "keeplab=$KEEPLAB"
+  say "aegl=$AEGL_ROOT"
+  say ""
+  say "== REQUIRED command-line tools =="
+  for t in git java python3 node npm uv pnpm mise; do
+    if have "$t"; then printf '  %-8s REQUIRED  %s\n' "$t" "$(command -v "$t")"
+    else printf '  %-8s REQUIRED  MISSING\n' "$t"; req_missing=$((req_missing+1)); fi
+  done
+  say "== OPTIONAL tools (never block recovery) =="
+  for t in docker adb maestro; do
+    if have "$t"; then printf '  %-8s OPTIONAL  %s\n' "$t" "$(command -v "$t")"
+    else printf '  %-8s OPTIONAL  missing\n' "$t"; opt_missing=$((opt_missing+1)); fi
+  done
+  say ""
+  say "== versions =="
+  have java && say "  java   : $(java -version 2>&1 | head -1)"
+  have python3 && say "  python : $(python3 --version 2>&1)"
+  have node && say "  node   : $(node --version 2>&1)"
+  have uv && say "  uv     : $(uv --version 2>&1)"
+  have pnpm && say "  pnpm   : $(pnpm --version 2>&1)"
+  have mise && say "  mise   : $(mise --version 2>&1 | head -1)"
+  say "  pinned : $(python3 -c "import json;print(json.load(open('$PINS'))['mise']['version'])")"
+  say ""
+  say "== Compose (KeepLab backend) =="
+  say "  backend declares: 'No live PostgreSQL needed' (unit tests use the in-process Ktor test host)."
+  say "  docker: $(have docker && echo "present" || echo "OPTIONAL/absent -> OPTIONAL_NOT_RUN (does not block recovery)")"
+  say ""
+  say "== Hermes pin =="
+  local lock="$STACK/orchestration/hermes/HERMES-LOCK.json"
+  if [ -f "$lock" ] && [ -d "${HERMES_HOME:-$HOME/.hermes}/hermes-agent" ]; then
+    local want got
+    want="$(python3 -c "import json;print(json.load(open('$lock'))['commit_sha'])")"
+    got="$(git -C "${HERMES_HOME:-$HOME/.hermes}/hermes-agent" rev-parse HEAD 2>/dev/null)"
+    say "  pinned=$want"
+    say "  actual=$got"
+    [ "$want" = "$got" ] && say "  PIN: MATCH" || say "  PIN: DRIFT"
+  else say "  MISSING lock or checkout under ${HERMES_HOME:-$HOME/.hermes}"; fi
+  say ""
+  say "REQUIRED_MISSING=$req_missing OPTIONAL_MISSING=$opt_missing"
+}
+
+# --------------------------------------------------------------------------- #
+# bootstrap
+# --------------------------------------------------------------------------- #
+_install_mise_pinned() {
+  local ver url sha tmp
+  ver="$(pin "['mise']['version']")"; url="$(pin "['mise']['linuxAmd64']['url']")"; sha="$(pin "['mise']['linuxAmd64']['sha256']")"
+  [ -n "$ver" ] && [ -n "$url" ] && [ -n "$sha" ] || { die "no pinned mise asset/checksum in $PINS"; return 1; }
+  tmp="$(mktemp -d)"
+  say "  installing mise $ver from pinned asset (verified)"
+  curl -fL --max-time 300 --retry 3 -o "$tmp/mise.tgz" "$url" || { rm -rf "$tmp"; die "mise asset download failed"; return 1; }
+  printf '%s  %s\n' "$sha" "$tmp/mise.tgz" | sha256sum -c - >/dev/null 2>&1 \
+    || { rm -rf "$tmp"; die "mise asset checksum mismatch — refusing to install"; return 1; }
+  mkdir -p "$HOME/.local/bin"
+  tar -xzf "$tmp/mise.tgz" -C "$tmp" || { rm -rf "$tmp"; die "mise archive extraction failed"; return 1; }
+  local bin
+  bin="$(find "$tmp" -type f -name mise -perm -u+x | head -1)"
+  [ -n "$bin" ] || { rm -rf "$tmp"; die "mise binary not found in archive"; return 1; }
+  install -m 0755 "$bin" "$HOME/.local/bin/mise"
+  rm -rf "$tmp"
+  export PATH="$HOME/.local/bin:$PATH"
+  return 0
+}
+
+bootstrap() {
+  say "AEGL RECOVERY BOOTSTRAP (idempotent; fails closed)"
+  export PATH="$HOME/.local/bin:$PATH"
+  # 1. required host tools that mise cannot provide.
+  for t in git python3; do have "$t" || { die "required host tool missing: $t"; return 1; }; done
+  # 2. mise (pinned + checksum verified only).
+  local want_ver; want_ver="$(pin "['mise']['version']")"
+  if have mise; then
+    say "  mise present: $(mise --version 2>&1 | head -1) (pinned $want_ver)"
+  else
+    _install_mise_pinned || return 1
+  fi
+  # 3. locked toolchain install.
+  ( cd "$AEGL_ROOT" && mise trust >/dev/null 2>&1 || true )
+  ( cd "$AEGL_ROOT" && mise install --locked ) || { die "mise install --locked failed"; return 1; }
+  # 4. verify the locked tools resolve.
+  ( cd "$AEGL_ROOT" && mise exec -- bash -c 'java -version; python3 --version; node --version; uv --version; pnpm --version' ) >/dev/null 2>&1 \
+    || { die "locked toolchain did not resolve under mise exec"; return 1; }
+  # 5. XDG roots.
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/aegl" "${XDG_CACHE_HOME:-$HOME/.cache}/aegl" "${XDG_DATA_HOME:-$HOME/.local/share}/aegl"
+  say "  BOOTSTRAP: OK"
+}
+
+# --------------------------------------------------------------------------- #
+# read-only inventory (relpath + sha256) for the before/after diff
+# --------------------------------------------------------------------------- #
+inventory() {
+  local root="$1" out="$2"
+  ( cd "$root" && find . -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum 2>/dev/null ) > "$out"
+}
+diff_inventory() { # before after -> "new modified deleted" on stdout
+  # sha256sum lines are "<64-hex>  <path>"; parse positionally so spaces are safe.
+  awk '
+    NR==FNR { h=substr($0,1,64); p=substr($0,67); before[p]=h; next }
+    { h=substr($0,1,64); p=substr($0,67); seen[p]=1;
+      if (p in before) { if (before[p]!=h) mod++ } else new++ }
+    END { for (p in before) if (!(p in seen)) del++;
+          printf "%d %d %d\n", new+0, mod+0, del+0 }
+  ' "$1" "$2"
+}
+
+# --------------------------------------------------------------------------- #
+# test
+# --------------------------------------------------------------------------- #
+copy_body() { # copy_body <src> <dst> <label>
+  local src="$1" dst="$2"
+  mkdir -p "$dst"
+  rsync -a \
+    --exclude='**/build' --exclude='**/.gradle' --exclude='**/.kotlin' \
+    --exclude='**/node_modules' --exclude='**/.venv' --exclude='**/dist' \
+    --exclude='**/__pycache__' --exclude='*.pyc' --exclude='**/.pytest_cache' \
+    --exclude='.cache' --exclude='.aegl' --exclude='*.apk' --exclude='*.aab' \
+    --exclude='_bmad' --exclude='_bmad-output' --exclude='.factory' --exclude='.agents' \
+    --exclude='.commandcode' --exclude='local.properties' \
+    --exclude='**/results' --exclude='**/evidence' --exclude='**/.runs' --exclude='**/.state' \
+    --exclude='**/harness/.results' \
+    --exclude='**/hermes/runtime' --exclude='**/reports/hardening' --exclude='**/migration-recovery' \
+    "$src/" "$dst/"
+}
+
+test_all() {
+  local reuse_stack=0 reuse_android=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reuse-stack) reuse_stack=1; shift ;;
+      --reuse-android) reuse_android=1; shift ;;
+      --only) ONLY="$2"; shift 2 ;;
+      *) die "unknown test option: $1"; return 2 ;;
+    esac
+  done
+
+  WS="$(mktemp -d "${TMPDIR:-/tmp}/aegl-recovery-XXXXXX")" || return 1
+  say "AEGL RECOVERY TEST — workspace=$WS"
+
+  # isolated roots, all outside the canonical projects
+  export XDG_STATE_HOME="$WS/xdg/state" XDG_DATA_HOME="$WS/xdg/data"
+  export XDG_CACHE_HOME="$WS/xdg/cache" XDG_CONFIG_HOME="$WS/xdg/config"
+  export HERMES_HOME="$WS/hermes" GRADLE_USER_HOME="$WS/gradle-home"
+  export AEGL_STATE_HOME="$XDG_STATE_HOME/aegl" AEGL_DATA_HOME="$XDG_DATA_HOME/aegl" AEGL_CACHE_HOME="$XDG_CACHE_HOME/aegl"
+  export AEGL_REPORTS_DIR="$WS/aegl-reports"
+  # mise toolchain lives in the official XDG external dir (reused across runs);
+  # all other state stays inside the temporary workspace.
+  export MISE_DATA_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}" MISE_CACHE_DIR="${MISE_CACHE_DIR:-$HOME/.cache/mise}"
+  export MISE_TRUSTED_CONFIG_PATHS="$WS:$AEGL_ROOT"
+  mkdir -p "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$HERMES_HOME" "$GRADLE_USER_HOME"
+  trap 'rm -rf "$WS"' EXIT
+
+  # before-inventory of the canonical projects (read-only)
+  say "-- canonical inventory BEFORE --"
+  inventory "$STACK" "$WS/before.stack"; inventory "$KEEPLAB" "$WS/before.keeplab"; inventory "$AEGL_ROOT" "$WS/before.aegl"
+
+  say "-- building project-body-only clean copies --"
+  local fails=0
+  local A="$WS/copies/AEGL" K="$WS/copies/KeepLab" S="$WS/copies/Stack"
+  if want aegl; then copy_body "$AEGL_ROOT" "$A" aegl; fi
+  if want keeplab_backend || want keeplab_android; then copy_body "$KEEPLAB" "$K" keeplab; fi
+  if want google_stack && [ "$reuse_stack" = 0 ]; then copy_body "$STACK" "$S" stack; fi
+
+  # ---- Google Stack ----
+  if ! want google_stack; then :
+  elif [ "$reuse_stack" = 1 ]; then say "google_stack: REUSED_PASS (inputs unchanged)"
+  else
+    say "-- google stack: offline gate (clean copy) --"
+    ( cd "$S" && timeout 900 bash scripts/run-tests.sh --root "$S" ) >"$WS/stack.log" 2>&1 \
+      && grep -q 'GATES=PASS' "$WS/stack.log" && say "google_stack: PASS" || { say "google_stack: FAIL"; fails=$((fails+1)); }
+  fi
+
+  # ---- AEGL (bootstrap + positive + negative + continuity + memory + rulesync + adapter) ----
+  if want aegl; then
+    say "-- aegl: full gates (clean copy) --"
+    ( cd "$A" && timeout 1800 mise exec -- bash bootstrap.sh ) >"$WS/aegl-bootstrap.log" 2>&1 \
+      && say "  bootstrap/positive/negative: PASS" || { say "  bootstrap/positive/negative: FAIL"; fails=$((fails+1)); }
+    ( cd "$A" && timeout 300 mise exec -- python3 scripts/continuity-smoke.py ) >"$WS/aegl-continuity.log" 2>&1 \
+      && grep -q 'RESULT: PASS' "$WS/aegl-continuity.log" && say "  continuity: PASS" || { say "  continuity: FAIL"; fails=$((fails+1)); }
+    ( cd "$A" && timeout 300 mise exec -- python3 scripts/memory-smoke.py --no-real ) >"$WS/aegl-memory.log" 2>&1 \
+      && grep -q 'RESULT: PASS' "$WS/aegl-memory.log" && say "  memory: PASS" || { say "  memory: FAIL"; fails=$((fails+1)); }
+    # RuleSync freshness: run the same `generate --check` AEGL uses, from the fixture dir.
+    ( cd "$A/fixture" && timeout 300 mise exec -- node "$A/upstream/rulesync/dist/cli/index.js" generate --targets claudecode --features rules --check ) >"$WS/aegl-rulesync.log" 2>&1 \
+      && say "  rulesync-freshness: PASS" || { say "  rulesync-freshness: FAIL"; fails=$((fails+1)); }
+    # supported adapter smoke (read-only inspection)
+    ( cd "$A" && timeout 300 mise exec -- bash -c './bin/aegl inspect fixtures/target-kotlin-good && ./bin/aegl inspect fixtures/android-good' ) >"$WS/aegl-adapter.log" 2>&1 \
+      && say "  adapter: PASS" || { say "  adapter: FAIL"; fails=$((fails+1)); }
+  fi
+
+  # ---- KeepLab backend (no Compose prerequisite) ----
+  if want keeplab_backend; then
+    say "-- keeplab backend: gradle test build (clean copy, no Compose) --"
+    ( cd "$K" && timeout 1500 ./gradlew -p backend test build --no-daemon --console=plain ) >"$WS/backend.log" 2>&1 \
+      && grep -q 'BUILD SUCCESSFUL' "$WS/backend.log" && say "keeplab_backend: PASS" || { say "keeplab_backend: FAIL"; fails=$((fails+1)); }
+    say "  compose: $(have docker && echo 'OPTIONAL present' || echo 'OPTIONAL_NOT_RUN (not required)')"
+  fi
+
+  # ---- KeepLab Android ----
+  if ! want keeplab_android; then :
+  elif [ "$reuse_android" = 1 ]; then say "keeplab_android_unit_and_apk: REUSED_PASS (inputs unchanged)"
+  else
+    say "-- keeplab android: unit tests + debug APK (clean copy) --"
+    ( cd "$K" && timeout 1800 ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain ) >"$WS/android.log" 2>&1 \
+      && grep -q 'BUILD SUCCESSFUL' "$WS/android.log" && say "keeplab_android_unit_and_apk: PASS" || { say "keeplab_android_unit_and_apk: FAIL"; fails=$((fails+1)); }
+  fi
+
+  # ---- canonical drift check ----
+  say "-- canonical inventory AFTER + diff --"
+  inventory "$STACK" "$WS/after.stack"; inventory "$KEEPLAB" "$WS/after.keeplab"; inventory "$AEGL_ROOT" "$WS/after.aegl"
+  local s k a
+  s="$(diff_inventory "$WS/before.stack" "$WS/after.stack")"
+  k="$(diff_inventory "$WS/before.keeplab" "$WS/after.keeplab")"
+  a="$(diff_inventory "$WS/before.aegl" "$WS/after.aegl")"
+  say "canonical_diff stack=$s keeplab=$k aegl=$a  (format: new modified deleted)"
+  local drift
+  drift="$(printf '%s\n%s\n%s\n' "$s" "$k" "$a" | awk '{n+=$1;m+=$2;d+=$3} END{print n+m+d}')"
+  say "canonical_tree_files_created_by_tests=$drift"
+
+  if [ "$fails" -ne 0 ] || [ "$drift" -ne 0 ]; then
+    say "-- failure evidence (gate log tails; workspace is deleted afterwards) --"
+    for l in aegl-bootstrap aegl-continuity aegl-memory aegl-rulesync aegl-adapter backend android stack; do
+      [ -s "$WS/$l.log" ] && { say "### $l.log"; tail -25 "$WS/$l.log"; }
+    done
+  fi
+
+  say "RECOVERY_TEST_FAILS=$fails CANONICAL_DRIFT=$drift"
+  return $(( fails + (drift>0 ? 1 : 0) ))
+}
+
+case "${1:-}" in
+  doctor)    doctor ;;
+  bootstrap) bootstrap ;;
+  test)      shift; test_all "$@" ;;
+  *) sed -n '2,22p' "$0"; exit 2 ;;
+esac

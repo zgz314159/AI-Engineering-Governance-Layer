@@ -1,0 +1,9 @@
+# Portable Android SDK manifest for the recovery driver.
+#
+# Provisioned with the official command-line SDK manager (sdkmanager):
+#   sdkmanager --sdk_root="$ANDROID_HOME" $(cat recovery/android-sdk-packages.txt)
+#
+# ADB, platform-tools and emulator/device access stay native to the Ubuntu host.
+platforms;android-36
+build-tools;36.0.0
+platform-tools
