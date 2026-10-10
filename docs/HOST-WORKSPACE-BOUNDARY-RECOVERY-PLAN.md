@@ -304,7 +304,7 @@ HOST_WORKSPACE_BOUNDARY_RESULT
 AI_BOUNDARY=PASS | BLOCKED
 ```
 
-### Recorded Stage 3 result (this execution) — PROVISIONAL
+### Recorded Stage 3 result (this execution) — targeted fixes applied
 
 ```text
 HOST_WORKSPACE_BOUNDARY_RESULT
@@ -312,21 +312,42 @@ HOST_WORKSPACE_BOUNDARY_RESULT
   system_recovered: PASS
   history_clean: PASS
   external_worktree: PASS
-  os_sandbox: BLOCKED
-  promotion_gate: BLOCKED
+  os_sandbox: PASS
+  promotion_gate: PASS
   global_rulesync: BLOCKED
-  negative_tests: unverified
+  negative_tests: 18/18
   canonical_project_pollution: 0
   completed_task_artifacts_remaining: 0
   backups_created: NO
   remote_changes: NO
-  blockers: [os_sandbox: host credential paths were readable and env was not whitelisted; promotion_gate: no re-classification of the candidate content at promote time; global_rulesync: rules not actually deployed to target agents; negative tests used `&& exit 9` which cannot distinguish denial from success; audit returned zero on violations]
+  blockers: [global_rulesync: a real RuleSync deploy to the target agents would overwrite existing project agent files (an attempt clobbered KeepLab/AGENTS.md, which was restored from its Git baseline); a safe target strategy is required before it can be called done]
 AI_BOUNDARY=BLOCKED
 ```
 
-Provisional — the earlier PASS claim was withdrawn. The recovery and cleanup results
-above stand (`SYSTEM_RECOVERED=PASS`, `HISTORY_CLEAN=PASS`). Targeted fixes are applied
-below; only the affected gates are re-run once.
+Per-item evidence (affected gates run once, after the fixes):
+- **os_sandbox — PASS**: whole task process tree runs under `bwrap` from the controlled
+  entry (`bin/aegl-task`); canonical projects read-only (N1); host credential paths masked
+  (N10, `~/.commandcode/auth.json` unreadable); environment passed by whitelist only
+  (`--clearenv` + explicit `--setenv`; N11); fail-closed backend (N7).
+- **promotion_gate — PASS**: promote now RE-classifies the candidate at promote time
+  (`git status --porcelain --ignored`) and requires a byte-identical content pin
+  (`modified_after_verify`, N13); ignored files rejected (N12); deleted project body
+  rejected (N5); generated/secrets rejected (N4/N4b); symlink escape rejected (N3).
+- **negative tests — 18/18**: denial probes now exit 0 **only** when the write/read was
+  actually denied, so a successful write/read always fails the case (no `&& exit 9`).
+- **audit — PASS**: `boundary audit` returns non-zero when a violation is present
+  (verified: rc=1 with a missing sandbox) and rc=0 when clean.
+- **test-command override — confined**: `task verify` (AI-facing) uses only the project's
+  declared test; arbitrary test commands are available only through the trusted
+  `controller probe` channel, which requires `AEGL_TRUSTED_CONTROLLER=1`.
+- **AEGL deliverables — committed**: all Stage 1–3 changes committed to the AEGL Git
+  baseline (commit `6641004`), so they are reconstructable; no generated content staged.
+- **global_rulesync — BLOCKED**: `boundary rulesync deploy` was implemented and attempted;
+  it rebuilt the pinned v25 CLI and wrote rules, but overwrote `KeepLab/AGENTS.md` (since
+  restored from its Git baseline). A clobber-safe deployment target is required first.
+
+The earlier PASS claim is withdrawn; `SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS`
+stand. Stage 1/2 were not re-run.
 
 # Future computer migration contract
 
