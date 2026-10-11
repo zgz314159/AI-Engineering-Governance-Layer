@@ -1662,6 +1662,39 @@ TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Govern
 
 Commit: AEGL branch `plan/profile-projection` @ `dbb261b` (implementation; not merged).
 
+## Round update 32: broker request-path mapping (real HTTP 404)
+
+The real trial now reaches **Hermes agent initialisation and the model request stage**, and the
+upstream answered **HTTP 404**: `model_broker.py` blindly joined the fixed upstream path with the
+client path, producing `/provider/v1` + `/v1/chat/completions` = `/provider/v1/v1/chat/completions`.
+
+- `_map_path()` replaces the client's local `/v1` prefix with the upstream API base path
+  (`/v1/chat/completions → /provider/v1/chat/completions`, `/v1/models → /provider/v1/models`).
+  The query is split off **before** mapping and re-attached verbatim, a trailing slash is preserved,
+  an already-prefixed path is left alone, and the upstream **host is never taken from the request**.
+  No global replace. Credentials, model, mounts and the drop chain are unchanged.
+- A minimal routing record is emitted per request: `method`, inbound path, forwarded path and HTTP
+  status (or `ERROR <type>`); no headers, no credential, no request/response bodies, no new report
+  collection.
+
+Focused check (`recovery/broker-path-tests.sh`, this round: **2 runs** — 1 initial failure in my own
+over-broad header check, which matched the startup line's `auth_header=` config name, then the
+re-verify): **10/10**, running the REAL broker against a stub upstream. This is a **local path test**
+and is **not** evidence of model execution.
+
+```text
+HOST_UID_DROP=PASS (unchanged)
+HERMES_STARTUP=REACHED_MODEL_REQUEST
+MODEL_REQUEST=FAILED_HTTP_404   (fixed this round; re-verify pending the user's next run)
+MODEL_TASK_EXECUTED=NOT_RUN
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=10/10 (2 runs)
+REAL_AEGL_AI_HERMES=NOT_RUN
+TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 6803ca8122d536505161664c18700c932b67a4aa:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 6803ca8122d536505161664c18700c932b67a4aa --self-test; echo "trial_exit=$?"
+```
+
+Commit: AEGL branch `plan/broker-path` @ `6803ca8` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
