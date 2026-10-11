@@ -162,11 +162,33 @@ SPEC="$RUN/spec.json"
 # aegl-ai cannot traverse the 0750 /home/zhong parents; the aliases live under a traversable
 # task dir, so bwrap (running AS aegl-ai) can resolve them. Nothing is copied and the mounts
 # exist only in this private namespace (never propagated to the host).
-SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/installs" "$SRC/guard"; : > "$SRC/entry"
+SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/guard"; : > "$SRC/entry"
 chmod 0755 "$SRC"; chown root:root "$SRC"
+
+# --- task-level install state: SAME path Hermes expects, locks/leases writable --------- #
+KEY="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$(realpath "$HERMES_RUNTIME")")"
+GEN="$HERMES_HOME_REAL/installs/$KEY"
+{ [ -d "$GEN" ] && [ -f "$GEN/facts.json" ]; } || die "no verified install generation at $GEN (refusing to fabricate one)"
+VIEW="$RUN/installs"; mkdir -p "$VIEW/$KEY/environments" "$VIEW/$KEY/bootstrap" "$VIEW/$KEY/pm-runtime" "$VIEW/$KEY/inputs"
+cp -p "$GEN/facts.json" "$VIEW/$KEY/facts.json"
+[ -f "$GEN/declined-packages.json" ] && cp -p "$GEN/declined-packages.json" "$VIEW/$KEY/declined-packages.json"
+chown -R "$AI_USER":"$AI_GROUP" "$VIEW"
+# the profile + home mutable RUN state (sessions/logs/locks) — task-level, writable by aegl-ai
+ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" \
+  "$ST/prof-sessions" "$ST/prof-logs" "$ST/prof-runtime" "$ST/prof-terminal"
+chown -R "$AI_USER":"$AI_GROUP" "$ST"
+STATE_ARGS=(
+  --state-bind "$ST/home-sessions:/home/zhong/.hermes/sessions"
+  --state-bind "$ST/home-logs:/home/zhong/.hermes/logs"
+  --state-bind "$ST/prof-sessions:/home/zhong/.hermes/profiles/android-stack/sessions"
+  --state-bind "$ST/prof-logs:/home/zhong/.hermes/profiles/android-stack/logs"
+  --state-bind "$ST/prof-runtime:/home/zhong/.hermes/profiles/android-stack/runtime"
+  --state-bind "$ST/prof-terminal:/home/zhong/.hermes/profiles/android-stack/terminal-sessions"
+)
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
   --wt "$WT_R" --scr "$SCR_R" --runtime "$SRC/runtime" --tools "$SRC/tools" \
-  --entry "$SRC/entry" --installs "$SRC/installs" --guard-src "$SRC/guard" \
+  --entry "$SRC/entry" --installs "$GEN" --installs-view "$VIEW" --install-key "$KEY" \
+  "${STATE_ARGS[@]}" --guard-src "$SRC/guard" \
   --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 # create EVERY mount target under the read-only skeleton, derived from the ACTUAL argv
