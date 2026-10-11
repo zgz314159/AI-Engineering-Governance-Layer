@@ -25,9 +25,9 @@ LIBDIR="/usr/local/lib/aegl-model"
 CREDDIR="/etc/aegl/model"
 REGDIR="/var/lib/aegl-model"
 AI_USER="aegl-ai"
-FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/bind_fd_exec.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
+FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
 # every module the entry points reference must exist in the flat install dir
-REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py bind_fd_exec.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
+REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
 sha_of(){ sha256sum | awk '{print $1}'; }
@@ -144,7 +144,8 @@ self_test(){
   local COMPILER_USER="${SUDO_USER:-zhong}"
   local OFFICIAL="/home/zhong/Projects/Google-Android-Agent-Development-Stack"
   cleanup_trial(){
-    rm -rf "$ST"
+    # this task's exact residue only: the temp tree and its run dir
+    rm -rf "$ST" "/run/aegl-model/$TID"
     python3 - "$REGDIR/registry.json" "$TID" <<'PY'
 import json, sys
 p, tid = sys.argv[1], sys.argv[2]
@@ -155,7 +156,7 @@ except Exception:
     pass
 PY
   }
-  trap cleanup_trial RETURN
+  trap cleanup_trial RETURN EXIT TERM INT
   mkdir -p "$PROJ" "$SCR"
   chown -R "$AI_USER":"$(id -g "$AI_USER")" "$ST" 2>/dev/null || true
   runuser -u "$AI_USER" -- git init -q "$PROJ" || { say "FAIL: git init"; return 1; }
@@ -212,14 +213,21 @@ PY
   local ev; ev="$(python3 "$LIBDIR/capture_evidence.py" "$INFO" --max-wait 60)"
   wait "$lpid"; local rc=$?
   exec {infofd}>&-
-  local cpuid cpns alive
+  local cpuid cpns alive cuids
   cpuid="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("uid",""))' 2>/dev/null)"
   cpns="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ns",""))' 2>/dev/null)"
   alive="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("alive",False))' 2>/dev/null)"
+  cuids="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("children_uids",[])))' 2>/dev/null)"
   local rp=0 fp=0 uidok=0 nsok=0 wa=0 breach=0
   [ -f "$WT/RESULT.txt" ] && grep -q 'TRIAL-INPUT-OK' "$WT/RESULT.txt" && rp=1
   [ -f "$WT/FACTS.txt" ] && fp=1
-  { [ "$cpuid" = "$(id -u "$AI_USER")" ] && [ "$alive" = "True" ]; } && uidok=1
+  local ai_uid; ai_uid="$(id -u "$AI_USER")"
+  # HOST uid of the actual executed process AND its children must be aegl-ai (never root,
+  # never a printed ai_uid and never the in-namespace id -u)
+  if [ "$cpuid" = "$ai_uid" ] && [ "$alive" = "True" ] && \
+     { [ -z "$cuids" ] || [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; }; then
+    uidok=1
+  fi
   { [ -n "$cpns" ] && [ "$cpns" != "$host_ns" ] && [ "$alive" = "True" ]; } && nsok=1
   [ -f "$WT/FACTS.txt" ] && grep -q 'W[123]_' "$WT/FACTS.txt" && wa=1
   # evidence, reported in SEPARATE categories. FACTS.txt is the model's SELF-REPORT: it cannot
@@ -231,7 +239,7 @@ PY
   say "  model_run=$model_run (live child + the real RESULT.txt file, not FACTS)"
   say "  guard_rejection=$guard_state  os_rejection=$os_state  (no trusted decision source yet)"
   say "  NOTE: a guard-blocked write is never reported as an OS denial; FACTS/BREACH alone prove nothing"
-  say "  trusted evidence: launch_rc=$rc child_uid=${cpuid:-none} child_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
+  say "  trusted evidence: launch_rc=$rc child_uid=${cpuid:-none} children_uids=${cuids:-none} child_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
   local verdict grc
   verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
   say "  TRIAL_GATE $verdict"

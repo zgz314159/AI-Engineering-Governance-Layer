@@ -78,7 +78,7 @@ gv(){ python3 "$TG" "$@" | python3 -c 'import json,sys;print(json.load(sys.stdin
 # --- E. entry fix checks ------------------------------------------------------ #
 # E1. flat install layout carries every referenced module (simulated, no root)
 FLAT="$ST/flat"; mkdir -p "$FLAT"
-ALL_FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/bind_fd_exec.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py)
+ALL_FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py)
 for f in "${ALL_FILES[@]}"; do
   if grep -q "$(basename "$f")" <(grep -m1 '^FILES=' "$AEGL_ROOT/recovery/install-model-broker.sh"); then
     [ -f "$AEGL_ROOT/$f" ] && cp "$AEGL_ROOT/$f" "$FLAT/$(basename "$f")" || no "worktree file missing: $f"
@@ -86,7 +86,7 @@ for f in "${ALL_FILES[@]}"; do
     no "FILES omits $(basename "$f")"
   fi
 done
-fm=0; for m in aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py bind_fd_exec.py sandbox_spec.py capture_evidence.py trial_gate.py; do [ -s "$FLAT/$m" ] || { fm=1; no "flat layout missing $m"; }; done
+fm=0; for m in aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py sandbox_spec.py capture_evidence.py trial_gate.py; do [ -s "$FLAT/$m" ] || { fm=1; no "flat layout missing $m"; }; done
 [ "$fm" = 0 ] && ok "flat install layout carries every referenced module"
 grep -q 'for f in "${FILES\[@\]}"' "$AEGL_ROOT/recovery/install-model-broker.sh" && ok "install loop iterates all FILES" || no "install loop does not iterate FILES"
 

@@ -4,11 +4,14 @@
 #
 #   sudo aegl-hermes-sandbox --task <id> [--info-fd N] -- hermes ...
 #
-# /home/zhong is 0750 zhong:zhong: the launcher runs as root, opens the declared sources
-# by fd (recovery/bind_fd_exec.py) and execs bwrap with --ro-bind-fd, so the source is
-# never re-resolved as the AI uid. Inside, /home/zhong is a traversable skeleton carrying
-# only the declared runtime, the android-stack profile, the guard source and the task
-# config/project dirs. Host HOME/project permissions are NOT changed.
+# /home/zhong is 0750 zhong:zhong. The launcher runs as root and does ONLY bwrap's
+# mount/pid/net isolation and the declared-path mounts — no user namespace, so the host
+# ids are preserved and root resolves the 0750 sources directly (no `--ro-bind-fd` fd
+# trick). The FIRST in-sandbox process is a fixed trusted drop entry (setpriv) that
+# clears groups/caps/env, sets no_new_privs, drops to the HOST aegl-ai, and only then
+# starts the runner. No model/project code runs before the drop. Host HOME/project
+# permissions are NOT changed; /home/zhong is a traversable skeleton with only the
+# declared runtime, the android-stack profile, the guard source and the task dirs.
 set -uo pipefail
 
 BWRAP="/usr/bin/bwrap"
@@ -20,8 +23,9 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 pick(){ [ -f "$LIBDIR/$1" ] && printf '%s' "$LIBDIR/$1" || printf '%s' "$SELF_DIR/../recovery/$1"; }
 BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$SELF_DIR/aegl-model-broker"
 SHIM="$(pick loopback_shim.py)"
-FD_EXEC="$(pick bind_fd_exec.py)"
+EXEC_SPEC="$(pick exec_spec.py)"
 SPEC_PY="$(pick sandbox_spec.py)"
+SETPRIV="/usr/bin/setpriv"
 
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
@@ -39,7 +43,7 @@ done
 case "$TASK" in ""|*[!A-Za-z0-9._-]*) die "restricted task_id required" ;; esac
 [ "${#TASK}" -le 64 ] || die "task_id too long"
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
-for b in "$BWRAP" "$FD_EXEC" "$SPEC_PY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
+for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
 # shellcheck disable=SC1090
 . "$CONFIG"
 for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
@@ -57,6 +61,7 @@ PYBIN="$(head -1 "$HERMES_RUNTIME/.hermes/bin/hermes" 2>/dev/null | sed 's/^#!//
 GUARD_SRC="$(grep -oE '/[^ ]*contract_guard\.py' "$HERMES_PROFILE_CONFIG" | head -1)"; GUARD_SRC="${GUARD_SRC%/*}"
 [ -n "$GUARD_SRC" ] && [ -d "$GUARD_SRC" ] || die "contract-guard source dir not found (from the hooks)"
 GUARD_DEST="$GUARD_SRC"
+[ -x "$SETPRIV" ] || die "trusted drop entry not found: $SETPRIV"
 
 # --- trusted task registry (root-owned; NOT the AI-writable task.json) -------- #
 [ -f "$TRUSTED_TASK_REGISTRY" ] || die "trusted task registry not found: $TRUSTED_TASK_REGISTRY"
@@ -106,7 +111,8 @@ AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" \
 AEGL_MODEL_CREDENTIAL_ENV="$CREDENTIAL_ENV" AEGL_MODEL_CREDENTIAL_SOURCE="$CREDENTIAL_SOURCE" \
   "$BROKER_BIN" serve >"$RUN/broker.log" 2>&1 &
 BPID=$!
-trap 'kill "$BPID" 2>/dev/null' EXIT
+cleanup(){ kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
+trap cleanup EXIT TERM INT
 for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || die "model broker did not start (see $RUN/broker.log)"
 chown root:"$AI_GROUP" "$SOCK"; chmod 0660 "$SOCK"
@@ -147,15 +153,15 @@ exit \$rc
 EOF
 chmod 0755 "$RUN/sandbox-run.sh"
 
-# --- two-phase bwrap spec + exec ---------------------------------------------- #
-say "AEGL_HERMES_SANDBOX task=$TASK ai_uid=$AI_UID sandbox=on (two-phase fd mounts)"
+# --- bwrap spec (root mounts, no userns) + trusted drop entry ------------------ #
+say "AEGL_HERMES_SANDBOX task=$TASK ai_uid=$AI_UID sandbox=on (root mounts, no userns; setpriv drop)"
 SPEC="$RUN/spec.json"
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
   --wt "$WT_R" --scr "$SCR_R" --runtime "$HERMES_RUNTIME" --tools "$HERMES_TOOLS" \
   --entry "$HERMES_ENTRY" --installs "$HERMES_INSTALLS" --guard-src "$GUARD_SRC" \
-  --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
+  --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" --setpriv "$SETPRIV" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
-python3 "$FD_EXEC" < "$SPEC"
+python3 "$EXEC_SPEC" "$SPEC"
 rc=$?
 kill "$BPID" 2>/dev/null
 exit "$rc"

@@ -28,6 +28,32 @@ def read_info(path: str):
         return None
 
 
+def uid_of(pid: int) -> str:
+    try:
+        with open("/proc/%d/status" % pid, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("Uid:"):
+                    return line.split()[1]
+    except OSError:
+        pass
+    return ""
+
+
+def child_pids(pid: int):
+    """The process's live children, from the host /proc (task/*/children)."""
+    pids = []
+    try:
+        for tid in os.listdir("/proc/%d/task" % pid):
+            try:
+                with open("/proc/%d/task/%s/children" % (pid, tid), encoding="utf-8") as handle:
+                    pids += [int(x) for x in handle.read().split()]
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return pids
+
+
 def capture(info_file: str, max_wait: float = 30.0) -> dict:
     deadline = time.monotonic() + max_wait
     pid = None
@@ -40,20 +66,15 @@ def capture(info_file: str, max_wait: float = 30.0) -> dict:
         return {"error": "no_child_pid"}
     if not os.path.isdir("/proc/%d" % pid):
         return {"error": "child_gone_before_capture", "child_pid": pid}
-    uid = ""
-    try:
-        with open("/proc/%d/status" % pid, encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("Uid:"):
-                    uid = line.split()[1]
-                    break
-    except OSError:
-        pass
     try:
         ns = os.readlink("/proc/%d/ns/pid" % pid)
     except OSError:
         ns = ""
-    return {"child_pid": pid, "uid": uid, "ns": ns, "alive": os.path.isdir("/proc/%d" % pid)}
+    kids = child_pids(pid)
+    return {"child_pid": pid, "uid": uid_of(pid), "ns": ns,
+            "children_uids": sorted({uid_of(k) for k in kids} - {""}),
+            "children_pids": kids,
+            "alive": os.path.isdir("/proc/%d" % pid)}
 
 
 def main(argv):
