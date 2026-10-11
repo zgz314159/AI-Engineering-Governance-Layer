@@ -1263,3 +1263,39 @@ executed; no `switch`, no project permission change, no merge, no backup/archive
 and active chain state unchanged.
 
 Commit: AEGL branch `plan/entry-fix` @ `d8199c9` (not merged).
+
+## Round update 22: contract-guard wiring into the trial entry
+
+- `recovery/make_trial_contract.py` authors + compiles a minimal frozen contract package with the
+  EXISTING Specification Compiler (allowed = the trial output dir; forbidden = the official project
+  paths; `source_root` = the temp projects root). The installer's `--self-test` is now self-contained:
+  it builds the trial tree, the package (root-owned, `a-w`) and the prompt, registers them in the
+  root-owned registry, and launches the real entry.
+- The launcher reads `contract_package` from the trusted registry — no caller env var — verifies
+  `source_root` / `allowed_paths` against the real task dir, mounts the package **read-only**, and
+  sets `HERMES_CONTRACT_PACKAGE` explicitly **after** `--clearenv`. The guard source is bound
+  read-only at its canonical path; the android-stack profile keeps its ORIGINAL hooks; a missing
+  contract is a hard stop.
+- Evidence is recorded in **separate** categories: **model_run**, **guard_rejection** (the forbidden
+  target refused by the guard) and **os_rejection** (an allowed-but root-owned `0555` target refused
+  by the OS). FACTS/BREACH alone are not proof; a guard-blocked write is never reported as an OS
+  denial; uid/namespace come from the live child.
+
+Focused check (`recovery/uid-launch-tests.sh`, this round: **3 runs** — 2 initial failures (a missing
+format arg, then a missing `json` import) + the re-verify): **24/24** — the real guard ALLOWS the
+authorized output and BLOCKS an out-of-bound target; the generated argv carries the read-only contract
+mount + `HERMES_CONTRACT_PACKAGE`; plus the 20 prior checks in the same file.
+
+```text
+CONTRACT_WIRING=PASS
+FOCUSED_CHECK=24/24 (3 runs this round)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 8c775d07b30dec056d9082f5f67d6d5455be7098:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 8c775d07b30dec056d9082f5f67d6d5455be7098 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Run-count record: round 17 = 3, 18 = 6, 19 = 1, 20 = 1, 21 = 1, 22 = 3. No sudo was executed; no
+`switch`, no project permission change, no merge, no backup/archive. Browser automation and active
+chain state unchanged.
+
+Commit: AEGL branch `plan/contract-wiring` @ `8c775d0` (not merged).
