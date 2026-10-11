@@ -860,3 +860,49 @@ AI_BOUNDARY=BLOCKED
 
 Commit: Stack branch `plan/hermes-chatgpt-control-url` @ `d5b9580` (supervisor session launcher;
 not merged — promotion gate default-deny).
+
+## Round update 12: trusted promotion broker implemented (Stage 3)
+
+`BROKER_IMPLEMENTATION=PASS`; the independent identity is NOT yet installed.
+
+- `bin/aegl-promote-broker` + `recovery/promotion_broker.py` — the broker. After the
+  `AEGL-BROKER/1` PING/PONG handshake it accepts only a bounded request (`op` ∈ {validate, promote};
+  `task_id` matching `[A-Za-z0-9._-]{1,64}` and proven under the broker's tasks root). A shell
+  command or a target path can never be submitted; the project target is derived from the task's own
+  `task.json`. Promotions are serialized with an flock.
+- `recovery/promotion_core.py` — the ONE central gate + apply, now reused by BOTH `bin/aegl-task
+  verify` (classification) and the broker, so the promotion rules are not duplicated.
+- `bin/aegl-task promote` — no longer applies anything: it authenticates, requires a verified broker,
+  submits a bounded request and relays the decision; it does not modify the canonical project after
+  the reply (the former auto-discard was removed).
+- The gate re-checks at promotion time: content pin (`modified_after_verify`), fresh classification
+  (generated/secret, ignored, path escape, symlink escape, oversize, deleted body) and the allowed
+  project set (`ALLOWED_PROJECT_DIRS` directly under the projects root). A failed validation never
+  changes the target.
+
+Targeted functional tests (`recovery/broker-tests.sh`, throwaway repo under `/var/tmp`, run once):
+**13/13** — legitimate promotion APPLIED+merged; validate-only does not modify the target; bad op;
+unknown task; task_id traversal; disallowed project target (unchanged); modified-after-verify;
+generated/secret; serialized promotions.
+
+Install (root-owned, reviewable; `host-identity-bootstrap.sh broker-plan`, doc §6): install the
+program root-owned under `/usr/local/lib/aegl-promote`; group `aegl-broker` + socket
+`/run/aegl-promote`; a systemd unit as `User=aegl-promote`; run `broker-tests.sh` as the broker; then
+write root-owned `/etc/aegl/broker-verified`. The bulk project permission migration (`switch`) still
+refuses until that marker exists and was not run.
+
+```text
+BROKER_IMPLEMENTATION=PASS
+TARGETED_TESTS=13/13
+INDEPENDENT_IDENTITY_INSTALLED=NO      (needs interactive sudo)
+TRUSTED_PROMOTION_ACCEPTED=NOT_RUN     (no broker installed; promotion is not accepted yet)
+AI_BOUNDARY=BLOCKED
+NEXT_HUMAN_ACTION=sudo bash recovery/host-identity-bootstrap.sh broker-plan   # then run the printed steps
+```
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` unchanged. Forced isolation is still `BLOCKED`: the
+broker is implemented and functionally tested, but the independent identity is not installed, so
+trusted promotion is not accepted. No canonical project was modified; the model channel is unchanged.
+
+Commit: AEGL branch `plan/trusted-promotion-broker` @ `290d04d` (broker + tests + install plan; not
+merged — promotion gate default-deny).
