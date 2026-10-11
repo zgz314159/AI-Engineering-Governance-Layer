@@ -305,7 +305,11 @@ for line in open(log, encoding="utf-8", errors="replace"):
         continue
     if d.get("_recorded") is not True or d.get("task") != task:
         continue
-    if not d.get("tool_call_id"):            # must correspond to a real tool request
+    if not d.get("tool_call_id"):
+        continue
+    if d.get("request_matched") is not True:  # must belong to a REAL model tool request
+        continue
+    if d.get("request_args_match") is False:  # arguments present but they disagree -> reject
         continue
     rc = d.get("rc")
     verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else {}

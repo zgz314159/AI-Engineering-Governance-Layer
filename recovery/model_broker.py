@@ -19,6 +19,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -109,6 +110,25 @@ def _map_path(base_path: str, path: str) -> str:
     return base_path + path
 
 
+# The broker remembers the tool requests the UPSTREAM MODEL actually returned, so a hook's
+# tool_call_id/name/args can be correlated with a real model request instead of trusting a
+# non-empty id. Populated from the model response body (plain JSON or SSE deltas).
+REQUEST_INDEX: dict = {}
+
+
+def _index_requests(payload: bytes) -> None:
+    text = payload.decode("utf-8", "replace")
+    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"', text):
+        REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})
+    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"[\s\S]{0,400}?"name"\s*:\s*"([^"]*)"', text):
+        REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})["name"] = match.group(2)
+    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"[\s\S]{0,800}?"arguments"\s*:\s*"((?:[^"\\]|\\.)*)"', text):
+        try:
+            REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})["args"] = json.loads('"%s"' % match.group(2))
+        except ValueError:
+            pass
+
+
 def _handle_guard(conn: socket.socket, body: bytes) -> None:
     """Controller-side pre_tool_call evaluation: run the guard OURSELVES and return its raw
     stdout + exit code. The AI cannot influence this (its log/socket/self-report is ignored)."""
@@ -135,6 +155,17 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
     result["operation"] = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     result["target"] = str(tool_input.get("path") or tool_input.get("command") or "")[:200]
+    request = REQUEST_INDEX.get(result["tool_call_id"]) if result["tool_call_id"] else None
+    result["request_matched"] = bool(request)
+    result["request_name"] = (request or {}).get("name") or ""
+    match = None
+    if request and request.get("args"):
+        try:
+            want = set(json.loads(request["args"]).keys())
+            match = want == set(tool_input.keys())
+        except (ValueError, TypeError):
+            match = None
+    result["request_args_match"] = match
     evidence = os.environ.get("AEGL_GUARD_EVIDENCE") or ""
     if evidence:
         try:
@@ -202,6 +233,7 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         # minimal routing record: method, inbound path, forwarded path, status ONLY
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
         payload = resp.read()
+        _index_requests(payload)
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
             if k.lower() in ("transfer-encoding", "connection", "content-length"):
