@@ -51,13 +51,11 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, ins
         "--ro-bind", tools, "/home/zhong/.hermes/tools",
         "--ro-bind", entry, "/home/zhong/.local/bin/hermes",
         # install state: a task-level WRITABLE view at the SAME path Hermes expects, so
-        # locks/.leases work while the heavy, already-verified read-only trees are sub-binds
-        # (no copy of installs/venv; metadata is reused verbatim by the launcher)
+        # locks / .install.lock / .leases / pm-runtime (.prepare.lock, selected.json) work.
+        # ONLY the heavy venv tree is reused read-only by sub-bind; the small mutable pieces
+        # are copied verbatim by the launcher (no copy of installs/venv, nothing forged).
         "--bind", installs_view, "/home/zhong/.hermes/installs",
         "--ro-bind", installs + "/environments", "/home/zhong/.hermes/installs/" + install_key + "/environments",
-        "--ro-bind", installs + "/bootstrap", "/home/zhong/.hermes/installs/" + install_key + "/bootstrap",
-        "--ro-bind", installs + "/pm-runtime", "/home/zhong/.hermes/installs/" + install_key + "/pm-runtime",
-        "--ro-bind", installs + "/inputs", "/home/zhong/.hermes/installs/" + install_key + "/inputs",
         # task config + generated android-stack profile (hooks preserved); secrets masked
         "--ro-bind", run + "/stage/home-zhong/.hermes/config.yaml", "/home/zhong/.hermes/config.yaml",
         "--ro-bind", run + "/stage/home-zhong/.hermes/profiles", "/home/zhong/.hermes/profiles",

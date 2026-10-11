@@ -169,9 +169,13 @@ chmod 0755 "$SRC"; chown root:root "$SRC"
 KEY="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$(realpath "$HERMES_RUNTIME")")"
 GEN="$HERMES_HOME_REAL/installs/$KEY"
 { [ -d "$GEN" ] && [ -f "$GEN/facts.json" ]; } || die "no verified install generation at $GEN (refusing to fabricate one)"
-VIEW="$RUN/installs"; mkdir -p "$VIEW/$KEY/environments" "$VIEW/$KEY/bootstrap" "$VIEW/$KEY/pm-runtime" "$VIEW/$KEY/inputs"
-cp -p "$GEN/facts.json" "$VIEW/$KEY/facts.json"
-[ -f "$GEN/declined-packages.json" ] && cp -p "$GEN/declined-packages.json" "$VIEW/$KEY/declined-packages.json"
+VIEW="$RUN/installs"; mkdir -p "$VIEW/$KEY/environments"
+# the small mutable pieces are reused VERBATIM (facts, declined packages, inputs stamps,
+# bootstrap cache, pm-runtime selected.json + .prepare.lock + generations) so every lock and
+# lease works in the writable view; only environments/ is a read-only sub-bind (the venv).
+for entry in facts.json declined-packages.json inputs bootstrap pm-runtime; do
+  [ -e "$GEN/$entry" ] && cp -a "$GEN/$entry" "$VIEW/$KEY/$entry"
+done
 chown -R "$AI_USER":"$AI_GROUP" "$VIEW"
 # the profile + home mutable RUN state (sessions/logs/locks) — task-level, writable by aegl-ai
 ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" \
