@@ -36,18 +36,21 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, gua
         bwrap,
         # isolation WITHOUT a user namespace: the host ids are preserved
         "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
-        "--dev", "/dev", "--proc", "/proc",
+        # 1. the root filesystem FIRST, then the isolated /proc + /dev and the overlays —
+        #    a later `--ro-bind / /` would shadow an earlier /proc or /dev
         "--ro-bind", "/", "/",
+        "--proc", "/proc",
+        "--dev", "/dev",
         # traversable /home/zhong skeleton (the real one is 0750 and unreachable to the AI)
         "--ro-bind", run + "/stage/home-zhong", "/home/zhong",
         # declared runtime sources, mounted by ROOT (root reads the 0750 sources directly)
         "--ro-bind", runtime, "/home/zhong/.hermes/hermes-agent",
         "--ro-bind", tools, "/home/zhong/.hermes/tools",
         "--ro-bind", entry, "/home/zhong/.local/bin/hermes",
-        # installs must be writable to the runtime but ephemeral (host untouched)
-        "--ro-bind", run + "/stage/run-aegl", "/run/aegl-run",
-        "--ro-bind", installs, "/run/aegl-run/installs-ro",
-        "--overlay-src", "/run/aegl-run/installs-ro", "--tmp-overlay", "/home/zhong/.hermes/installs",
+        # the installs lower dir must be a REAL host path (bwrap resolves --overlay-src
+        # BEFORE mounting, so it can never be a not-yet-created sandbox path); the upper
+        # layer is an ephemeral tmp overlay — no permanent host alias, no copy/archive
+        "--overlay-src", installs, "--tmp-overlay", "/home/zhong/.hermes/installs",
         # task config + generated android-stack profile (hooks preserved); secrets masked
         "--ro-bind", run + "/stage/home-zhong/.hermes/config.yaml", "/home/zhong/.hermes/config.yaml",
         "--ro-bind", run + "/stage/home-zhong/.hermes/profiles", "/home/zhong/.hermes/profiles",

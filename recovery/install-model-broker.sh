@@ -32,12 +32,37 @@ say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
 sha_of(){ sha256sum | awk '{print $1}'; }
 
+# --- ONE cleanup entry: scope-valid (top-level, no function-local refs), re-callable,
+#     covering the install STAGE, this task's temp dir + RUN dir and its registry record.
+#     On TERM/INT execution stops: related processes are ended and WAITED first, then the
+#     exact dirs are removed. SIGKILL cannot be caught -> no automatic cleanup then. ----- #
+CLEAN_DIRS=(); TRIAL_LPID=""; TRIAL_TID=""
+cleanup_all(){
+  if [ -n "${TRIAL_LPID:-}" ]; then kill "$TRIAL_LPID" 2>/dev/null; wait "$TRIAL_LPID" 2>/dev/null; fi
+  local d
+  for d in ${CLEAN_DIRS[@]+"${CLEAN_DIRS[@]}"}; do [ -n "$d" ] && rm -rf "$d"; done
+  if [ -n "${TRIAL_TID:-}" ] && [ -f "$REGDIR/registry.json" ]; then
+    python3 - "$REGDIR/registry.json" "$TRIAL_TID" <<'PY' || true
+import json, sys
+try:
+    reg = json.load(open(sys.argv[1], encoding="utf-8")); reg.pop(sys.argv[2], None)
+    json.dump(reg, open(sys.argv[1], "w", encoding="utf-8"), indent=2)
+except Exception:
+    pass
+PY
+  fi
+  return 0
+}
+trap 'cleanup_all' EXIT
+trap 'cleanup_all; exit 143' TERM
+trap 'cleanup_all; exit 130' INT
+
 # --- flat-layout check (NO root): stage from the pinned commit and assert every
 #     module the entry points reference is present in one flat directory ---------- #
 if [ "$CHECK_LAYOUT" = 1 ]; then
   [ -n "$REPO" ] && [ -n "$COMMIT" ] || { echo "INSTALL_ERROR: --check-layout needs --repo and --commit"; exit 2; }
   git -C "$REPO" cat-file -e "$COMMIT^{commit}" 2>/dev/null || { echo "LAYOUT_CHECK=FAIL (commit not found)"; exit 1; }
-  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+  TMP="$(mktemp -d)"; CLEAN_DIRS+=("$TMP")
   ok=1
   for f in "${FILES[@]}"; do
     git -C "$REPO" show "$COMMIT:$f" > "$TMP/$(basename "$f")" 2>/dev/null || { echo "LAYOUT_MISSING_IN_COMMIT $(basename "$f")"; ok=0; }
@@ -57,7 +82,7 @@ fi
 git -C "$REPO" cat-file -e "$COMMIT^{commit}" 2>/dev/null || fail "commit not found: $COMMIT"
 for f in "${FILES[@]}"; do git -C "$REPO" cat-file -e "$COMMIT:$f" 2>/dev/null || fail "required file missing in commit: $f"; done
 
-STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
+STAGE="$(mktemp -d)"; CLEAN_DIRS+=("$STAGE")
 for f in "${FILES[@]}"; do
   git -C "$REPO" show "$COMMIT:$f" > "$STAGE/$(basename "$f")" || fail "extract failed: $f"
   want="$(git -C "$REPO" show "$COMMIT:$f" | sha_of)"; got="$(sha_of < "$STAGE/$(basename "$f")")"
@@ -143,20 +168,8 @@ self_test(){
   local CONTRACT="$ST/contract" TID="trial"
   local COMPILER_USER="${SUDO_USER:-zhong}"
   local OFFICIAL="/home/zhong/Projects/Google-Android-Agent-Development-Stack"
-  cleanup_trial(){
-    # this task's exact residue only: the temp tree and its run dir
-    rm -rf "$ST" "/run/aegl-model/$TID"
-    python3 - "$REGDIR/registry.json" "$TID" <<'PY'
-import json, sys
-p, tid = sys.argv[1], sys.argv[2]
-try:
-    reg = json.load(open(p, encoding="utf-8")); reg.pop(tid, None)
-    json.dump(reg, open(p, "w", encoding="utf-8"), indent=2)
-except Exception:
-    pass
-PY
-  }
-  trap cleanup_trial RETURN EXIT TERM INT
+  # register this trial's exact dirs with the ONE top-level cleanup entry (no local refs)
+  TRIAL_TID="$TID"; CLEAN_DIRS+=("$ST" "/run/aegl-model/$TID")
   mkdir -p "$PROJ" "$SCR"
   chown -R "$AI_USER":"$(id -g "$AI_USER")" "$ST" 2>/dev/null || true
   runuser -u "$AI_USER" -- git init -q "$PROJ" || { say "FAIL: git init"; return 1; }
@@ -209,9 +222,11 @@ PY
   exec {infofd}>"$INFO"
   say "  launching the real entry (task $TID) ..."
   "$LIBDIR/aegl-hermes-sandbox" --task "$TID" --info-fd "$infofd" -- hermes -p android-stack chat --oneshot --query-file "$WT/PROMPT.md" &
-  local lpid=$!
-  local ev; ev="$(python3 "$LIBDIR/capture_evidence.py" "$INFO" --max-wait 60)"
-  wait "$lpid"; local rc=$?
+  TRIAL_LPID=$!; local lpid=$TRIAL_LPID
+  # sample only the REAL Hermes process + its tool children, while alive (init is not the model)
+  local ev; ev="$(python3 "$LIBDIR/capture_evidence.py" "$INFO" --max-wait 60 --hermes-wait 240)"
+  wait "$lpid"; local rc=$?; TRIAL_LPID=""
+  case "$ev" in *'"error"'*) say "  capture: $ev" ;; esac
   exec {infofd}>&-
   local cpuid cpns alive cuids
   cpuid="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("uid",""))' 2>/dev/null)"

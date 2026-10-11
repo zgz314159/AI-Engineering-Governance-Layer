@@ -50,8 +50,8 @@ grep -q 'bind_fd_exec' "$LAUNCH" && no "launcher still references bind_fd_exec" 
 grep -q 'SETPRIV="/usr/bin/setpriv"' "$LAUNCH" && ok "launcher pins the trusted drop entry" || no "launcher does not pin setpriv"
 grep -q 'cleanup(){ kill "\$BPID" 2>/dev/null; rm -rf "\$RUN"; }' "$LAUNCH" && ok "launcher cleans its run dir on exit" || no "launcher does not clean RUN"
 grep -q 'trap cleanup EXIT TERM INT' "$LAUNCH" && ok "launcher traps EXIT/TERM/INT" || no "launcher trap missing"
-grep -q 'rm -rf "\$ST" "/run/aegl-model/\$TID"' "$INST" && ok "installer removes this task's exact run dir" || no "installer does not remove the run dir"
-grep -q 'trap cleanup_trial RETURN EXIT TERM INT' "$INST" && ok "installer cleans on normal/failure/TERM" || no "installer trap incomplete"
+grep -q 'CLEAN_DIRS+=("\$ST" "/run/aegl-model/\$TID")' "$INST" && ok "installer registers this task's exact dirs" || no "installer does not register the task dirs"
+grep -q "trap 'cleanup_all; exit 143' TERM" "$INST" && ok "installer cleans on normal/failure/TERM" || no "installer trap incomplete"
 
 echo "MOUNT_DROP_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
