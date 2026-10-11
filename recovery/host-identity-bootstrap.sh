@@ -1,159 +1,212 @@
 #!/usr/bin/env bash
-# host-identity-bootstrap.sh — scope-limited, one-shot host privilege bootstrap for the
-# AEGL AI boundary. DRY-RUN BY DEFAULT: it prints the exact commands and changes nothing
-# unless `--apply` is given AND the caller is root.
+# host-identity-bootstrap.sh — scope-limited host identity/permission bootstrap for the
+# AEGL AI boundary. DRY-RUN BY DEFAULT (mode `plan`). Nothing changes unless the operator
+# runs `sudo bash … apply`. No backups/snapshots/archives; no passwords are read or stored.
 #
-# It implements ONLY an identity boundary (users/groups + ownership/mode + minimal
-# traversal). It does NOT: create backups/snapshots, read or store passwords, make
-# `bwrap` setuid, open the whole home, or expose the canonical `.git`.
+# Modes:
+#   plan      (default) print every command and every pre-check; change nothing
+#   apply     perform the ONE controlled permission switch, then IMMEDIATELY verify;
+#             if verification fails it reverts and exits non-zero
+#   verify    run only the acceptance checks (executes; non-zero on failure)
+#   selftest  run the acceptance logic against an ISOLATED throwaway tree (unprivileged)
+#   revert    undo the permission switch (chattr -i + ownership back), leaving no lock
 #
-# Run it from a trusted terminal:
-#     sudo bash recovery/host-identity-bootstrap.sh --plan     # review (no changes)
-#     sudo bash recovery/host-identity-bootstrap.sh --apply    # perform + verify
+# Design decisions (see HOST-IDENTITY-BOOTSTRAP.md):
+#  * the AI user gets NO access to /home/zhong or the canonical projects at all; it works
+#    only in its own task checkout root /var/lib/aegl-ai;
+#  * the canonical-tree owner is the real USER aegl-promote (the useradd-created group is
+#    named explicitly, never assumed);
+#  * the writable parent /home/zhong/Projects is owned by aegl-promote and marked
+#    IMMUTABLE (chattr +i) so the running `zhong` process cannot rename/delete/replace the
+#    project entries through it;
+#  * identity + broker are prepared and isolated-tested BEFORE this switch is applied.
 set -euo pipefail
 
 MODE=plan
 case "${1:-}" in
-  ""|--plan) MODE=plan ;;
-  --apply)   MODE=apply ;;
-  *) echo "usage: $0 [--plan|--apply]"; exit 2 ;;
+  ""|--plan|plan) MODE=plan ;;
+  apply)          MODE=apply ;;
+  verify)         MODE=verify ;;
+  selftest)       MODE=selftest ;;
+  revert)         MODE=revert ;;
+  *) echo "usage: $0 [plan|apply|verify|selftest|revert]"; exit 2 ;;
 esac
 
-# ------------------------------------------------------------------ identities
-AI_USER="aegl-ai"            # the AI: no shell, no sudo, no write on canonical trees
-PROMOTE_USER="aegl-promote"  # trusted promotion owner (a real USER, not just a group)
-RO_GROUP="aegl-ro"           # read-only project access (AI + the human operator)
+AI_USER="aegl-ai";    AI_GROUP="aegl-ai"
+BROKER_USER="aegl-promote"; BROKER_GROUP="aegl-broker"
+HUMAN_GROUP="aegl-ro"                 # read-only access for the human operator only
 OPERATOR_USER="${SUDO_USER:-zhong}"
-AI_STATE_ROOT="/var/lib/aegl-ai"   # the AI's own state/scratch root
+AI_STATE_ROOT="/var/lib/aegl-ai"
 
-# ------------------------------------------------------------------ manifest
-# EXACT paths this program may touch. Anything else is refused.
+PROJECTS_PARENT="/home/zhong/Projects"
+HOME_DIR="/home/zhong"
 PROJECTS=(
-  "/home/zhong/Projects/Google-Android-Agent-Development-Stack"
-  "/home/zhong/Projects/KeepLab-Relay"
-  "/home/zhong/Projects/AI-Engineering-Governance-Layer"
+  "$PROJECTS_PARENT/Google-Android-Agent-Development-Stack"
+  "$PROJECTS_PARENT/KeepLab-Relay"
+  "$PROJECTS_PARENT/AI-Engineering-Governance-Layer"
 )
-TRAVERSE_PARENTS=( "/home/zhong" "/home/zhong/Projects" )
 
-ROOT_UID=0
 say(){ printf '%s\n' "$*"; }
 phase(){ printf '\n== %s ==\n' "$*"; }
 die(){ printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
+run(){ printf '  $ %s\n' "$*"; [ "$MODE" = apply ] || [ "$MODE" = revert ] && "$@"; return 0; }
 
-# run <cmd...> : print the exact command; execute only in apply mode
-run(){ printf '  $ %s\n' "$*"; [ "$MODE" = apply ] && "$@"; return 0; }
+# --------------------------------------------------------------------------- #
+# verification (executes; returns non-zero on any violated expectation)
+# --------------------------------------------------------------------------- #
+VFAIL=0
+# as_user <user> <cmd...> : runuser when root (real check); otherwise run directly
+# (used by the unprivileged selftest, where the isolated tree is owned by the caller).
+as_user(){ if [ "$(id -u)" = 0 ]; then runuser -u "$1" -- "${@:2}"; else "${@:2}"; fi; }
+expect_fail(){ printf '    as %-8s %-52s ' "$OPERATOR_USER" "$1"; if as_user "$OPERATOR_USER" "${@:2}" >/dev/null 2>&1; then echo "LEAK (must be denied)"; VFAIL=$((VFAIL+1)); else echo "denied ok"; fi; }
+expect_ok(){   printf '    as %-8s %-52s ' "$1" "${*:2}"; if as_user "$1" "${@:2}" >/dev/null 2>&1; then echo "ok"; else echo "FAIL"; VFAIL=$((VFAIL+1)); fi; }
 
-# ------------------------------------------------------------------ preflight
-preflight() {
+verify_project(){ # verify_project <project>
+  local p="$1"
+  say "  verify $p"
+  expect_fail "write root"       test -w "$p"
+  local nested; nested="$(find -P "$p" -path "$p/.git" -prune -o -type f -print -quit 2>/dev/null || true)"
+  [ -n "$nested" ] && expect_fail "write nested file" test -w "$nested"
+  [ -e "$p/.git" ] && expect_fail "write .git/config" test -w "$p/.git/config"
+  expect_ok "$BROKER_USER" test -w "$p"
+  expect_fail "immutable parent: create entry"  touch "$PROJECTS_PARENT/aegl-probe-$$"
+  expect_fail "immutable parent: rename entry"  mv "$p" "$p.aegl-probe-$$"
+  [ -e "$p.aegl-probe-$$" ] && { say "    !!! rename SUCCEEDED — restoring"; mv "$p.aegl-probe-$$" "$p" || true; VFAIL=$((VFAIL+1)); }
+  printf '    lsattr %-58s ' "$PROJECTS_PARENT"; lsattr -d "$PROJECTS_PARENT" 2>/dev/null | awk '{print $1}'
+}
+verify_parent_perms(){
+  printf '    %-58s ' "parent owner/mode"
+  stat -c '%U:%G %a' "$PROJECTS_PARENT"
+  local o; o="$(stat -c '%U' "$PROJECTS_PARENT")"
+  [ "$o" = "$BROKER_USER" ] || { echo "    (owner is not $BROKER_USER)"; VFAIL=$((VFAIL+1)); }
+}
+do_verify(){
+  phase "verify (executes; non-zero on any leak)"
+  verify_parent_perms
+  local p; for p in "${PROJECTS[@]}"; do verify_project "$p"; done
+  say "  VERIFY_VIOLATIONS=$VFAIL"
+  [ "$VFAIL" -eq 0 ] || return 1
+}
+
+# --------------------------------------------------------------------------- #
+# plan / apply
+# --------------------------------------------------------------------------- #
+preflight(){
   phase "preflight (fail-closed)"
-  [ "$MODE" = apply ] && [ "$(id -u)" != "$ROOT_UID" ] && die "--apply requires root (run with sudo)"
+  [ "$MODE" = apply ] && [ "$(id -u)" != 0 ] && die "apply requires root (run via sudo)"
   local p
-  for p in "${PROJECTS[@]}" "${TRAVERSE_PARENTS[@]}"; do
+  for p in "${PROJECTS[@]}" "$PROJECTS_PARENT" "$HOME_DIR"; do
     [ -e "$p" ] || die "manifest path missing: $p"
     [ -L "$p" ] && die "manifest path is a symlink (refused): $p"
-    case "$p/" in
-      /home/zhong/Projects/*|/home/zhong/ | /home/zhong/Projects/) : ;;
-      *) die "path outside the approved manifest: $p" ;;
-    esac
   done
-  say "  ok: manifest paths exist and are real directories"
-  # 'useradd' must not be asked to create an existing account
-  if id "$AI_USER" >/dev/null 2>&1; then say "  note: user $AI_USER already exists (creation step will be skipped)"; fi
-  if id "$PROMOTE_USER" >/dev/null 2>&1; then say "  note: user $PROMOTE_USER already exists (creation step will be skipped)"; fi
+  # mount boundary + hardlink + pre-existing ACL review (no bulk change may touch other inodes)
+  say "  mount of $PROJECTS_PARENT: $(findmnt -no FSTYPE --target "$PROJECTS_PARENT")"
+  for p in "${PROJECTS[@]}"; do
+    local xdev links acl dev
+    dev="$(stat -c '%d' "$p")"
+    xdev=$(find -P "$p" -type f -printf '%D\n' 2>/dev/null | grep -vc "^${dev}$" || true)
+    links=$(find -P "$p" -xdev -type f -links +1 2>/dev/null | wc -l)
+    acl=$(getfacl -R -p "$p" 2>/dev/null | grep -c '^user:[^:]' || true)
+    say "  $(basename "$p"): cross-mount files=$xdev hardlinked(links>1)=$links explicit-acl-entries=$acl"
+    [ "$xdev" = 0 ] || die "path crosses a mount boundary: $p"
+    [ "$links" = 0 ] || die "hardlinked files present (a chown would affect inodes outside the manifest): $p"
+  done
 }
 
-# ------------------------------------------------------------------ step 1: identities
-plan_identities() {
-  phase "1. identities"
-  say "  intent: $AI_USER has no shell/sudo and no write on canonical trees;"
-  say "          $PROMOTE_USER owns the canonical trees; $RO_GROUP grants read-only access"
-  say "          to $AI_USER and the operator ($OPERATOR_USER)."
-  if id "$AI_USER" >/dev/null 2>&1; then say "  pre-check: $AI_USER exists -> skip useradd"
-  else run useradd --system --no-create-home --shell /usr/sbin/nologin "$AI_USER"; fi
-  if id "$PROMOTE_USER" >/dev/null 2>&1; then say "  pre-check: $PROMOTE_USER exists -> skip useradd"
-  else run useradd --system --no-create-home --shell /usr/sbin/nologin "$PROMOTE_USER"; fi
-  getent group "$RO_GROUP" >/dev/null || run groupadd --system "$RO_GROUP"
-  run usermod -aG "$RO_GROUP" "$AI_USER"
-  run usermod -aG "$RO_GROUP" "$OPERATOR_USER"
-  run install -d -o "$AI_USER" -g "$AI_USER" -m 0700 "$AI_STATE_ROOT"
-  say "  fail-closed: abort if any account command fails (set -e); nothing is deleted"
-  say "  verify (after apply):"
-  say "    id $AI_USER ; id $PROMOTE_USER ; getent group $RO_GROUP ; stat -c '%a %U:%G' $AI_STATE_ROOT"
+plan_identities(){
+  phase "1. identities (explicit groups; useradd is NOT assumed to create them)"
+  run groupadd --system "$AI_GROUP"
+  run groupadd --system "$BROKER_GROUP"
+  run groupadd --system "$HUMAN_GROUP"
+  run useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$AI_GROUP" "$AI_USER"
+  run useradd --system --no-create-home --shell /usr/sbin/nologin --gid "$BROKER_GROUP" "$BROKER_USER"
+  run usermod -aG "$HUMAN_GROUP" "$OPERATOR_USER"
+  run install -d -o "$AI_USER" -g "$BROKER_GROUP" -m 2770 "$AI_STATE_ROOT"
+  say "  AI access: /var/lib/aegl-ai ONLY. It is NOT added to $HUMAN_GROUP and gets NO ACL"
+  say "             on $HOME_DIR or $PROJECTS_PARENT."
+  say "  verify: id $AI_USER; id $BROKER_USER; getent group $AI_GROUP $BROKER_GROUP $HUMAN_GROUP"
 }
 
-# ------------------------------------------------------------------ step 2: traversal
-plan_traverse() {
-  phase "2. parent traversal (minimum: execute-only, no list/read)"
-  say "  why: /home/zhong is 750 zhong:zhong, so other uids cannot enter it at all."
+plan_traverse(){
+  phase "2. parent traversal — BROKER ONLY (minimum execute-only)"
+  say "  current: $(stat -c '%a %U:%G' "$HOME_DIR")  $HOME_DIR   (750 => other uids cannot enter)"
+  run setfacl -m "u:$BROKER_USER:--x" "$HOME_DIR"
+  run setfacl -m "u:$BROKER_USER:--x" "$PROJECTS_PARENT"
+  say "  fail-closed: mode bits unchanged; the AI user gets no ACL here"
+}
+
+plan_trees(){
+  phase "3. canonical projects (owner=$BROKER_USER, group=$HUMAN_GROUP read-only; .git owner-only)"
   local p
-  for p in "${TRAVERSE_PARENTS[@]}"; do
-    say "  current: $(stat -c '%a %U:%G' "$p")  $p"
-    run setfacl -m "u:$AI_USER:--x" -m "u:$PROMOTE_USER:--x" "$p"
+  for p in "${PROJECTS[@]}"; do
+    say "  --- $p  (current $(stat -c '%a %U:%G' "$p"))"
+    run find -P "$p" -path "$p/.git" -prune -o -type d -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 2750 {} +
+    run find -P "$p" -path "$p/.git" -prune -o -type f -perm -u+x -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 0750 {} +
+    run find -P "$p" -path "$p/.git" -prune -o -type f ! -perm -u+x -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 0640 {} +
+    [ -e "$p/.git" ] || continue
+    run find -P "$p/.git" -type d -exec chown "$BROKER_USER:$BROKER_GROUP" {} + -exec chmod 2700 {} +
+    run find -P "$p/.git" -type f -perm -u+x -exec chown "$BROKER_USER:$BROKER_GROUP" {} + -exec chmod 0700 {} +
+    run find -P "$p/.git" -type f ! -perm -u+x -exec chown "$BROKER_USER:$BROKER_GROUP" {} + -exec chmod 0600 {} +
   done
-  say "  fail-closed: abort if setfacl is unavailable or fails; mode bits are NOT changed"
-  say "  verify (after apply): getfacl -p /home/zhong /home/zhong/Projects"
+  say "  setgid on DIRECTORIES only; files keep exec distinction (0750/0640); other bits cleared;"
+  say "  symlinks never followed or changed; no chown -R/chmod -R."
 }
 
-# ------------------------------------------------------------------ step 3: trees
-plan_trees() {
-  phase "3. canonical projects + .git (owner-only git metadata; group read-only tree)"
-  local root d count
-  for root in "${PROJECTS[@]}"; do
-    say "  --- $root"
-    say "  current: $(stat -c '%a %U:%G' "$root")"
-    # pre-check: no symlinks crossing out of the root; count node classes
-    local dirs files execs links escapes
-    dirs=$(find -P "$root" -type d 2>/dev/null | wc -l)
-    files=$(find -P "$root" -type f 2>/dev/null | wc -l)
-    execs=$(find -P "$root" -type f -perm -u+x 2>/dev/null | wc -l)
-    links=$(find -P "$root" -type l 2>/dev/null | wc -l)
-    escapes=$(find -P "$root" -type l 2>/dev/null | while read -r l; do
-      t="$(readlink -f -- "$l" 2>/dev/null || true)"; case "$t" in "$root"/*) : ;; *) echo "$l";; esac
-    done | wc -l)
-    say "  pre-check: dirs=$dirs files=$files executable=$execs symlinks=$links (escaping=$escapes)"
-    [ "$escapes" -gt 0 ] && die "symlink(s) escape $root — review before applying"
-    # working tree (excluding .git): dirs 2750 (setgid on DIRECTORIES only);
-    # regular files preserve the exec distinction (0750 exec / 0640 plain), no other bits.
-    run find -P "$root" -path "$root/.git" -prune -o -type d -exec chown "$PROMOTE_USER:$RO_GROUP" {} + -exec chmod 2750 {} +
-    run find -P "$root" -path "$root/.git" -prune -o -type f -perm -u+x -exec chown "$PROMOTE_USER:$RO_GROUP" {} + -exec chmod 0750 {} +
-    run find -P "$root" -path "$root/.git" -prune -o -type f ! -perm -u+x -exec chown "$PROMOTE_USER:$RO_GROUP" {} + -exec chmod 0640 {} +
-    # git metadata: owner-only, no group at all (the AI must not read or write canonical .git)
-    if [ -e "$root/.git" ]; then
-      run find -P "$root/.git" -type d -exec chown "$PROMOTE_USER:$PROMOTE_USER" {} + -exec chmod 2700 {} +
-      run find -P "$root/.git" -type f -perm -u+x -exec chown "$PROMOTE_USER:$PROMOTE_USER" {} + -exec chmod 0700 {} +
-      run find -P "$root/.git" -type f ! -perm -u+x -exec chown "$PROMOTE_USER:$PROMOTE_USER" {} + -exec chmod 0600 {} +
-    fi
-    say "  notes: dirs get setgid only; regular files keep their exec distinction (0750/0640);"
-    say "         symlinks are never chowned/chmodded (find ! -type l); no -R broad recursion."
-    say "  fail-closed: abort on the first failing batch; already-changed nodes are NOT rolled back"
-    say "               (re-run --plan/--apply is idempotent because each step re-checks)."
-    say "  verify (after apply):"
-    say "    find -P '$root' -maxdepth 1 -printf '%m %u:%g %p\\n'"
-    say "    runuser -u $AI_USER      -- test -w '$root'   # expect FAILURE (non-zero)"
-    say "    runuser -u $OPERATOR_USER -- test -w '$root'   # expect FAILURE (non-zero)"
-    say "    runuser -u $PROMOTE_USER -- test -w '$root'   # expect SUCCESS"
-    say "    find -P '$root/.git' -maxdepth 1 -printf '%m %u:%g %p\\n'   # expect 2700 aegl-promote"
+plan_parent_lock(){
+  phase "4. parent-entry lock (kernel-enforced via the immutable attribute)"
+  say "  why: $PROJECTS_PARENT is writable by $OPERATOR_USER today, so it can rename/delete"
+  say "       or replace the project entries even if it cannot write inside them."
+  say "  current: $(stat -c '%a %U:%G' "$PROJECTS_PARENT")  lsattr: $(lsattr -d "$PROJECTS_PARENT" 2>/dev/null | awk '{print $1}')"
+  run chown "$BROKER_USER:$HUMAN_GROUP" "$PROJECTS_PARENT"
+  run chmod 2755 "$PROJECTS_PARENT"
+  run chattr +i "$PROJECTS_PARENT"
+  say "  effect: no entry may be created/renamed/deleted under $PROJECTS_PARENT, and the"
+  say "          entry itself cannot be renamed/removed — even by its owner."
+  say "  verify: lsattr -d $PROJECTS_PARENT   # expect the 'i' flag"
+}
+
+plan_revert(){
+  phase "revert (undo the permission switch; no lock left behind)"
+  run chattr -i "$PROJECTS_PARENT"
+  run chown "$OPERATOR_USER:$OPERATOR_USER" "$PROJECTS_PARENT"
+  run chmod 0775 "$PROJECTS_PARENT"
+  local p; for p in "${PROJECTS[@]}"; do
+    run chown -Rh "$OPERATOR_USER:$OPERATOR_USER" "$p"
   done
+  run setfacl -x "u:$BROKER_USER" "$HOME_DIR"
+  run setfacl -x "u:$BROKER_USER" "$PROJECTS_PARENT"
+  say "  (identities and $AI_STATE_ROOT are left in place; remove them only if desired)"
 }
 
-# ------------------------------------------------------------------ step 4: sandbox note
-plan_sandbox_note() {
-  phase "4. sandbox prerequisite (NOT performed here)"
-  say "  bwrap is left unprivileged (never made setuid). Sandboxed tasks need either"
-  say "  unprivileged user namespaces or a subuid/subgid range for $AI_USER:"
-  say "    usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $AI_USER"
-  say "  Add that line only after confirming user namespaces are the actual blocker."
+selftest(){
+  phase "selftest (ISOLATED throwaway tree; nothing outside /var/tmp is touched)"
+  local ST; ST="$(mktemp -d /var/tmp/aegl-selftest-XXXXXX)"
+  local parent="$ST/Projects" proj="$ST/Projects/Demo"
+  mkdir -p "$proj/sub" "$proj/.git"; echo x > "$proj/sub/f.txt"; echo c > "$proj/.git/config"
+  say "  tree=$ST  owner=$(id -un) (unprotected: writable, not immutable)"
+  local save_parent="$PROJECTS_PARENT" save_proj=("${PROJECTS[@]}") fails=0
+  PROJECTS_PARENT="$parent"; PROJECTS=("$proj")
+  VFAIL=0
+  verify_project "$proj" || true
+  say "  unprotected tree -> verify violations=$VFAIL (expected >0: writable + not immutable)"
+  [ "$VFAIL" -gt 0 ] && say "  PASS selftest: verifier detects an unprotected tree" || { say "  FAIL selftest: verifier reported no violations"; fails=$((fails+1)); }
+  PROJECTS_PARENT="$save_parent"; PROJECTS=("${save_proj[@]}")
+  rm -rf "$ST"
+  say "  selftest failures=$fails"; [ "$fails" -eq 0 ]
 }
 
-main() {
+main(){
   say "AEGL host identity bootstrap  [mode: $MODE]"
-  [ "$MODE" = plan ] && say "DRY-RUN: no changes will be made. Re-run with --apply to execute."
-  preflight
-  plan_identities
-  plan_traverse
-  plan_trees
-  plan_sandbox_note
-  phase "done ($MODE)"
+  case "$MODE" in
+    plan) [ "$(id -u)" != 0 ] && say "(dry-run: nothing is changed)"
+          preflight; plan_identities; plan_traverse; plan_trees; plan_parent_lock
+          say ""; say "next: prepare+isolated-test the broker FIRST, then one 'sudo bash $0 apply'" ;;
+    apply) [ "$(id -u)" = 0 ] || die "apply requires root"
+          preflight; plan_identities; plan_traverse; plan_trees; plan_parent_lock
+          if do_verify; then say "APPLY=OK (verified)"; else say "APPLY=REVERT (verification failed)"; plan_revert; return 1; fi ;;
+    verify) do_verify ;;
+    selftest) selftest ;;
+    revert) plan_revert ;;
+  esac
 }
-
 main "$@"
