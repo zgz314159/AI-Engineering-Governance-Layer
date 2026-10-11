@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """AEGL central promotion gate + apply — the ONE implementation.
 
-The gate works on the trust boundary, not on the AI-writable task directory:
+The gate does not re-collect content from the AI-writable worktree when it applies.
+Instead it builds a **broker-controlled, deterministic Git object** that binds the
+complete candidate (file contents, symlink targets and Git file modes via a Git tree),
+and applies exactly that object:
 
-* it compares the *actual candidate worktree* against a **trusted baseline commit**
-  (``base``) — covering committed, staged, unstaged, untracked and ignored paths —
-  rather than trusting ``git status`` alone;
-* it pins the exact candidate content with :func:`candidate_digest` so the bytes
-  approved at verify time are the bytes applied (no swap of files or branch);
-* it **never executes candidate code** (a project ``verify-layout.sh`` is not run
-  here); layout/tests run in the restricted sandbox, not as the broker identity;
-* git operations disable hooks and unrelated exec entry points.
+* :func:`candidate_tree` stages the worktree against the trusted baseline ``base`` into
+  a *private temp index* and writes a tree object (mode + symlink target included);
+* :func:`materialize_commit` turns that tree into a commit object in the project object
+  database with a fixed identity/date (deterministic);
+* :func:`apply_object` merges that exact commit — never a mutable branch name, never a
+  worktree re-read.
 
-A failed validation never changes the target.
+The gate never executes candidate code (a project ``verify-layout.sh`` is not run here),
+and git operations disable hooks and other untrusted exec entry points. A failed check,
+a swapped candidate or an inconsistent object all leave the target unchanged.
 
-CLI:
-    promotion_core.py manifest <worktree>
-    promotion_core.py digest   <worktree> <base> <branch>
-    promotion_core.py changes  <worktree> <base> <out.json>
-    promotion_core.py validate <worktree> <base> <branch>
+CLI: ``manifest`` · ``changes`` · ``tree`` · ``validate`` (see ``main``).
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 
 GEN = re.compile(
     r"(^|/)(build|\.gradle|\.kotlin|node_modules|\.cache|\.pytest_cache)/|"
@@ -36,8 +35,6 @@ GEN = re.compile(
     r"(^|/)secrets\.json$|(^|/)credentials\.json$|(^|/)\.env($|\.)"
 )
 
-# The only project targets a promotion may touch: a directory whose name is in this
-# set and that sits directly under the projects root.
 ALLOWED_PROJECT_DIRS = frozenset(
     {"Google-Android-Agent-Development-Stack", "KeepLab-Relay", "AI-Engineering-Governance-Layer"}
 )
@@ -46,12 +43,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 AEGL_ROOT = os.path.dirname(_HERE)
 DEFAULT_PROJECTS_ROOT = os.path.dirname(AEGL_ROOT)
 
-# Environment for git: no system/global config, no interactive prompts, no HOME config.
+FIXED_IDENT = ["-c", "user.email=aegl@local.invalid", "-c", "user.name=AEGL Broker"]
+FIXED_DATE = "2000-01-01T00:00:00+0000"
 GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",
     "HOME": "/nonexistent",
+    "GIT_AUTHOR_DATE": FIXED_DATE,
+    "GIT_COMMITTER_DATE": FIXED_DATE,
 }
 # Disable hooks and monitors for every git invocation (no untrusted exec entry points).
 GIT_HARDEN = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
@@ -61,14 +61,16 @@ def projects_root() -> str:
     return os.path.realpath(os.environ.get("PROJECTS_ROOT") or DEFAULT_PROJECTS_ROOT)
 
 
-def _git(wt: str, *args, check=False) -> subprocess.CompletedProcess:
+def _git(repo: str, *args, env=None, check=False) -> subprocess.CompletedProcess:
+    merged = dict(GIT_ENV)
+    if env:
+        merged.update(env)
     return subprocess.run(
-        ["git", "-C", wt, *GIT_HARDEN, *args], capture_output=True, text=True, env=GIT_ENV, check=check
+        ["git", "-C", repo, *GIT_HARDEN, *args], capture_output=True, text=True, env=merged, check=check
     )
 
 
 def candidate_manifest(wt: str) -> str:
-    """sha256 of every worktree file (excluding .git), order-independent."""
     script = (
         'cd "$1" && find . -name .git -prune -o -type f -print0 2>/dev/null '
         "| sort -z | xargs -0 -r sha256sum 2>/dev/null"
@@ -76,23 +78,10 @@ def candidate_manifest(wt: str) -> str:
     return subprocess.run(["bash", "-c", script, "_", wt], capture_output=True, text=True).stdout
 
 
-def candidate_digest(wt: str, base: str, branch: str) -> str:
-    """Pin the exact candidate: baseline commit + branch + file manifest."""
-    payload = json.dumps(
-        {"base": base, "branch": branch, "manifest": candidate_manifest(wt)},
-        sort_keys=True, separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
 def changes_from_base(wt: str, base: str) -> list:
-    """Every path that differs between the trusted baseline and the candidate worktree.
-
-    Covers committed, staged, unstaged (``git diff <base>``), untracked and ignored.
-    """
+    """Every path that differs between the baseline and the *current* worktree files."""
     rows = {}
-    diff = _git(wt, "diff", "--name-status", "--no-renames", base)
-    for line in diff.stdout.splitlines():
+    for line in _git(wt, "diff", "--name-status", "--no-renames", base).stdout.splitlines():
         parts = line.split("\t")
         if len(parts) >= 2:
             rows[parts[-1]] = {"status": parts[0], "path": parts[-1]}
@@ -132,51 +121,66 @@ def classify_rows(wt: str, rows: list) -> list:
     return rejected
 
 
-def validate_candidate(wt: str, base: str, branch: str) -> dict:
-    """Pure content/gate validation. Never runs candidate code, never writes the target."""
-    if not os.path.isdir(wt):
-        return {"decision": "REJECTED", "reason": "worktree_missing"}
-    if _git(wt, "rev-parse", "--verify", "--quiet", base).returncode != 0:
-        return {"decision": "REJECTED", "reason": "unknown_baseline"}
-    head_branch = _git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    if branch and head_branch != branch:
-        return {"decision": "REJECTED", "reason": "branch_swapped"}
-    rows = changes_from_base(wt, base)
-    rejected = classify_rows(wt, rows)
-    if rejected:
-        reasons = sorted({r["reject"] for r in rejected})
-        return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
-    return {
-        "decision": "VALIDATED",
-        "base": base,
-        "branch": head_branch,
-        "candidate_digest": candidate_digest(wt, base, head_branch),
-        "changed_paths": len(rows),
-    }
+def candidate_tree(wt: str, base: str, tmpdir: str | None = None) -> str:
+    """A Git tree binding the complete candidate (contents, symlink targets, modes)."""
+    owned = tmpdir is None
+    tmpdir = tmpdir or tempfile.mkdtemp(prefix="aegl-cand-")
+    index = os.path.join(tmpdir, "index")
+    env = {"GIT_INDEX_FILE": index}
+    try:
+        if _git(wt, "read-tree", base, env=env).returncode != 0:
+            raise RuntimeError("read-tree failed")
+        if _git(wt, "add", "-A", env=env).returncode != 0:
+            raise RuntimeError("add failed")
+        out = _git(wt, "write-tree", env=env)
+        if out.returncode != 0:
+            raise RuntimeError("write-tree failed")
+        return out.stdout.strip()
+    finally:
+        if owned:
+            import shutil
+
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def apply(proj: str, wt: str, branch: str, tid: str) -> dict:
-    """Apply the approved diff with hooks and untrusted exec entry points disabled."""
-    ident = ["-c", "user.email=aegl@local.invalid", "-c", "user.name=AEGL Broker"]
-    if _git(wt, *ident, "add", "-A").returncode != 0:
-        return {"decision": "FAILED", "reason": "git_add"}
-    if _git(wt, *ident, "commit", "-q", "--no-verify", "-m", "aegl-task(%s): approved change" % tid).returncode != 0:
-        return {"decision": "FAILED", "reason": "git_commit"}
-    if _git(proj, *ident, "merge", "--no-ff", "--no-verify", "-m", "aegl-promote: %s" % tid, branch).returncode != 0:
+def materialize_commit(proj: str, tree: str, base: str, tid: str) -> str:
+    """Turn the approved tree into a commit object in the project object DB (deterministic)."""
+    out = _git(proj, *FIXED_IDENT, "commit-tree", tree, "-p", base, "-m",
+               "aegl-task(%s): approved candidate" % tid)
+    if out.returncode != 0:
+        raise RuntimeError("commit-tree failed")
+    return out.stdout.strip()
+
+
+def object_tree(proj: str, commit: str) -> str | None:
+    out = _git(proj, "rev-parse", "--verify", "--quiet", "%s^{tree}" % commit)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def apply_object(proj: str, commit: str, tid: str) -> dict:
+    """Apply exactly ``commit`` (a broker-built object) — no worktree re-read, no branch."""
+    if _git(proj, "cat-file", "-e", "%s^{commit}" % commit).returncode != 0:
+        return {"decision": "FAILED", "reason": "object_missing"}
+    if _git(proj, *FIXED_IDENT, "merge", "--no-ff", "--no-verify",
+            "-m", "aegl-promote: %s" % tid, commit).returncode != 0:
         return {"decision": "FAILED", "reason": "git_merge"}
-    return {"decision": "APPLIED", "task_id": tid, "project": proj, "worktree": wt}
+    return {"decision": "APPLIED", "task_id": tid, "project": proj, "commit": commit}
 
 
 def main(argv):
     if len(argv) < 2:
-        print(json.dumps({"error": "usage: manifest|digest|changes|validate"}))
+        print(json.dumps({"error": "usage: manifest|changes|tree|validate"}))
         return 2
     cmd = argv[0]
     if cmd == "manifest":
         print(candidate_manifest(argv[1]), end="")
         return 0
-    if cmd == "digest":
-        print(candidate_digest(argv[1], argv[2], argv[3] if len(argv) > 3 else ""))
+    if cmd == "tree":
+        try:
+            print(candidate_tree(argv[1], argv[2]))
+        except RuntimeError as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 1
         return 0
     if cmd == "changes":
         rows = changes_from_base(argv[1], argv[2])
@@ -186,7 +190,10 @@ def main(argv):
         print(len(rejected))
         return 0
     if cmd == "validate":
-        print(json.dumps(validate_candidate(argv[1], argv[2], argv[3] if len(argv) > 3 else ""), sort_keys=True))
+        rows = changes_from_base(argv[1], argv[2])
+        rejected = classify_rows(argv[1], rows)
+        print(json.dumps({"decision": "REJECTED" if rejected else "VALIDATED",
+                          "rejected": sorted({r["reject"] for r in rejected})}, sort_keys=True))
         return 0
     print(json.dumps({"error": "unknown command: %s" % cmd}))
     return 2

@@ -328,9 +328,9 @@ broker_call() { # <request-json>
       --socket "${AEGL_BROKER_SOCKET:-}" --request "$1" 2>/dev/null
 }
 
-# task register / record — RECORDER ops, authorized server-side by peer uid against a
-# trusted recorder allowlist. The trusted registry (not task.json) binds the project
-# target, baseline and approved candidate content.
+# task register / record — RECORDER ops. In production the recorder is the trusted
+# control identity (root); the AI-running identity is refused server-side and cannot
+# declare verify_result=PASS. The broker itself builds the approved Git object.
 task_register() {
   local id="${1:?task register <id>}" td wt proj branch base req
   _verify_paths "$id"
@@ -340,11 +340,9 @@ task_register() {
 }
 
 task_record() {
-  local id="${1:?task record <id>}" td wt proj branch base digest req
+  local id="${1:?task record <id>}" req
   _verify_paths "$id"
-  branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
-  digest="$(python3 "$AEGL_ROOT/recovery/promotion_core.py" digest "$wt" "$base" "$branch")"
-  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"record","task_id":sys.argv[1],"verify_result":"PASS","candidate_digest":sys.argv[2]}))' "$id" "$digest")"
+  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"record","task_id":sys.argv[1],"verify_result":"PASS"}))' "$id")"
   broker_call "$req"
 }
 

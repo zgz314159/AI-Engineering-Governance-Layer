@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""AEGL trust broker — trusted task registry + promotion of the approved exact content.
+"""AEGL trust broker — trusted registry + exact-object promotion.
 
-The broker is the independent identity that authorizes and applies a promotion. It
-does not trust the AI: the requester is authenticated by ``SO_PEERCRED`` (the kernel
-peer uid, not a client-supplied token), and the *project target, task baseline and
-approved candidate content* are bound by a **broker-owned registry**, never by the
-AI-writable ``task.json`` / ``verify.status``.
+Authorization is by kernel peer uid (``SO_PEERCRED``) against two allowlists, so the
+roles are separated in production:
 
-Ops (bounded; a request carries ``op`` + ``task_id`` only — never a shell command,
-never a path):
+* **recorders** (trusted control identity — currently manual root) run ``register`` /
+  ``record``. The AI-running identity is NOT a recorder and can never declare
+  ``verify_result=PASS``.
+* **requesters** (the AI identity) may only ``validate`` / ``promote`` a task that a
+  recorder already registered and approved.
 
-  register  (recorder uid)  bind  task_id -> {project, base, worktree, branch}
-  record    (recorder uid)  bind  task_id -> approved candidate digest (verify PASS)
-  validate  (requester uid) re-pin the candidate vs the registry; no change on failure
-  promote   (requester uid) validate, then apply the exact approved content
-  status                    read-only registry summary
+``record`` builds a broker-controlled, deterministic Git object for the candidate
+(:func:`promotion_core.candidate_tree` → :func:`materialize_commit`) binding file
+contents, symlink targets and Git file modes, and stores ``{baseline, approved tree,
+approved commit}`` in the broker-owned registry. ``promote`` applies **exactly that
+object** — it never re-reads the AI-writable worktree and never uses a mutable branch
+name. A failed check, a swapped candidate or an inconsistent object leaves the target
+unchanged. Candidate code is never executed here.
 
-The candidate is re-pinned at validate/promote time (:func:`promotion_core.candidate_digest`)
-so files or branches swapped after the check are refused. Git apply disables hooks and
-untrusted exec entry points; candidate code is never executed here. Promotions are
-serialized by an flock.
-
-Modes: ``serve`` (daemon) · ``client`` (used by ``bin/aegl-task``).
+Ops: register · record · validate · promote · status. Modes: serve · client.
 """
 
 from __future__ import annotations
@@ -33,20 +30,20 @@ import re
 import socket
 import struct
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import promotion_core  # noqa: E402
 
 PROTOCOL = "AEGL-BROKER/1"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 OPS = frozenset({"register", "record", "validate", "promote", "status"})
 
 DEFAULT_REGISTRY_DIR = "/var/lib/aegl-promote"
 REGISTRY_FILE = "registry.json"
 
 
-def _split_ids(raw: str):
+def _split_ids(raw: str) -> set:
     out = set()
     for item in (raw or "").split(","):
         item = item.strip()
@@ -62,12 +59,15 @@ def _split_ids(raw: str):
     return out
 
 
+# PRODUCTION defaults: recorders are the trusted control identity (root) only; the
+# AI-running identity is never a recorder. The AI identity may only request.
+# (The test harness overrides these to a single uid; that is test-only.)
 def requester_uids() -> set:
     return _split_ids(os.environ.get("AEGL_BROKER_ALLOW_REQUESTERS", "")) or _split_ids("aegl-ai")
 
 
 def recorder_uids() -> set:
-    return _split_ids(os.environ.get("AEGL_BROKER_ALLOW_RECORDERS", "")) or _split_ids("root,0,zhong")
+    return _split_ids(os.environ.get("AEGL_BROKER_ALLOW_RECORDERS", "")) or _split_ids("root,0")
 
 
 def project_allowlist() -> set:
@@ -76,8 +76,7 @@ def project_allowlist() -> set:
 
 
 def registry_dir() -> str:
-    d = os.environ.get("AEGL_BROKER_REGISTRY_DIR") or DEFAULT_REGISTRY_DIR
-    return os.path.realpath(d)
+    return os.path.realpath(os.environ.get("AEGL_BROKER_REGISTRY_DIR") or DEFAULT_REGISTRY_DIR)
 
 
 def _load_registry(regdir: str) -> dict:
@@ -134,19 +133,16 @@ def _op_register(request: dict, registry: dict) -> dict:
     except ValueError as exc:
         return {"decision": "REJECTED", "reason": str(exc)}
     base = request.get("base")
-    if not isinstance(base, str) or not base:
-        return {"decision": "REJECTED", "reason": "missing_base"}
-    if promotion_core._git(proj, "rev-parse", "--verify", "--quiet", base).returncode != 0:
+    if not isinstance(base, str) or promotion_core._git(proj, "rev-parse", "--verify", "--quiet", base).returncode != 0:
         return {"decision": "REJECTED", "reason": "unknown_base"}
     worktree = request.get("worktree")
     if not isinstance(worktree, str) or not os.path.isdir(worktree):
         return {"decision": "REJECTED", "reason": "worktree_missing"}
-    branch = request.get("branch")
-    if not isinstance(branch, str) or not branch:
+    if not isinstance(request.get("branch"), str) or not request.get("branch"):
         return {"decision": "REJECTED", "reason": "missing_branch"}
     registry[task_id] = {
-        "project": proj, "base": base, "worktree": os.path.realpath(worktree), "branch": branch,
-        "approved_digest": None,
+        "project": proj, "base": base, "worktree": os.path.realpath(worktree),
+        "branch": request["branch"], "approved_tree": None, "approved_commit": None,
     }
     return {"decision": "REGISTERED", "task_id": task_id}
 
@@ -158,22 +154,37 @@ def _op_record(request: dict, registry: dict) -> dict:
         return {"decision": "REJECTED", "reason": "task_not_registered"}
     if request.get("verify_result") != "PASS":
         return {"decision": "REJECTED", "reason": "verify_not_passed"}
-    digest = request.get("candidate_digest")
-    if not isinstance(digest, str) or not DIGEST_RE.match(digest):
-        return {"decision": "REJECTED", "reason": "invalid_candidate_digest"}
-    entry["approved_digest"] = digest
+    wt, base, proj = entry["worktree"], entry["base"], entry["project"]
+    rejected = promotion_core.classify_rows(wt, promotion_core.changes_from_base(wt, base))
+    if rejected:
+        reasons = sorted({r["reject"] for r in rejected})
+        return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
+    tmpdir = tempfile.mkdtemp(prefix="aegl-record-")
+    try:
+        tree = promotion_core.candidate_tree(wt, base, tmpdir=tmpdir)
+        commit = promotion_core.materialize_commit(proj, tree, base, task_id)
+    except RuntimeError as exc:
+        return {"decision": "REJECTED", "reason": "candidate_object_failed: %s" % exc}
+    finally:
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    entry["approved_tree"] = tree
+    entry["approved_commit"] = commit
     entry["verify_result"] = "PASS"
-    return {"decision": "RECORDED", "task_id": task_id}
+    return {"decision": "RECORDED", "task_id": task_id, "approved_tree": tree, "approved_commit": commit}
 
 
-def _check_candidate(entry: dict) -> dict:
-    wt, base, branch = entry["worktree"], entry["base"], entry["branch"]
-    if not entry.get("approved_digest"):
+def _check_object(entry: dict) -> dict:
+    if not entry.get("approved_tree") or not entry.get("approved_commit"):
         return {"decision": "REJECTED", "reason": "candidate_not_recorded"}
-    actual = promotion_core.candidate_digest(wt, base, branch)
-    if actual != entry["approved_digest"]:
-        return {"decision": "REJECTED", "reason": "candidate_content_swapped"}
-    return promotion_core.validate_candidate(wt, base, branch)
+    proj, commit, tree = entry["project"], entry["approved_commit"], entry["approved_tree"]
+    actual = promotion_core.object_tree(proj, commit)
+    if actual is None:
+        return {"decision": "REJECTED", "reason": "object_missing"}
+    if actual != tree:
+        return {"decision": "REJECTED", "reason": "object_inconsistent"}
+    return {"decision": "VALIDATED", "approved_tree": tree, "approved_commit": commit}
 
 
 def handle_request(request: dict, peer_uid: int, regdir: str, lock_fd: int) -> dict:
@@ -183,7 +194,7 @@ def handle_request(request: dict, peer_uid: int, regdir: str, lock_fd: int) -> d
     if op == "status":
         registry = _load_registry(regdir)
         return {"decision": "OK", "registered": len(registry),
-                "recorded": sum(1 for e in registry.values() if e.get("approved_digest"))}
+                "recorded": sum(1 for e in registry.values() if e.get("approved_commit"))}
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     try:
         registry = _load_registry(regdir)
@@ -194,18 +205,18 @@ def handle_request(request: dict, peer_uid: int, regdir: str, lock_fd: int) -> d
             if result["decision"] in ("REGISTERED", "RECORDED"):
                 _save_registry(regdir, registry)
             return result
-        # requester-only ops
         if peer_uid not in requester_uids():
             return {"decision": "REJECTED", "reason": "unauthorized_requester"}
         task_id = request.get("task_id")
         entry = registry.get(task_id) if isinstance(task_id, str) else None
         if not entry:
             return {"decision": "REJECTED", "reason": "task_not_registered"}
-        verdict = _check_candidate(entry)
+        verdict = _check_object(entry)
         verdict["task_id"] = task_id
         if op == "validate" or verdict["decision"] != "VALIDATED":
             return verdict
-        applied = promotion_core.apply(entry["project"], entry["worktree"], entry["branch"], task_id)
+        # Apply the EXACT approved object — no worktree re-read, no branch.
+        applied = promotion_core.apply_object(entry["project"], entry["approved_commit"], task_id)
         applied["task_id"] = task_id
         return applied
     finally:
@@ -304,7 +315,8 @@ def client(sock_path: str, request: dict) -> int:
         return 2
     print(parts[2])
     decision = json.loads(parts[2]).get("decision", "")
-    return {"APPLIED": 0, "VALIDATED": 0, "OK": 0, "REGISTERED": 0, "RECORDED": 0}.get(decision, 3 if decision == "REJECTED" else 4)
+    return {"APPLIED": 0, "VALIDATED": 0, "OK": 0, "REGISTERED": 0, "RECORDED": 0}.get(
+        decision, 3 if decision == "REJECTED" else 4)
 
 
 def main(argv):
