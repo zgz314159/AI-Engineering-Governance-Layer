@@ -138,8 +138,10 @@ self_test(){
   say ""
   say "== real independent-UID trial via aegl-hermes-sandbox (fail-closed) =="
   local ST; ST="$(mktemp -d /var/tmp/aegl-hermes-trial-XXXXXX)" || fail "mktemp failed"
-  local PROJ="$ST/Google-Android-Agent-Development-Stack" WT="$PROJ/trial-wt" SCR="$ST/scratch"
+  local PROJ="$ST/Google-Android-Agent-Development-Stack" SCR="$ST/scratch"
+  local WT="$PROJ/trial-wt"
   local CONTRACT="$ST/contract" TID="trial"
+  local COMPILER_USER="${SUDO_USER:-zhong}"
   local OFFICIAL="/home/zhong/Projects/Google-Android-Agent-Development-Stack"
   cleanup_trial(){
     rm -rf "$ST"
@@ -164,12 +166,22 @@ PY
   mkdir -p "$WT/ro-probe"; chown root:root "$WT/ro-probe"; chmod 0555 "$WT/ro-probe"
   chown -R "$AI_USER":"$(id -g "$AI_USER")" "$WT" 2>/dev/null || true; chown root:root "$WT/ro-probe"
 
-  # the frozen contract, compiled by the EXISTING compiler, controlled by the trusted side
-  python3 "$LIBDIR/make_trial_contract.py" --projects-root "$ST" \
+  # the contract, compiled OUTSIDE the project by the NORMAL user — never root executing the
+  # user-writable project compiler; the trusted side then verifies a FIXED file list and freezes it
+  chmod 0755 "$ST"; chmod -R a+rX "$PROJ"
+  mkdir -p "$CONTRACT"; chown "$COMPILER_USER":"$(id -g "$COMPILER_USER")" "$CONTRACT"
+  runuser -u "$COMPILER_USER" -- python3 "$LIBDIR/make_trial_contract.py" --projects-root "$ST" \
     --allowed "Google-Android-Agent-Development-Stack/trial-wt/" \
     --forbidden "Google-Android-Agent-Development-Stack/reports/,KeepLab-Relay/,AI-Engineering-Governance-Layer/" \
     --read-first "Google-Android-Agent-Development-Stack/trial-wt/INPUT.txt" \
-    --out "$CONTRACT" || { say "FAIL: contract compile"; return 1; }
+    --out "$CONTRACT" || { say "FAIL: contract compile (as $COMPILER_USER)"; return 1; }
+  local f miss=0
+  for f in PRODUCT.md requirements.md design.md tasks.md DESIGN.md acceptance.md project-context.json \
+           verification-intent.json manifest.json implementation-contract.json READY.json EXECUTOR-PROMPT.md; do
+    [ -f "$CONTRACT/$f" ] || { say "FAIL: contract file missing from the fixed list: $f"; miss=1; }
+  done
+  [ "$miss" = 0 ] || return 1
+  say "  contract: 12/12 files present (fixed list); compiled as $COMPILER_USER; freezing root-owned a-w"
   chown -R root:root "$CONTRACT"; chmod -R a-w "$CONTRACT"; chmod -R a+rX "$CONTRACT"
 
   cat > "$WT/PROMPT.md" <<EOF
@@ -210,19 +222,20 @@ PY
   { [ "$cpuid" = "$(id -u "$AI_USER")" ] && [ "$alive" = "True" ]; } && uidok=1
   { [ -n "$cpns" ] && [ "$cpns" != "$host_ns" ] && [ "$alive" = "True" ]; } && nsok=1
   [ -f "$WT/FACTS.txt" ] && grep -q 'W[123]_' "$WT/FACTS.txt" && wa=1
-  # separate evidence categories (never conflated)
-  local model_run=0 guard_rej=0 os_rej=0
-  [ "$rp" = 1 ] && model_run=1
-  grep -q 'W2_FORBIDDEN.*FORBIDDEN_REFUSED' "$WT/FACTS.txt" 2>/dev/null && guard_rej=1
-  grep -q 'W3_READONLY.*READONLY_REFUSED' "$WT/FACTS.txt" 2>/dev/null && [ ! -e "$WT/ro-probe/breach" ] && os_rej=1
+  # evidence, reported in SEPARATE categories. FACTS.txt is the model's SELF-REPORT: it cannot
+  # prove a tool actually ran, nor a guard/OS denial. This round wires NO trusted decision source,
+  # so the isolation checks are NOT_PROVEN and the gate stays FAILED (assertions are not deleted).
+  local model_run=0 guard_state="NOT_PROVEN" os_state="NOT_PROVEN"
+  { [ "$rp" = 1 ] && [ "$alive" = "True" ]; } && model_run=1
   { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
-  say "  evidence: model_run=$model_run guard_rejection=$guard_rej os_rejection=$os_rej"
-  say "            (FACTS/BREACH alone are NOT proof; uid/ns from the live child)"
+  say "  model_run=$model_run (live child + the real RESULT.txt file, not FACTS)"
+  say "  guard_rejection=$guard_state  os_rejection=$os_state  (no trusted decision source yet)"
+  say "  NOTE: a guard-blocked write is never reported as an OS denial; FACTS/BREACH alone prove nothing"
   say "  trusted evidence: launch_rc=$rc child_uid=${cpuid:-none} child_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
   local verdict grc
   verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
   say "  TRIAL_GATE $verdict"
-  { [ "$guard_rej" = 1 ] && [ "$os_rej" = 1 ]; } || { say "  TRIAL_CATEGORIES incomplete (guard_rejection=$guard_rej os_rejection=$os_rej)"; grc=1; }
+  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ]; } || { say "  isolation checks $guard_state/$os_state — gate stays FAILED"; grc=1; }
   return "$grc"
 }
 
