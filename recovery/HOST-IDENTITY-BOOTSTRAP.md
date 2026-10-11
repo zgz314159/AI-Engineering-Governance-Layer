@@ -99,9 +99,20 @@ Install (the real, idempotent entry — `recovery/install-broker.sh`; `host-iden
 broker-plan` only PRINTS this description and never runs sudo or writes the marker):
 
 ```
-sudo /home/zhong/Projects/AI-Engineering-Governance-Layer/recovery/install-broker.sh \
-     --commit <full-40-hex-commit> [--self-test]
+git -C /home/zhong/Projects/AI-Engineering-Governance-Layer \
+    show <full-40-hex-commit>:recovery/install-broker.sh \
+  | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer \
+                    --projects-root /home/zhong/Projects \
+                    --commit <full-40-hex-commit> --self-test
 ```
+
+The installer takes explicit inputs (`--repo`, `--projects-root`, `--commit`) and never relies on
+`$BASH_SOURCE`, so the piped form above is the real delivery. It validates every input and required
+file (and each extracted file's sha256 against the commit) **before** any host change; any
+extraction / install / service-start / acceptance failure returns non-zero and never prints
+`INSTALL_RESULT=OK`; it checks the real `systemctl is-active` state. The `--self-test` runs its git
+operations as the repository-owning identity (no `safe.directory=*`), under a bounded timeout, and
+always kills its broker process and removes its temp dir.
 
 The installer:
 

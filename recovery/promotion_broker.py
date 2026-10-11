@@ -155,16 +155,21 @@ def _op_record(request: dict, registry: dict) -> dict:
     if request.get("verify_result") != "PASS":
         return {"decision": "REJECTED", "reason": "verify_not_passed"}
     wt, base, proj = entry["worktree"], entry["base"], entry["project"]
-    rejected = promotion_core.classify_rows(wt, promotion_core.changes_from_base(wt, base))
-    if rejected:
-        reasons = sorted({r["reject"] for r in rejected})
-        return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
+    # Freeze the candidate into a tree (no filters/hooks), then classify the OBJECT.
     tmpdir = tempfile.mkdtemp(prefix="aegl-record-")
     try:
-        tree = promotion_core.candidate_tree(wt, base, tmpdir=tmpdir)
-        commit = promotion_core.materialize_commit(proj, tree, base, task_id)
-    except RuntimeError as exc:
-        return {"decision": "REJECTED", "reason": "candidate_object_failed: %s" % exc}
+        try:
+            tree = promotion_core.candidate_tree(wt, base, tmpdir=tmpdir)
+        except RuntimeError as exc:
+            return {"decision": "REJECTED", "reason": "candidate_object_failed: %s" % exc}
+        rejected = promotion_core.classify_tree(proj, base, tree, wt)
+        if rejected:
+            reasons = sorted({r["reject"] for r in rejected})
+            return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
+        try:
+            commit = promotion_core.materialize_commit(proj, tree, base, task_id)
+        except RuntimeError as exc:
+            return {"decision": "REJECTED", "reason": "candidate_commit_failed: %s" % exc}
     finally:
         import shutil
 

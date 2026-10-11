@@ -116,5 +116,23 @@ reg r10 "$BAD" "$BB" "$WT10" r10
 # --- 11. unsupported op ------------------------------------------------------- #
 [ "$(dec "$(req "{\"op\":\"kill\",\"task_id\":\"r1\"}")")" = REJECTED ] && ok "unsupported op rejected" || no "unsupported op"
 
+# --- 12. candidate clean filter must NOT run (frozen object built filter-free) - #
+SIDE2="$ST/filter_side_effect"
+WT12="$(make_wt "$APP" r12 'echo x > data.txt')"
+printf '*.evil filter=evilfilter\n' > "$WT12/.gitattributes"
+printf '#!/bin/sh\ntouch %s\n' "$SIDE2" > "$ST/evilfilter.sh"; chmod +x "$ST/evilfilter.sh"
+git -C "$APP" config filter.evilfilter.process "$ST/evilfilter.sh"
+echo payload > "$WT12/data.evil"
+reg r12 "$APP" "$BASE" "$WT12" r12
+req '{"op":"record","task_id":"r12","verify_result":"PASS"}' >/dev/null
+req '{"op":"promote","task_id":"r12"}' >/dev/null
+[ -e "$SIDE2" ] && no "candidate clean filter executed by the broker" || ok "clean filter not executed (frozen object built filter-free)"
+
+# --- 13. object-bound symlink escape rejected --------------------------------- #
+WT13="$(make_wt "$APP" r13 'echo ok > x.txt && ln -s /etc/passwd escape')"
+reg r13 "$APP" "$BASE" "$WT13" r13
+d13="$(dec "$(req '{"op":"record","task_id":"r13","verify_result":"PASS"}')")"
+[ "$d13" = REJECTED ] && ok "object-bound symlink escape rejected" || no "object symlink escape allowed ($d13)"
+
 echo "BROKER_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -205,8 +205,11 @@ BROKER_REGISTRY_DIR="/var/lib/aegl-promote"
 
 broker_install_plan(){
   phase "trusted promotion broker — install (reviewable; the REAL entry is recovery/install-broker.sh)"
-  say "Run the idempotent installer from a trusted terminal (NOT this plan printer):"
-  say "   sudo $AEGL_ROOT/recovery/install-broker.sh --commit <full-40-hex-commit> [--self-test]"
+  say "Run the idempotent installer from a trusted terminal (NOT this plan printer). It takes"
+  say "explicit inputs — repo, projects-root and a full commit — and works when piped to bash -s:"
+  say "   sudo bash install-broker.sh --repo <AEGL> --projects-root <Projects> --commit <full-40-hex> [--self-test]"
+  say "   delivered form: git -C <AEGL> show <full-40-hex>:recovery/install-broker.sh \\"
+  say "       | sudo bash -s -- --repo <AEGL> --projects-root <Projects> --commit <full-40-hex> --self-test"
   say "It extracts every file FROM that pinned commit (verifying sha256), creates the identities,"
   say "the root-owned program/service and the registry dir; it does NOT run switch, does NOT change"
   say "project permissions, does NOT merge and does NOT write the marker. --self-test runs the"
