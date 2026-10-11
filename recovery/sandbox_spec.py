@@ -21,7 +21,7 @@ import sys
 
 
 def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, guard_src,
-          guard_dest, info_fd, hermes_args) -> dict:
+          guard_dest, contract_package, info_fd, hermes_args) -> dict:
     argv = [
         bwrap, "--unshare-all", "--uid", uid, "--gid", gid, "--dev", "/dev", "--proc", "/proc",
         "--ro-bind", "/", "/",
@@ -41,6 +41,8 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, gua
         "--ro-bind", run + "/stage/empty", "/home/zhong/.hermes/.env",
         # the contract-guard source, at the canonical path the hooks reference
         {"bind_fd": "guard", "dest": guard_dest},
+        # the frozen contract package, read-only (the guard reads it)
+        "--ro-bind", contract_package, contract_package,
         # WRITABLE task mounts (from the trusted registry) — the ONLY writable project paths
         "--bind", wt, wt,
         "--bind", scr, scr,
@@ -52,6 +54,7 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, gua
         "--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin",
         "--setenv", "HOME", run + "/home", "--setenv", "HERMES_HOME", "/home/zhong/.hermes",
         "--setenv", "TMPDIR", scr, "--setenv", "AEGL_AI_SANDBOX", "1",
+        "--setenv", "HERMES_CONTRACT_PACKAGE", contract_package,
         "--die-with-parent", "--chdir", wt, "bash", run + "/sandbox-run.sh",
     ] + list(hermes_args)
     return {"fds": {"runtime": runtime, "tools": tools, "entry": entry, "installs": installs,
@@ -61,7 +64,7 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, gua
 def main(argv):
     ap = argparse.ArgumentParser()
     for name in ("bwrap", "uid", "gid", "run", "wt", "scr", "runtime", "tools", "entry",
-                 "installs", "guard-src", "guard-dest"):
+                 "installs", "guard-src", "guard-dest", "contract-package"):
         ap.add_argument("--" + name, required=True)
     ap.add_argument("--info-fd", default="")
     ap.add_argument("hermes", nargs=argparse.REMAINDER)
@@ -69,8 +72,8 @@ def main(argv):
     hermes = args.hermes[1:] if args.hermes[:1] == ["--"] else args.hermes
     spec = build(bwrap=args.bwrap, uid=args.uid, gid=args.gid, run=args.run, wt=args.wt, scr=args.scr,
                  runtime=args.runtime, tools=args.tools, entry=args.entry, installs=args.installs,
-                 guard_src=args.guard_src, guard_dest=args.guard_dest, info_fd=args.info_fd,
-                 hermes_args=hermes)
+                 guard_src=args.guard_src, guard_dest=args.guard_dest,
+                 contract_package=args.contract_package, info_fd=args.info_fd, hermes_args=hermes)
     json.dump(spec, sys.stdout)
     return 0
 

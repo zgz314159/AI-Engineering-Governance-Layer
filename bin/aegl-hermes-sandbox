@@ -57,16 +57,14 @@ PYBIN="$(head -1 "$HERMES_RUNTIME/.hermes/bin/hermes" 2>/dev/null | sed 's/^#!//
 GUARD_SRC="$(grep -oE '/[^ ]*contract_guard\.py' "$HERMES_PROFILE_CONFIG" | head -1)"; GUARD_SRC="${GUARD_SRC%/*}"
 [ -n "$GUARD_SRC" ] && [ -d "$GUARD_SRC" ] || die "contract-guard source dir not found (from the hooks)"
 GUARD_DEST="$GUARD_SRC"
-[ -n "${HERMES_CONTRACT_PACKAGE:-}" ] || die "HERMES_CONTRACT_PACKAGE is required (guard config); refusing otherwise"
-[ -f "$HERMES_CONTRACT_PACKAGE/implementation-contract.json" ] || die "contract package incomplete: $HERMES_CONTRACT_PACKAGE"
 
 # --- trusted task registry (root-owned; NOT the AI-writable task.json) -------- #
 [ -f "$TRUSTED_TASK_REGISTRY" ] || die "trusted task registry not found: $TRUSTED_TASK_REGISTRY"
-read -r WT SCR_R PROJ < <(python3 - "$TRUSTED_TASK_REGISTRY" "$TASK" <<'PY'
+read -r WT SCR_R PROJ CONTRACT < <(python3 - "$TRUSTED_TASK_REGISTRY" "$TASK" <<'PY'
 import json, sys
 reg = json.load(open(sys.argv[1], encoding="utf-8"))
 e = reg.get(sys.argv[2], {})
-print(e.get("worktree", ""), e.get("scratch", ""), e.get("project", ""))
+print(e.get("worktree", ""), e.get("scratch", ""), e.get("project", ""), e.get("contract_package", ""))
 PY
 )
 [ -n "$WT" ] && [ -n "$SCR_R" ] || die "task not in the trusted registry: $TASK"
@@ -75,6 +73,22 @@ for p in "$WT_R" "$SCR_R"; do
   case "$p" in /tmp/*|/var/tmp/*|/run/aegl-*/*|/var/lib/aegl-*/*) : ;; *) die "task path outside the allowed bases: $p" ;; esac
 done
 [ "$(stat -c '%U' "$WT_R")" = "$AI_USER" ] || die "worktree not owned by $AI_USER"
+
+# --- frozen contract package: from the trusted registry, matched to this task -- #
+[ -n "$CONTRACT" ] && [ -f "$CONTRACT/implementation-contract.json" ] || die "trusted registry has no valid contract_package for $TASK"
+python3 - "$CONTRACT" "$WT_R" <<'PY' || die "contract does not match the task dir"
+import json, os, sys
+pkg, wt = sys.argv[1], sys.argv[2]
+c = json.load(open(os.path.join(pkg, "implementation-contract.json"), encoding="utf-8"))
+pc = json.load(open(os.path.join(pkg, "project-context.json"), encoding="utf-8"))
+root = os.path.realpath(pc["source_root"]); wt = os.path.realpath(wt)
+if not (wt == root or wt.startswith(root + os.sep)):
+    sys.exit("worktree outside source_root")
+rel = os.path.relpath(wt, root).replace(os.sep, "/")
+if not any(rel == a.rstrip("/") or rel.startswith(a.rstrip("/") + "/") for a in c.get("allowed_paths", [])):
+    sys.exit("worktree not authorized by allowed_paths")
+sys.exit(0)
+PY
 
 # --- run dir + traversable /home/zhong skeleton ------------------------------- #
 RUN="/run/aegl-model/$TASK"; rm -rf "$RUN"
@@ -139,7 +153,8 @@ SPEC="$RUN/spec.json"
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
   --wt "$WT_R" --scr "$SCR_R" --runtime "$HERMES_RUNTIME" --tools "$HERMES_TOOLS" \
   --entry "$HERMES_ENTRY" --installs "$HERMES_INSTALLS" --guard-src "$GUARD_SRC" \
-  --guard-dest "$GUARD_DEST" ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
+  --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
+  ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 python3 "$FD_EXEC" < "$SPEC"
 rc=$?
 kill "$BPID" 2>/dev/null

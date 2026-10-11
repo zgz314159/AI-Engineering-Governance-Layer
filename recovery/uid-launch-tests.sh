@@ -97,7 +97,7 @@ p = sys.argv[1]
 spec = importlib.util.spec_from_file_location("ss", p); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 argv = m.build(bwrap="bwrap", uid="994", gid="972", run="/run/a", wt="/wt", scr="/scr",
                runtime="/r", tools="/t", entry="/e", installs="/i", guard_src="/g",
-               guard_dest="/home/zhong/g", info_fd="", hermes_args=["hermes"])["argv"]
+               guard_dest="/home/zhong/g", contract_package="/pkg", info_fd="", hermes_args=["hermes"])["argv"]
 def binds(src):
     return any(argv[i] == "--bind" and argv[i+1] == src and argv[i+2] == src for i in range(len(argv)-2))
 print("OK" if binds("/wt") and binds("/scr") else "MISSING")
@@ -128,6 +128,35 @@ grep -q '^hooks:' /home/zhong/.hermes/profiles/android-stack/config.yaml && ok "
 GD="$(grep -oE '/[^ ]*contract_guard\.py' /home/zhong/.hermes/profiles/android-stack/config.yaml | head -1)"; GD="${GD%/*}"
 { [ -n "$GD" ] && [ -d "$GD" ]; } && ok "contract-guard source dir present (${GD})" || { RP_OK=0; no "guard source dir missing"; }
 [ "$RP_OK" = 1 ] && ok "all entry-referenced runtime paths resolve" || no "some referenced paths missing"
+
+# --- F. contract wiring (focused check) --------------------------------------- #
+FC="$ST/fc"; WT2="$FC/Google-Android-Agent-Development-Stack/trial-wt"; PKG="$ST/fc-contract"
+mkdir -p "$WT2" "$FC/scratch"; echo TOK > "$WT2/INPUT.txt"
+if python3 "$AEGL_ROOT/recovery/make_trial_contract.py" --projects-root "$FC" \
+     --allowed "Google-Android-Agent-Development-Stack/trial-wt/" \
+     --forbidden "Google-Android-Agent-Development-Stack/reports/,KeepLab-Relay/" \
+     --read-first "Google-Android-Agent-Development-Stack/trial-wt/INPUT.txt" --out "$PKG" >/dev/null 2>&1; then
+  ok "focused: trial contract compiles READY via the existing compiler"
+else
+  no "focused: trial contract did not compile"
+fi
+GUARD=/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py
+HERMES_CONTRACT_PACKAGE="$PKG" bash -c "printf '{\"tool_name\":\"write_file\",\"tool_input\":{\"path\":\"$WT2/out.txt\"},\"cwd\":\"$WT2\"}' | python3 '$GUARD' >/dev/null 2>&1"
+[ $? -eq 0 ] && ok "focused: real guard ALLOWS the authorized task output" || no "focused: guard did not allow the authorized output"
+HERMES_CONTRACT_PACKAGE="$PKG" bash -c "printf '{\"tool_name\":\"write_file\",\"tool_input\":{\"path\":\"/home/zhong/Projects/KeepLab-Relay/x\"},\"cwd\":\"$WT2\"}' | python3 '$GUARD' >/dev/null 2>&1"
+[ $? -eq 2 ] && ok "focused: real guard BLOCKS an out-of-bound target" || no "focused: guard did not block the out-of-bound target"
+SA="$(python3 - "$AEGL_ROOT/recovery/sandbox_spec.py" "$PKG" <<'PY'
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location("ss", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+argv = m.build(bwrap="bwrap", uid="994", gid="972", run="/run/a", wt="/wt", scr="/scr",
+               runtime="/r", tools="/t", entry="/e", installs="/i", guard_src="/g",
+               guard_dest="/home/zhong/g", contract_package=sys.argv[2], info_fd="", hermes_args=["hermes"])["argv"]
+has_bind = any(argv[i] == "--ro-bind" and argv[i+1] == sys.argv[2] and argv[i+2] == sys.argv[2] for i in range(len(argv)-2))
+has_env = any(argv[i] == "--setenv" and argv[i+1] == "HERMES_CONTRACT_PACKAGE" and argv[i+2] == sys.argv[2] for i in range(len(argv)-2))
+print("OK" if has_bind and has_env else "MISSING")
+PY
+)"
+[ "$SA" = OK ] && ok "focused: argv has the read-only contract mount + HERMES_CONTRACT_PACKAGE env" || no "focused: argv missing contract wiring ($SA)"
 
 echo "UID_LAUNCH_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
