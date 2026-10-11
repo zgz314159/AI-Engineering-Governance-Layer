@@ -1593,6 +1593,42 @@ TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 1
 Commit: AEGL branch `plan/install-state2` @ `14dad10` (implementation; not merged). Prior commits on
 `plan/install-state` (`7da132d`) are kept as history.
 
+## Round update 30: three launch-chain gaps fixed (alias, lease, profile state)
+
+1. **Private mount alias** — the launcher stopped creating `SRC/installs` while `prep.sh` still
+   `mount --bind` to it, and the spec sourced the installs content from the real `/home/zhong` path,
+   which is **unreachable after the drop** to aegl-ai. The launcher now binds the real generation and
+   profile to aliases that exist (`$SRC/gen`, `$SRC/profile`), and **every** mount source is a
+   post-drop-reachable alias (checked from the real argv). Host permissions unchanged.
+2. **Lease mount** — the whole `environments` tree was read-only, but
+   `runtime_state.lease_generation → lease_directory` writes `<generation>/.leases` and probes
+   `.lease-managed`. The selected generation is now **parsed from the real `facts.json`** (never
+   hardcoded); a task-level generation dir holds a writable `.leases` plus the verbatim
+   `.lease-managed`, while `venv/` and `workspace/` are reused **read-only** by sub-bind from the
+   alias. Nothing is created under the host generation dir.
+3. **Startup state paths** — the android-stack profile is a task-level **writable view** (`state.db`
+   + `-wal`/`-shm`, `sessions`, `logs`, `runtime`, `terminal-sessions`, `cache`, `sandboxes` and its
+   locks), with the instruction files (`SOUL.md`, `profile.yaml`, `skills`, `hooks`,
+   `models_dev_cache.json`) and the generated `config.yaml` reused read-only; home
+   `sessions`/`logs`/`cache` are task-level writable too. No old profile or **history database** is
+   copied and no backup/archive is made.
+
+Focused check (`recovery/entry-gaps-tests.sh`, this round: **2 runs** — 1 initial failure in my own
+alias-extraction regex, then the re-verify): **12/12**. The fixture is explicitly **not** aegl-ai host
+acceptance.
+
+```text
+HOST_UID_DROP=PASS (unchanged; real output uid=994 gid=972, Caps=0, NoNewPrivs=1, groups=[])
+HERMES_STARTUP=BLOCKED (re-verify pending the user's real run)
+MODEL_CALL=NOT_RUN
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=12/12 (2 runs)
+REAL_AEGL_AI_HERMES=NOT_RUN
+TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 2cc32cdb8d987a56b51930ac5d631b04adba9363:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 2cc32cdb8d987a56b51930ac5d631b04adba9363 --self-test
+```
+
+Commit: AEGL branch `plan/entry-gaps` @ `2cc32cd` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
