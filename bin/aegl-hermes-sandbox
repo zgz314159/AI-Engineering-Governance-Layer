@@ -4,14 +4,14 @@
 #
 #   sudo aegl-hermes-sandbox --task <id> [--info-fd N] -- hermes ...
 #
-# /home/zhong is 0750 zhong:zhong. The launcher runs as root and does ONLY bwrap's
-# mount/pid/net isolation and the declared-path mounts — no user namespace, so the host
-# ids are preserved and root resolves the 0750 sources directly (no `--ro-bind-fd` fd
-# trick). The FIRST in-sandbox process is a fixed trusted drop entry (setpriv) that
-# clears groups/caps/env, sets no_new_privs, drops to the HOST aegl-ai, and only then
-# starts the runner. No model/project code runs before the drop. Host HOME/project
-# permissions are NOT changed; /home/zhong is a traversable skeleton with only the
-# declared runtime, the android-stack profile, the guard source and the task dirs.
+# /home/zhong is 0750 zhong:zhong. The trusted root launcher prepares the task dirs, config
+# and a private mount-namespace alias view (root bind-mounts the declared sources to paths
+# under the task dir, so aegl-ai need not traverse the real HOME's private parents). It then
+# drops to the HOST aegl-ai (setpriv; groups + bounding/inheritable/ambient caps cleared,
+# no_new_privs set) with a read-only identity check, and only THEN starts /usr/bin/bwrap as
+# aegl-ai — a plain non-setuid bwrap using its AppArmor-permitted user namespace. There is
+# NO capability-requiring identity switch inside bwrap. Host HOME/project permissions are
+# NOT changed and the temporary aliases never propagate to the host.
 set -uo pipefail
 
 BWRAP="/usr/bin/bwrap"
@@ -156,19 +156,43 @@ EOF
 chmod 0755 "$RUN/sandbox-run.sh"
 
 # --- bwrap spec (root mounts, no userns) + trusted drop entry ------------------ #
-say "AEGL_HERMES_SANDBOX task=$TASK ai_uid=$AI_UID sandbox=on (root mounts, no userns; setpriv drop)"
+say "AEGL_HERMES_SANDBOX task=$TASK ai_uid=$AI_UID sandbox=on (private ns aliases; drop to aegl-ai BEFORE bwrap)"
 SPEC="$RUN/spec.json"
+# --- alias view: root binds the declared sources inside THIS task's private mount ns -- #
+# aegl-ai cannot traverse the 0750 /home/zhong parents; the aliases live under a traversable
+# task dir, so bwrap (running AS aegl-ai) can resolve them. Nothing is copied and the mounts
+# exist only in this private namespace (never propagated to the host).
+SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/installs" "$SRC/guard"; : > "$SRC/entry"
+chmod 0755 "$SRC"; chown root:root "$SRC"
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
-  --wt "$WT_R" --scr "$SCR_R" --runtime "$HERMES_RUNTIME" --tools "$HERMES_TOOLS" \
-  --entry "$HERMES_ENTRY" --installs "$HERMES_INSTALLS" --guard-src "$GUARD_SRC" \
-  --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" --setpriv "$SETPRIV" \
-  --drop-verify "$DROP_VERIFY" \
+  --wt "$WT_R" --scr "$SCR_R" --runtime "$SRC/runtime" --tools "$SRC/tools" \
+  --entry "$SRC/entry" --installs "$SRC/installs" --guard-src "$SRC/guard" \
+  --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 # create EVERY mount target under the read-only skeleton, derived from the ACTUAL argv
 python3 "$PREPARE" "$SPEC" "$SK" || die "mount-target preparation failed"
 chown -R root:"$AI_GROUP" "$RUN/stage"; chmod -R g+rX,o-rwx "$RUN/stage"
 chmod 0755 "$SK" "$SK/.hermes" "$SK/.local/bin"
-python3 "$EXEC_SPEC" "$SPEC"
+
+# --- trusted root prep: private ns + aliases, then drop to host aegl-ai BEFORE bwrap ---- #
+# bwrap starts as aegl-ai (non-setuid) and uses its AppArmor-permitted user namespace; there
+# is NO capability-requiring identity switch inside bwrap.
+cat > "$RUN/prep.sh" <<EOF
+#!/bin/bash
+set -e
+mount --make-rprivate /
+mount --bind '$HERMES_RUNTIME' '$SRC/runtime'
+mount --bind '$HERMES_TOOLS' '$SRC/tools'
+mount --bind '$HERMES_ENTRY' '$SRC/entry'
+mount --bind '$HERMES_INSTALLS' '$SRC/installs'
+mount --bind '$GUARD_SRC' '$SRC/guard'
+exec '$SETPRIV' --reuid '$AI_UID' --regid '$AI_GID' --clear-groups --no-new-privs \
+  --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- \\
+  python3 '$DROP_VERIFY' --uid '$AI_UID' --gid '$AI_GID' -- \\
+  python3 '$EXEC_SPEC' '$SPEC'
+EOF
+chown root:root "$RUN/prep.sh"; chmod 0755 "$RUN/prep.sh"
+unshare --mount --propagation private -- bash "$RUN/prep.sh"
 rc=$?
 kill "$BPID" 2>/dev/null
 exit "$rc"

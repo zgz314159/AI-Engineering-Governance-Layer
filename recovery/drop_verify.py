@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Fixed trusted drop entry: confirm the identity/capability handoff, then exec the runner.
+"""Read-only host identity check run BEFORE bwrap (it does not change identity).
 
-It runs as the FIRST in-sandbox process AFTER setpriv has switched to the host aegl-ai. It
-verifies the ACTUAL kernel state of THIS process:
+The trusted root launcher has already used setpriv to switch to the HOST aegl-ai; this entry
+runs as aegl-ai and confirms the ACTUAL kernel state at the host level:
   * real/effective/saved UID and GID equal the host aegl-ai ids
   * CapEff, CapPrm, CapInh, CapAmb are all zero
   * NoNewPrivs == 1
   * no supplementary groups remain
 It records only the UID/GID, the capability sets and the restriction state — never a
 credential or the full environment. If any check fails it prints the actual state and the
-first failure, and exits non-zero so the model never starts. On success it execs the runner.
+first failure, and exits non-zero so bwrap (and the model) never start. On success it execs
+the command — /usr/bin/bwrap. It never performs an identity change itself.
 
 CLI: drop_verify.py --uid U --gid G -- <cmd...>
 """
