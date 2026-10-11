@@ -1496,3 +1496,51 @@ AI_BOUNDARY=BLOCKED
 ```
 
 Commit: AEGL branch `plan/cap-handoff` @ `9492cb3` (not merged).
+
+## Round update 28: launch order — drop BEFORE bwrap; **correction of earlier judgements**
+
+**Correction (do not repeat the errors below):**
+- Round 27's route ("keep capabilities inside bwrap, then switch identity with setpriv **inside**")
+  is **wrong on this host**: AppArmor refuses capabilities to the child, so it failed with
+  `setpriv: setresuid failed: Operation not permitted` (launch_rc=127). "Adding capabilities"
+  was **not** the fix.
+- Round 25's note that an unprivileged **user-namespace probe failed** was misread as "bwrap is
+  unusable unprivileged". That probe used `unshare --user`, which this host refuses — but
+  `/usr/bin/bwrap` (non-setuid, 755) **is** permitted and works unprivileged, as the probe in this
+  round's focused check shows. The earlier text is kept above; this paragraph corrects it.
+
+New (only the startup chain changed):
+1. The trusted **root** launcher prepares the task dirs, config and a **private mount-namespace
+   alias view**: it bind-mounts the declared runtime/tools/entry/installs/guard sources to paths
+   under the task dir so aegl-ai can reach them **without traversing the 0750/0700 private HOME
+   parents**. Nothing is copied, no credential is exposed, host HOME/project perms are untouched,
+   and the aliases never propagate to the host.
+2. **Before** `/usr/bin/bwrap`, the trusted entry drops to the HOST aegl-ai (setpriv: groups and
+   bounding/inheritable/ambient caps cleared, no_new_privs set) and a read-only check
+   (`drop_verify`) confirms uid/gid, Caps=0, NoNewPrivs=1 — otherwise it stops.
+3. bwrap then starts **as aegl-ai** — a plain non-setuid binary using its AppArmor-permitted user
+   namespace (`--unshare-user`). There is **no** capability-requiring identity switch inside bwrap;
+   the `--cap-drop`/`--cap-add SETUID/SETGID/SETPCAP` logic is removed. `drop_verify` no longer
+   changes identity.
+
+Read-only projects, limited task writes, credential isolation and controlled networking are
+unchanged; the existing target preparation and precise exit cleanup are kept. No new broker or
+monitor. Isolation items stay **NOT_PROVEN** — in-namespace UIDs or the old sampler's false matches
+are never used as proof.
+
+Focused check (`recovery/entry-order-tests.sh`, this round: **1 run**, first pass): **21/21**. It
+also records host-policy evidence for real: unprivileged `bwrap --unshare-user` **succeeds**, while
+`unshare --user` is refused. Not re-run: the 19-check cap suite, the 13-check skeleton suite, the
+18-check entry-mount suite, mount-drop, uid-launch-tests, system recovery, browser automation, full
+suites. Run-count record: round 27 = 3, round 28 = 1.
+
+```text
+LAUNCH_ORDER_FIX=PASS (root prep aliases in a private ns; drop to aegl-ai BEFORE bwrap; no inner caps)
+HOST_POLICY_COMPATIBILITY=unprivileged bwrap userns permitted (PROVED by probe); declared sources are 775/755 so the alias fixes only the 750/700 parent traversal; aegl-ai acceptance NOT_RUN
+FOCUSED_CHECK=21/21 (1 run)
+REAL_AEGL_AI_HERMES=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 8d308517ef21ab2271062e1defd23a7c80bebcc3:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 8d308517ef21ab2271062e1defd23a7c80bebcc3 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Commit: AEGL branch `plan/launch-order` @ `8d30851` (not merged).
