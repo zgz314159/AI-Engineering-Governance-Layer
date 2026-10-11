@@ -1826,6 +1826,54 @@ interface check; existing model/auth/networking/mount/launch chain untouched.
 
 Commit: AEGL branch `plan/trusted-capture` @ `b3f8294` (implementation; not merged).
 
+## Round update 37: wiring fixes applied; OS capture route dropped (blocked)
+
+Fixed the concrete defects found in the wiring (`977103b`):
+1. **Client startup** — `guard_hook_client.py` installs as 0644, so the generated hook now calls it
+   through an **explicit interpreter** (`python3 <client> --socket <sock>`); a missing verified guard
+   copy or client now **fails the launch** rather than falling back to the unwired hook.
+2. **Guard input** — the frozen contract path from the trusted registry is handed to the broker as
+   `HERMES_CONTRACT_PACKAGE` and reaches the guard only through the env allowlist; `tool_call_id` is
+   taken from the real hook payload (top level **or** `extra`).
+3. **Temp ownership** — the trial TOP is root-owned and merely traversable (0755); only the necessary
+   work subtrees (project + scratch) are chowned to the AI identity, so the frozen contract and the
+   evidence dir sit under a root-only parent the AI cannot replace.
+4. **Evidence protocol** — `record()` now writes the terminal marker `_recorded` **into** the record
+   (the status was previously only returned, so the file never contained it and the acceptance
+   silently ignored every record). The self-test matches the three specific probes by task,
+   non-empty `tool_call_id` and target, and requires a **real block verdict with rc=2** — a
+   GUARD_ERROR/timeout no longer counts as a contract-forbidden hit.
+5. `recovery/os_watch.py` is **removed**: its inferences (argv contains the target ⇒ executed; no
+   process seen ⇒ not executed; a fresh nsenter write ⇒ the model was OS-denied; empty output/failure
+   ⇒ permission denial) are not acceptable, and I could not complete the strace-based replacement in
+   the round — so I did not leave an uncalled module behind.
+
+**Remaining blockers (interface not fully connected ⇒ ACCEPTANCE_EVIDENCE=NOT_VERIFIED, no command):**
+- **OS-denial source**: must come from the machine's existing `strace` observing the real
+  `unshare → drop → bwrap → Hermes` tool branch (broker kept outside the traced branch), capturing
+  only file open/create results, the specific errno and process association for the fixed probes, and
+  correlating them with the guard decision. Not implemented this round; if the existing policy blocks
+  tracing, that limitation must be reported rather than the policy disabled.
+- **Lifecycle for that capture** (launcher starts it, installer waits for both the task and the
+  capture, self-test reads the controller evidence, then cleans the exact temp dirs) depends on the
+  above.
+- **Guard-copy provenance**: the install manifest records the source path and the copied file's hash,
+  but the expected hash was not taken from an explicit pinned **Stack** commit — passing the AEGL
+  commit id off as the guard version is wrong, so this must be pinned before claiming verification.
+
+Not host-verified; the guard-capture gate was not re-run (it had already run twice).
+
+```text
+REAL_MODEL_TASK=PASS (kept)
+GUARD_RETURN_SOURCE=controller subprocess (verified copy as aegl-ai) — WIRED, host-untested
+GUARD_COPY_PROVENANCE=BLOCKED (no pinned Stack commit for the expected hash)
+OS_DENIAL_SOURCE=BLOCKED (strace-based capture not implemented; os_watch removed)
+ACCEPTANCE_EVIDENCE=NOT_VERIFIED
+AI_BOUNDARY=BLOCKED
+```
+
+Commit: AEGL branch `plan/capture-fix` @ `977103b` (implementation; not merged).
+
 ## Round update 36: controller guard interface WIRED (guard path); OS capture still unwired
 
 **Guard return — wired** (implementation `dd29577`, not host-tested):
