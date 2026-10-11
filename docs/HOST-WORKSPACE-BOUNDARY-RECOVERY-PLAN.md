@@ -454,6 +454,45 @@ clobber-safe RuleSync deployment strategy that accounts for unsupported global
 targets. The two global rule files are intentional installed configuration, not
 task artifacts. No archive, backup, or snapshot was created by this follow-up.
 
+## Round update 3: pre-launch blocker removal (Stage 2 preparation)
+
+No sudo/apply/revert, no change or write probe to a canonical project. Only syntax checks
+and the isolated selftest were run.
+
+- **Generated-dependency cleanup (scheme (a), review list only).** Read-only enumeration
+  found exactly two candidate trees, both in the AEGL checkout (Google Stack and KeepLab
+  have none):
+  - `AI-Engineering-Governance-Layer/fixture/.specify/extensions/architecture-guard/node_modules` (416M, 17,301 files)
+  - `AI-Engineering-Governance-Layer/upstream/rulesync/node_modules` (745M, 33,189 files; holds the 30,892 pnpm hardlinks)
+  Each is untracked (**0 tracked files**), ignored (repo or owning submodule `.gitignore`),
+  a real directory, single-device, no cross-mount. Removing them loses no tracked source
+  (regenerable from lock files) and clears the hardlink blocker. The operator deletes them
+  before the switch; the program never deletes them.
+- **Non-mutating acceptance.** `verify` now uses only `test -w` (operator on root / nested
+  file / `.git/config` / parent; broker positive) and `lsattr`. No `touch`, no `mv`, no
+  rename of a project entry. It proves the *permission model* denies the operator and the
+  immutable flag is set; it **cannot** prove the kernel actually rejects a write/rename.
+  Destructive counterexamples run **only** in the isolated `selftest` (throwaway trees under
+  `/var/tmp`): writable tree → violations detected; `0555` tree → checks clean and
+  `touch`/`mv` denied. Immutability cannot be exercised without root and is evidenced at
+  switch time by `lsattr`.
+- **prepare / switch split.** `prepare` (accounts, groups, state root) is idempotent and
+  safely retryable (`getent`/`id` guards; `usermod -aG` is a no-op if already a member) and
+  makes no project change. `switch` **refuses to run until the broker is verified**
+  (`/etc/aegl/broker-verified`, root-owned) and the generated-dependency trees are gone.
+  **There is no auto-revert**: an interrupted `chown` cannot be restored to exact per-file
+  modes, so the program never claims "restored"; it keeps the trees readable (group
+  `aegl-ro`), is short, and prints the precise partial state on failure.
+- **Handoff (root-controlled).** Do not sudo-run a `/tmp` script (the current `zhong` AI can
+  rewrite it). Pin `ai-boundary-stage3`, review the content and `sha256sum`, then
+  `sudo install -o root -g root -m 0755 … /usr/local/sbin/aegl-host-bootstrap.sh` and verify
+  the installed hash; run only the root-owned copy.
+
+Remaining conditions before the switch: (1) broker built and isolated-tested →
+`/etc/aegl/broker-verified`; (2) generated-dependency trees removed; (3) the root filesystem
+supports the immutable attribute on `/home/zhong/Projects`. Until then **apply is currently
+not runnable**.
+
 # Future computer migration contract
 
 - Transfer project body with `git clone`, or with a verified full `git bundle` when offline; do not copy the entire Projects directory as a filesystem snapshot.

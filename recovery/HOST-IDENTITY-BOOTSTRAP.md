@@ -1,112 +1,80 @@
-# Host identity bootstrap — revised design (Stage 2 preparation)
+# Host identity bootstrap — revision 3 (Stage 2 pre-launch blockers)
 
-**This round prepares and reviews only.** No `--apply`, no sudo, no write probes on the
-official projects were run; no backup/archive/snapshot is created; no password is read or
-stored. The script is **dry-run by default**; the controlled switch is a separate,
-operator-run `apply` and is deliberately postponed (see "Order" below).
+Preparation only: **no** `prepare`/`switch`/`verify` is run as delivered; no `sudo`, no
+change or write probe on the official projects; no backup/archive/snapshot. The program is
+dry-run by default (`plan`) and never auto-reverts.
 
-## How to obtain the reviewed script (do not run the in-tree relative path)
+## 1. Generated-dependency cleanup — scheme (a), precise review list
 
-The script exists **only on the isolated branch**, not in the canonical working tree:
+Read-only enumeration found exactly **two** candidate trees (both under the AEGL checkout;
+the Google Stack and KeepLab have none):
 
-```
-git -C /home/zhong/Projects/AI-Engineering-Governance-Layer \
-    show ai-boundary-stage3:recovery/host-identity-bootstrap.sh \
-    > /tmp/host-identity-bootstrap.sh
-git -C /home/zhong/Projects/AI-Engineering-Governance-Layer \
-    show ai-boundary-stage3:recovery/HOST-IDENTITY-BOOTSTRAP.md > /tmp/HOST-IDENTITY-BOOTSTRAP.md
-```
+| path | size | files | tracked | gitignored | symlink | cross-mount |
+|---|---|---|---|---|---|---|
+| `…/AI-Engineering-Governance-Layer/fixture/.specify/extensions/architecture-guard/node_modules` | 416M | 17,301 | **0** | yes (repo) | no | 0 |
+| `…/AI-Engineering-Governance-Layer/upstream/rulesync/node_modules` | 745M | 33,189 | **0** | yes (owning submodule's `.gitignore`) | no | 0 |
 
-`recovery/host-identity-bootstrap.sh` is **not** an executable path inside the canonical
-checkout — always run the extracted copy: `sudo bash /tmp/host-identity-bootstrap.sh plan`.
+Both are untracked, ignored, single-device real directories with **0 tracked files**, so
+removing them loses no Git-tracked or unique project source (regenerable from
+`package.json`/`pnpm-lock`). Removing `upstream/rulesync/node_modules` also removes the
+**30,892 hardlinks** (pnpm store) that made a bulk `chown` touch inodes outside the manifest.
+**This round does not delete them** — the operator removes them (scheme (a)); the program
+only lists them.
 
-## Identities (explicit groups; `useradd` is not assumed to create them)
+## 2. Acceptance changed to non-mutating checks (destructive probes only in the selftest)
 
-| identity | group | access |
-|---|---|---|
-| `aegl-ai` | `aegl-ai` | **only** `/var/lib/aegl-ai` (its task-checkout root). **No** access to `/home/zhong`, `/home/zhong/Projects`, or any canonical project — not even read. |
-| `aegl-promote` | `aegl-broker` | owner of the canonical trees and `.git` (read/write); the promotion/broker identity |
-| `zhong` (operator) | `aegl-ro` | read-only on the canonical trees; **no** write; **no** `.git` access |
+`verify` performs **only** non-mutating checks: `test -w` as the operator on the project
+root / a nested file / `.git/config` / the parent, a positive `test -w` as the broker, and
+`lsattr` for the immutable flag. No `touch`, no `mv`, no rename of a project entry.
 
-Groups are created explicitly (`groupadd --system ai/broker/human`) and users are created
-with `--gid`, then verified (`id`, `getent group`). The AI user is never added to the
-read-only group and receives no ACL on the parents.
+- **What this proves:** the permission bits/owner/ACL deny the operator write, and the
+  immutable attribute is set on the parent — i.e. the *permission model* denies the action.
+- **What it cannot prove:** that the kernel actually rejects a write/rename; `test -w`
+  reflects mode bits and does not itself exercise the immutable attribute. The empirical
+  destructive proof (`touch`/`mv`) runs **only** in the isolated `selftest` tree.
 
-## Gap 1 — blocking rename/delete/replace through the writable parent
+## 3. Identity preparation is split from the final switch; no fake restore
 
-Today `/home/zhong/Projects` is `775 zhong:zhong`, so the running `zhong` process can
-rename/delete/replace the project **entries** even if it cannot write inside them. The fix
-does **not move the project body**:
+- `prepare` — account/group/state-root creation, **idempotent and safely retryable**
+  (`getent`/`id` guards before every `groupadd`/`useradd`; `usermod -aG` is a no-op if
+  already a member). It makes **no** change to the projects.
+- `switch` — the single final permission change. It **refuses to run unless the broker is
+  verified** (`/etc/aegl/broker-verified`, root-owned, written only after the broker passes
+  its isolated test) and unless the generated-dependency trees are already removed.
+- **There is no auto-revert.** An interrupted `chown` cannot be restored to the exact
+  original per-file modes, so the program never claims "restored". It is designed so the
+  tree stays **readable throughout** (group `aegl-ro` keeps r-x) and the switch is short
+  (metadata-only), and on failure it stops and prints the precise partial state. Reversal is
+  a **manual, explicitly non-exact** procedure.
 
-1. `chown aegl-promote:aegl-ro /home/zhong/Projects && chmod 2755` — `zhong` loses write
-   on the parent (kernel-enforced by mode/ownership);
-2. **`chattr +i /home/zhong/Projects`** — the immutable attribute is kernel-enforced
-   (ext4) and prevents creating/renaming/deleting any entry under the parent **and**
-   prevents the `Projects` entry itself from being renamed or removed, even by its owner.
+## 4. Handoff: review the content and checksum, then a root-controlled path
 
-This closes the gap at `/home/zhong/Projects` without relocating anything. The acceptance
-step proves it (an `mv` of a project as `zhong` must fail with EPERM, and `lsattr` must
-show `i`). If the filesystem does not support the immutable attribute, the design is
-BLOCKED — no permission switch is applied.
-
-*Residual*: `/home/zhong` itself is owned/writable by `zhong`, but because the `Projects`
-entry is immutable it cannot be renamed or deleted; the acceptance check verifies this.
-
-## Gap 2 — verification that actually executes and fails non-zero
-
-`verify` (and `apply`, which calls it) runs real checks and returns non-zero on any leak:
-- as `zhong`: cannot write the **project root**, a **nested file**, or **`.git/config`**;
-- as `zhong`: cannot **create** an entry in the parent and cannot **rename/replace** a
-  project entry (if a rename unexpectedly succeeds it is restored immediately and the run
-  FAILS);
-- as `aegl-promote`: **can** write the project (positive control);
-- `lsattr -d /home/zhong/Projects` must show the `i` flag.
-
-`selftest` runs the same logic against an **isolated throwaway tree** under `/var/tmp`
-(unprivileged). Current result: an unprotected tree produces **6 violations** → the
-verifier demonstrably fails closed. No official project is touched by the selftest.
-
-## Gap 3 — order that avoids an unusable intermediate state
-
-1. **Prepare** identities + the real promotion broker (no lock on the projects).
-2. **Isolated test** the broker on throwaway trees (promotion accepted/rejected paths).
-3. **One controlled switch**: `apply` performs ownership/mode + parent immutability, then
-   **immediately** runs `verify`; **if verification fails it reverts** (`chattr -i` +
-   ownership back) and exits non-zero.
-4. **Immediate acceptance** as part of step 3.
-
-The projects are therefore never left locked before a working, isolated-tested broker
-exists. `revert` is available as a separate mode (no backup is taken).
-
-## Gap 4 — pre-checks against inodes outside the manifest
-
-Before any bulk change, `preflight` refuses to proceed if a project has **cross-mount
-files** (`-printf '%D'` device comparison), **hardlinked files** (`-links +1`, a chown would
-affect the linked inode elsewhere), or if a manifest path is a **symlink**/missing. It also
-prints the **existing explicit ACL entries** per project for review. Only enumerated nodes
-under the three manifest roots are changed, by type, via `find -P … -exec` — never
-`chown -R`/`chmod -R`, never following symlinks.
-
-## Known blocker found by the preflight (this round)
-
-The dry-run refused at preflight: the AEGL checkout contains **30,892 hardlinked files**,
-**all** under `upstream/rulesync/node_modules/.pnpm` (pnpm's content-addressable store). A
-bulk `chown` there would change the ownership of inodes the pnpm store shares **outside**
-the manifest, so the program fails closed instead of touching them. Operator decision:
-- **(a)** remove/relink the generated dependency trees before the switch
-  (`upstream/*/node_modules`, `upstream/*/.venv`) — generated output, not project body; or
-- **(b)** exclude generated dependency trees from the ownership switch (prune
-  `node_modules`/`.venv`); residual: those trees stay writable by `zhong`.
-
-Choose (a) for full coverage; (b) is quicker but leaves vendored dependencies unprotected.
-
-## Remaining manual steps (operator, trusted terminal)
+Do **not** sudo-run a `/tmp` script (the current `zhong` AI can rewrite it). Pin the branch
+commit and hash, review the content, then install it root-owned:
 
 ```
-# after the broker exists and has passed its isolated tests:
-sudo bash /tmp/host-identity-bootstrap.sh plan     # final review (no changes)
-sudo bash /tmp/host-identity-bootstrap.sh apply    # one switch + immediate verify
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+git -C "$AEGL" rev-parse ai-boundary-stage3                      # pin the reviewed commit
+git -C "$AEGL" show ai-boundary-stage3:recovery/host-identity-bootstrap.sh \
+  | tee /tmp/aegl-review.sh | sha256sum                          # review content + hash
+sudo install -o root -g root -m 0755 /tmp/aegl-review.sh /usr/local/sbin/aegl-host-bootstrap.sh
+sudo sha256sum /usr/local/sbin/aegl-host-bootstrap.sh            # must equal the reviewed hash
 ```
 
-`AI_BOUNDARY=BLOCKED` until the broker is real, the switch is applied, and `verify`
-returns zero. The broker and model-networking stages are **not** entered before that.
+Run only the root-owned copy: `sudo /usr/local/sbin/aegl-host-bootstrap.sh <mode>`.
+
+## 5. Selftest (isolated only)
+
+`selftest` builds throwaway trees under `/var/tmp` and runs the destructive probes there:
+(A) a writable tree → the non-mutating checks must report violations; (B) a `0555` tree →
+checks clean and the `touch`/`mv` attempts are denied. Immutability cannot be exercised
+without root; it is evidenced at switch time by `lsattr` (and cannot be empirically proven
+by the non-mutating acceptance).
+
+## Remaining conditions before the switch can run
+
+1. Broker built and isolated-tested → `/etc/aegl/broker-verified` written.
+2. Generated-dependency trees removed (scheme (a)).
+3. Root filesystem supports the immutable attribute on `/home/zhong/Projects`.
+
+Until all three hold, **apply is currently not runnable**, and `AI_BOUNDARY=BLOCKED`.
