@@ -50,12 +50,49 @@ def ns_of(pid: int) -> str:
         return ""
 
 
-def cmdline(pid: int) -> str:
+def raw_argv(pid: int):
+    """The process's argv, NUL-separated exactly as the kernel reports it."""
     try:
         with open("/proc/%d/cmdline" % pid, "rb") as handle:
-            return handle.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            data = handle.read()
+    except OSError:
+        return []
+    return [x.decode("utf-8", "replace") for x in data.split(b"\0") if x]
+
+
+def cmdline(pid: int) -> str:
+    return " ".join(raw_argv(pid))
+
+
+def real_exe(pid: int) -> str:
+    """The ACTUAL executable behind the process (not argv[0])."""
+    try:
+        return os.path.basename(os.path.realpath("/proc/%d/exe" % pid))
     except OSError:
         return ""
+
+
+def is_hermes(pid: int) -> bool:
+    """True only for the real installed Hermes launcher process.
+
+    This host starts Hermes as ``<tools>/python3 -I -c '<startup code>'`` (the code inserts
+    the hermes-agent checkout and imports hermes_constants) — NOT as ``python hermes``. It is
+    identified from the RAW NUL-separated argv plus the ACTUAL executable, so a shell wrapper
+    (``bash .../sandbox-run.sh hermes -p ... chat``) or a ``sh -c '<text mentioning hermes>'``
+    is never mistaken for the model.
+    """
+    argv = raw_argv(pid)
+    if not argv:
+        return False
+    exe = real_exe(pid)
+    if "python" not in exe:
+        return exe == "hermes"
+    for index, arg in enumerate(argv):
+        if arg == "-c" and index + 1 < len(argv) and "hermes" in argv[index + 1]:
+            return True
+        if os.path.basename(arg) == "hermes":
+            return True
+    return False
 
 
 def child_pids(pid: int):

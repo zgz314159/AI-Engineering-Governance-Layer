@@ -113,14 +113,7 @@ AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" \
 AEGL_MODEL_CREDENTIAL_ENV="$CREDENTIAL_ENV" AEGL_MODEL_CREDENTIAL_SOURCE="$CREDENTIAL_SOURCE" \
   "$BROKER_BIN" serve >"$RUN/broker.log" 2>&1 &
 BPID=$!
-cleanup(){
-  kill "$BPID" 2>/dev/null
-  # hand the REAL guard decisions to the trusted side before the task dir is removed
-  if [ -n "${AEGL_TRIAL_GUARD_LOG:-}" ] && [ -n "${GS:-}" ] && [ -f "${GS}/contract-guard-decisions.jsonl" ]; then
-    cp -f "${GS}/contract-guard-decisions.jsonl" "$AEGL_TRIAL_GUARD_LOG" 2>/dev/null || true
-  fi
-  rm -rf "$RUN"
-}
+cleanup(){ kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
 trap cleanup EXIT TERM INT
 for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || die "model broker did not start (see $RUN/broker.log)"
@@ -211,20 +204,6 @@ chown -R root:root "$PROJV"; chmod -R a+rX,o-w "$PROJV"
 ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" "$ST/home-cache"
 chown -R "$AI_USER":"$AI_GROUP" "$ST"
 
-# --- trusted guard-decision evidence --------------------------------------------------- #
-# the guard writes its decision log under its own state root, which is unreachable inside the
-# sandbox; bind a task dir there so the REAL guard decisions (written by the guard process,
-# never by the model) survive the run and can be read by the trusted side.
-GS_REAL="$(python3 - "$GUARD_SRC" <<'PY'
-import os, sys
-src = sys.argv[1]
-repo = src[:src.index("/orchestration/")]
-sys.path.insert(0, os.path.join(repo, "scripts", "lib"))
-import stack_paths
-print(stack_paths.guard_state_root())
-PY
-)" || die "cannot resolve the guard state root"
-GS="$RUN/guard-state"; mkdir -p "$GS"; chown "$AI_USER":"$AI_GROUP" "$GS"
 
 MOUNTS=()
 # install state (writable view is a fixed spec element); the generation content is read-only
@@ -244,7 +223,6 @@ done
 MOUNTS+=("bind:$ST/home-sessions:/home/zhong/.hermes/sessions")
 MOUNTS+=("bind:$ST/home-logs:/home/zhong/.hermes/logs")
 MOUNTS+=("bind:$ST/home-cache:/home/zhong/.hermes/cache")
-MOUNTS+=("bind:$GS:$GS_REAL")
 MOUNT_ARGS=(); for m in "${MOUNTS[@]}"; do MOUNT_ARGS+=(--mount "$m"); done
 
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
