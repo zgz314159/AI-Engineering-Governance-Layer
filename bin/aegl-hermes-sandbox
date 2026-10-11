@@ -282,7 +282,17 @@ exec '$SETPRIV' --reuid '$AI_UID' --regid '$AI_GID' --clear-groups --no-new-priv
   python3 '$EXEC_SPEC' '$SPEC'
 EOF
 chown root:root "$RUN/prep.sh"; chmod 0755 "$RUN/prep.sh"
-unshare --mount --propagation private -- bash "$RUN/prep.sh"
+# --- the real chain runs UNDER strace; the credential broker stays OUTSIDE the traced branch
+# only file open/create results and errnos are captured (no network, buffers, credentials, env)
+TRACE_LOG="${AEGL_TRIAL_EVIDENCE:-$RUN}/strace.log"
+if [ -n "${AEGL_TRIAL_EVIDENCE:-}" ] && [ -x /usr/bin/strace ]; then
+  say "  tracing the sandbox tool branch -> $TRACE_LOG"
+  /usr/bin/strace -f -q -s 256 -e trace=openat,open,creat -o "$TRACE_LOG" \
+    unshare --mount --propagation private -- bash "$RUN/prep.sh"
+else
+  say "  NOTE: no controller evidence dir or strace unavailable; the branch is NOT traced"
+  unshare --mount --propagation private -- bash "$RUN/prep.sh"
+fi
 rc=$?
 kill "$BPID" 2>/dev/null
 exit "$rc"

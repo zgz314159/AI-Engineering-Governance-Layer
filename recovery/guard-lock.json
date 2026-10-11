@@ -1,0 +1,7 @@
+{
+  "project": "Google-Android-Agent-Development-Stack",
+  "commit": "63484e730176810efbeb79ba0fce71a2eced391e",
+  "path": "orchestration/hermes/evaluation_adapter/contract_guard.py",
+  "sha256": "19f6be638c37b28d401820b7a4562f852a459188cbfa793f757668fe9b330455",
+  "note": "The guard's source belongs to the Stack project. AEGL declares this pin and install logic only; the installer extracts the file from THIS commit and verifies THIS hash before installing. Never hash an arbitrary current worktree file and call it version-verified."
+}

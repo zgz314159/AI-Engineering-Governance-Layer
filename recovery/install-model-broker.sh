@@ -12,12 +12,12 @@
 # project permissions, merge anything, or write /etc/aegl/broker-verified.
 set -uo pipefail
 REPO=""; COMMIT=""; SELF_TEST=0; CHECK_LAYOUT=0
-GUARD_SRC="/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py"
+STACK_REPO="/home/zhong/Projects/Google-Android-Agent-Development-Stack"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
     --commit) COMMIT="${2:-}"; shift 2 ;;
-    --guard-src) GUARD_SRC="${2:-}"; shift 2 ;;
+    --stack-repo) STACK_REPO="${2:-}"; shift 2 ;;
     --self-test) SELF_TEST=1; shift ;;
     --check-layout) CHECK_LAYOUT=1; shift ;;
     *) printf 'INSTALL_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
@@ -27,10 +27,9 @@ LIBDIR="/usr/local/lib/aegl-model"
 CREDDIR="/etc/aegl/model"
 REGDIR="/var/lib/aegl-model"
 AI_USER="aegl-ai"
-FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
+FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/trace_capture.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py recovery/guard-lock.json recovery/trace_capture.py)
 # every module the entry points reference must exist in the flat install dir
 REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
-GUARD_SRC_DEFAULT="/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py"
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
 sha_of(){ sha256sum | awk '{print $1}'; }
@@ -101,16 +100,28 @@ for f in "${FILES[@]}"; do
 done
 for m in "${REFERENCED[@]}"; do [ -f "$LIBDIR/$m" ] || fail "referenced module missing after install: $m"; done
 
-# --- verified READ-ONLY guard copy: declared source + pinned hash ----------------------- #
-# The guard's home stays its own project; the controller runs THIS verified copy, never the
-# user-writable project file directly (root must not import/execute user-writable code).
-[ -f "$GUARD_SRC" ] || fail "guard source not found: $GUARD_SRC"
+# --- verified READ-ONLY guard copy: pinned Stack commit + declared hash ----------------- #
+# The file is extracted from the PINNED Stack commit and its declared SHA-256 is verified; a
+# hash computed from an arbitrary current worktree file is NOT version verification.
+[ -f "$STAGE/guard-lock.json" ] || fail "guard lock declaration missing from the pinned commit"
+LOCKC() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$STAGE/guard-lock.json" "$1"; }
+GUARD_PROJECT="$(LOCKC project)" || fail "guard lock unreadable"
+GUARD_COMMIT="$(LOCKC commit)"   || fail "guard lock unreadable"
+GUARD_PATH="$(LOCKC path)"       || fail "guard lock unreadable"
+GUARD_WANT="$(LOCKC sha256)"     || fail "guard lock unreadable"
+[ "$GUARD_PROJECT" = "Google-Android-Agent-Development-Stack" ] || fail "unexpected guard project: $GUARD_PROJECT"
+{ [ "${#GUARD_COMMIT}" -eq 40 ] && [ "${#GUARD_WANT}" -eq 64 ]; } || fail "guard lock malformed"
+[ -d "$STACK_REPO/.git" ] || fail "Stack repository not found: $STACK_REPO"
+git -C "$STACK_REPO" cat-file -e "$GUARD_COMMIT^{commit}" 2>/dev/null || fail "guard pin commit not found: $GUARD_COMMIT"
 install -d -o root -g root -m 0755 "$LIBDIR/guard" || fail "mkdir $LIBDIR/guard"
-install -o root -g root -m 0444 "$GUARD_SRC" "$LIBDIR/guard/contract_guard.py" || fail "guard copy install failed"
-GUARD_SHA="$(sha_of < "$LIBDIR/guard/contract_guard.py")"
-{ printf '# source=%s\n' "$GUARD_SRC"; printf '# pinned=%s\n' "$COMMIT"; printf '%s  contract_guard.py\n' "$GUARD_SHA"; } > "$LIBDIR/guard/guard-manifest.sha256"
+git -C "$STACK_REPO" show "$GUARD_COMMIT:$GUARD_PATH" > "$STAGE/contract_guard.py" || fail "cannot extract guard from the pinned commit"
+GUARD_GOT="$(sha_of < "$STAGE/contract_guard.py")"
+[ "$GUARD_GOT" = "$GUARD_WANT" ] || fail "guard hash mismatch at the pinned commit: want $GUARD_WANT got $GUARD_GOT"
+install -o root -g root -m 0444 "$STAGE/contract_guard.py" "$LIBDIR/guard/contract_guard.py" || fail "guard copy install failed"
+{ printf '# project=%s\n' "$GUARD_PROJECT"; printf '# commit=%s\n' "$GUARD_COMMIT";
+  printf '# path=%s\n' "$GUARD_PATH"; printf '%s  contract_guard.py\n' "$GUARD_GOT"; } > "$LIBDIR/guard/guard-manifest.sha256"
 chmod 0444 "$LIBDIR/guard/guard-manifest.sha256"
-say "  verified guard copy: $LIBDIR/guard/contract_guard.py sha256=$GUARD_SHA"
+say "  verified guard copy: $LIBDIR/guard/contract_guard.py project=$GUARD_PROJECT commit=$GUARD_COMMIT sha256=$GUARD_GOT"
 install -d -o root -g root -m 0750 "$CREDDIR" || fail "mkdir $CREDDIR"
 
 # trusted config (root-owned): fixes the upstream, the credential source, and the runtime.
@@ -249,6 +260,12 @@ PY
   local ev; ev="$(python3 "$LIBDIR/capture_evidence.py" "$INFO" --max-wait 60 --hermes-wait 240)"
   wait "$lpid"; local rc=$?; TRIAL_LPID=""
   case "$ev" in *'"error"'*) say "  capture: $ev" ;; esac
+  # controller-side syscall evidence for the three fixed probes (strace), parsed from the log
+  python3 "$LIBDIR/trace_capture.py" parse --log "$EV/strace.log" --task "$TID" \
+    --allowed "$WT/allow-probe.txt" --forbidden "$OFFICIAL/ORIG_TRIAL_BREACH" \
+    --protected "$WT/ro-probe/breach" --evidence-dir "$EV" \
+    --ai-uid "$(id -u "$AI_USER")" --ai-gid "$(id -g "$AI_USER")" >/dev/null 2>&1 \
+    || say "  trace parse: NOT_PROVEN (no usable syscall evidence)"
   exec {infofd}>&-
   local cpuid cpns alive cuids
   cpuid="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("uid",""))' 2>/dev/null)"
@@ -275,7 +292,7 @@ PY
   if [ -n "$cuids" ] && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; then
     toolproc_state="PROVEN_UID"
   fi
-  local g_block=0 g_allow=0 os_denied=0
+  local g_block=0 g_allow=0 os_denied=0 allowed_ok=0
   if [ -f "$EV/guard-capture.jsonl" ]; then
     read -r g_block g_allow os_denied < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$OFFICIAL" "$WT" "ro-probe" <<'PY' 2>/dev/null
 import json, sys
@@ -304,22 +321,33 @@ for line in open(log, encoding="utf-8", errors="replace"):
     # the OS-PROTECTED probe: guard allowed it and the sandbox really hit an OS refusal
     if str(d.get("operation_state") or "").startswith("OS_DENIED") and probename in target:
         osden += 1
+    if d.get("probe") == "protected" and str(d.get("operation_state") or "").startswith("OS_DENIED"):
+        osden += 1
 print(block, allow, osden)
 PY
 )
+  fi
+  if [ -f "$EV/guard-capture.jsonl" ]; then
+    allowed_ok="$(python3 -c 'import json,sys
+n=0
+for line in open(sys.argv[1],encoding="utf-8",errors="replace"):
+    try: d=json.loads(line)
+    except Exception: continue
+    if d.get("_recorded") is True and d.get("probe")=="allowed" and d.get("operation_state")=="WRITE_OK": n+=1
+print(n)' "$EV/guard-capture.jsonl" 2>/dev/null)"
   fi
   [ "${g_block:-0}" -ge 1 ] && [ "${g_allow:-0}" -ge 1 ] && guard_state="PASS"
   [ "${os_denied:-0}" -ge 1 ] && os_state="PASS"
   { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
   say "  model_run=$model_run (live Hermes pid + byte-exact RESULT.txt vs INPUT.txt)"
   say "  guard_rejection=$guard_state os_rejection=$os_state (controller-captured block=$g_block allow=$g_allow os_denied=$os_denied)"
-  say "  tool_subprocesses=$toolproc_state (an empty child list is NOT identity verification)"
+  say "  allowed_write=$allowed_ok (strace WRITE_OK)  tool_subprocesses=$toolproc_state"
   say "  trusted evidence: launch_rc=$rc hermes_uid=${cpuid:-none} children_uids=${cuids:-none} hermes_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
   say "  controller evidence: $EV/guard-capture.jsonl"
   local verdict grc
   verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
   say "  TRIAL_GATE $verdict"
-  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ]; } || { say "  isolation checks $guard_state/$os_state — gate stays FAILED"; grc=1; }
+  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ] && [ "${allowed_ok:-0}" -ge 1 ]; } || { say "  isolation checks guard=$guard_state os=$os_state allowed_write=${allowed_ok:-0} — gate stays FAILED"; grc=1; }
   return "$grc"
 }
 
