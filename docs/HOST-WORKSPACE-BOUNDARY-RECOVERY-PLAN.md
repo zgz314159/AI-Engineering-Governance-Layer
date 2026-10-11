@@ -1299,3 +1299,35 @@ Run-count record: round 17 = 3, 18 = 6, 19 = 1, 20 = 1, 21 = 1, 22 = 3. No sudo 
 chain state unchanged.
 
 Commit: AEGL branch `plan/contract-wiring` @ `8c775d0` (not merged).
+
+## Round update 23: trial-entry fixes (init order, compile identity, evidence source)
+
+- `self_test`: `WT` is now declared in its own statement **after** `PROJ` — the same
+  `local A=.. B="$A/.."` class was swept in this function only (no system-wide scan).
+- The contract is compiled **outside** the project by the **normal** user
+  (`COMPILER_USER`, the invoker) — never root executing the user-writable project compiler. The
+  trusted side then verifies a **fixed 12-file list** and freezes the package (root-owned, `a-w`).
+  No new identity; no project permission change.
+- Evidence: `FACTS.txt` is the model's **self-report** only — it cannot prove a tool actually
+  executed, nor a guard/OS denial. `guard_rejection` and `os_rejection` are **NOT_PROVEN** (no
+  trusted decision source wired this round) and the gate **stays FAILED**; no assertion was deleted
+  to buy a PASS. `model_run` is proven by the live child + the real `RESULT.txt` file.
+
+Focused check (`recovery/entry-fix-tests.sh`, this round: **1 run**, first pass): **11/11**. Items
+actually re-run = only these 11 new checks; the previous round's 24-check focused suite, system
+recovery, browser automation and the full suites were **not** re-run. Run-count record: round 22 = 3
+(2 initial failures + re-verify), round 23 = 1.
+
+```text
+ENTRY_FIX=PASS
+COMPILER_EXECUTION_IDENTITY=zhong (normal user; not root)
+FOCUSED_CHECK=11/11 (1 run this round)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show f144a988b2c9b5496a9455ac90a303fc313e3c2a:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit f144a988b2c9b5496a9455ac90a303fc313e3c2a --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+No sudo was executed; no `switch`, no project permission change, no merge, no backup/archive; browser
+session and active run config unchanged. Temp output cleaned on success, failure and timeout.
+
+Commit: AEGL branch `plan/entry-fix2` @ `f144a98` (not merged).
