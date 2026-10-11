@@ -634,11 +634,11 @@ control conversation was touched. The user's other Chrome windows were preserved
 Loop acceptance checklist — **a box is checked only when that real hop actually completed**
 (the provider-only fact below is NOT part of this chain and never checks a box here):
 
-- [x] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge (Round 8; reconfirmed Round 9)
-- [ ] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider (Round 9: the model emitted `CONTRACT_DEVIATION`; its terminal cwd is the canonical project so the contract in the external worktree was unreachable. Round 8's `SUCCESS` was not reproducible. UNCHECKED.)
-- [ ] `task_acceptance` — the deterministic acceptance for the read-only task passes (Round 9: no fixed result produced — the task never ran. UNCHECKED.)
-- [x] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session (Round 9: `send.status=CONFIRMED_SENT`; the delivered user turn carries real newlines and equals the canonical message)
-- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above) — `hermes_task_executed` and `task_acceptance` remain open
+- [x] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge (Round 8; reconfirmed Round 9, Round 10)
+- [x] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider (Round 10: terminal cwd = the worktree; outcome `SUCCESS`)
+- [x] `task_acceptance` — the deterministic acceptance for the read-only task passes (Round 10: exact fixed line `ORIG-LOOP-RESULT=ORIGLOOP-4C8E21` read from the worktree input)
+- [x] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session (Round 9/10: `send.status=CONFIRMED_SENT`)
+- [x] `ORIGINAL_AUTOMATION` complete (all real hops above) — PASS (Round 10)
 
 Provider-only fact (separate from, and NOT counting toward, the checklist above):
 
@@ -782,3 +782,48 @@ FIRST_FAILED_HOP=hermes_task_executed — the Hermes model emitted CONTRACT_DEVI
 
 `SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` are unchanged. `AI_BOUNDARY` stays `BLOCKED` by
 actual evidence (no confinement, no broker).
+
+## Round update 10: fixed session reuse + unified task directory + full loop PASS
+
+Two targeted fixes; then one acceptance that completes the original loop.
+
+Fixes (isolated Stack branch `plan/hermes-chatgpt-control-url`, not merged):
+
+- `faf98aa` — `chatgpt_adapter.find_control_tab` reuses a fixed tab and reports `TARGET_TAB_MISSING` /
+  `TARGET_TAB_AMBIGUOUS`; it never opens a tab or creates a conversation. Focused tests 3/3.
+- `8051f1b` — `run_round_session.sh` runs one round from the persisted session config.
+- Host config: the selected session is persisted at
+  `$XDG_CONFIG_HOME/google-android-agent-stack/session.env` (control URL + BU_*/BH_*), reused through
+  the existing `HERMES_CHATGPT_CONTROL_URL` interface.
+- Execution directory: the authoritative cwd source is the profile `terminal.cwd` — it overrides
+  `TERMINAL_CWD`, and `--in`/process chdir do not win (`hermes_cli/main.py::_apply_in_dir`,
+  `hermes_cli/config.py::apply_terminal_config_to_env`). The android-stack profile's `terminal.cwd`
+  now points at the stable project-external worktree, so Bridge, contract validation, Contract Guard
+  and the Hermes terminal share one root. Proven by the real terminal tool: `pwd` returned
+  `/home/zhong/.local/state/google-android-agent-stack/worktree/Google-Android-Agent-Development-Stack`,
+  not the launcher's own pwd.
+
+Active chain: the previous trial state was NOT present (Round 9 kept it in a scratch dir, now gone);
+per the round rule this is **explicitly initialized** — the same ChatGPT conversation is reused, a new
+chain is declared in-message (old chain closed, unrecoverable), and the active state now lives in the
+established XDG state dirs (`$XDG_STATE_HOME/google-android-agent-stack/{bridge,supervisor}`), not
+scratch. Those are kept; only scratch output is removed.
+
+One acceptance (real entry `run_round_session.sh` → `bridge_cli.py round`):
+
+```text
+EXISTING_TAB_REUSED=PASS            (1 matching tab; url unchanged before/after)
+NEW_CHATGPT_CONVERSATIONS_CREATED=0
+SESSION_STATE=EXPLICITLY_INITIALIZED
+HERMES_TERMINAL_CWD=/home/zhong/.local/state/google-android-agent-stack/worktree/Google-Android-Agent-Development-Stack
+TASK_ACCEPTANCE=PASS                (exact line ORIG-LOOP-RESULT=ORIGLOOP-4C8E21)
+CHATGPT_RESULT_DELIVERED=PASS       (send.status=CONFIRMED_SENT)
+ORIGINAL_AUTOMATION=PASS
+AI_BOUNDARY=BLOCKED
+FIRST_FAILED_HOP=none
+```
+
+The loop checklist is now fully checked; `ORIGINAL_AUTOMATION=PASS`. `SYSTEM_RECOVERED=PASS` and
+`HISTORY_CLEAN=PASS` are unchanged. `AI_BOUNDARY` stays `BLOCKED` by actual evidence (no confinement,
+no broker): a passing communication loop is not an isolation pass, and the model process is still
+unconfined.
