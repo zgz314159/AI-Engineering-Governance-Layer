@@ -906,3 +906,47 @@ trusted promotion is not accepted. No canonical project was modified; the model 
 
 Commit: AEGL branch `plan/trusted-promotion-broker` @ `290d04d` (broker + tests + install plan; not
 merged — promotion gate default-deny).
+
+## Round update 13: broker review gaps closed (trusted registry, pinned content, safe apply, pinned install)
+
+`BROKER_FUNCTIONAL_TESTS=12/12`; the independent identity is NOT installed; trusted promotion is NOT accepted.
+
+Fixed (AEGL branch `plan/broker-trusted-registry`, not merged):
+
+- **Trusted server-side registry.** The broker binds `task_id -> {project, baseline(base commit),
+  worktree, branch, approved candidate digest}` in its OWN registry (`/var/lib/aegl-promote`, mode
+  0600, broker-owned) and authorizes by kernel peer uid (`SO_PEERCRED`) against
+  `AEGL_BROKER_ALLOW_REQUESTERS` / `..._RECORDERS`. It no longer trusts a client token, socket
+  ownership, or the AI-writable `task.json` / `verify.status` — verified: an unregistered task with a
+  hand-written `verify.status=PASS`, and a registered task with no acceptance record, are REJECTED.
+- **Baseline-to-candidate coverage + content pin.** The gate diffs the actual candidate against the
+  trusted baseline — committed, staged, unstaged, untracked and ignored — not `git status` alone; the
+  candidate is pinned by `candidate_digest` (baseline + branch + file manifest), so a swapped file or
+  branch is refused and the applied bytes equal the approved content. A failed check never changes the
+  target.
+- **No candidate code as the broker; hook-safe git.** `promotion_core` no longer executes a project
+  `verify-layout.sh`; git add/commit/merge run with `core.hooksPath=/dev/null` and a hardened config
+  (`GIT_CONFIG_NOSYSTEM=1`, no global config) so no untrusted hook or exec entry point runs.
+- **Install layout/source.** Install extracts files FROM the pinned isolated branch commit
+  (`git show <pin>:<path>`) into a flat dir (launcher + modules together, so the launcher resolves its
+  module next to itself); registry dir and project allowlist are explicit in the unit; the client
+  returns non-zero on REJECT/FAIL; `broker-plan` only prints and never writes `/etc/aegl/broker-verified`.
+
+Targeted tests (`recovery/broker-tests.sh`, throwaway repo, one consolidated run): **12/12**. Harness
+invocations this round: **4** (the first three aborted on test-harness defects before any full verdict;
+the fourth is the consolidated pass) — recorded, not erased. No full audit was run.
+
+```text
+BROKER_FUNCTIONAL_TESTS=12/12
+INSTALL_READINESS=PASS              (plan printed; files from the pinned commit; flat layout starts)
+INDEPENDENT_IDENTITY_INSTALLED=NO
+TRUSTED_PROMOTION_ACCEPTED=NOT_RUN
+AI_BOUNDARY=BLOCKED
+REMAINING_BLOCKERS=independent-identity install (interactive sudo); /etc/aegl/broker-verified marker; bulk project chown ('switch') + entry lock
+```
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` unchanged. The browser automation and the active
+chain state were preserved. **Functional testing and independent-identity installation are recorded
+separately**: 12/12 is the broker logic; the identity boundary is not installed.
+
+Commit: AEGL branch `plan/broker-trusted-registry` @ `9616d73` (not merged).
