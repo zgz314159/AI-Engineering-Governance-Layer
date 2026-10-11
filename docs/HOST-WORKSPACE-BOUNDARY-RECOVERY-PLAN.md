@@ -1922,6 +1922,46 @@ TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Govern
 
 Commit: AEGL branch `plan/guard-lock` @ `93da79a` (implementation; not merged).
 
+## Round update 39: strict request correlation + separate guard/strace correlation
+
+Kept the guard pin, the strace startup and the directory layout; rewrote only the correlation
+(implementation `d777c50`):
+
+1. **Strict, fail-closed request correlation.** A normal response is parsed as structured JSON
+   (`choices[].message.tool_calls[]`); an SSE response accumulates id / function name / argument
+   fragments per **(choice index, tool index)** and parses the arguments only once assembled — no
+   cross-fragment regex guessing. The broker compares **tool_call_id, tool name and the FULL argument
+   values** (dict equality, not a key set). A missing id, unknown request, name mismatch,
+   missing/unparsable arguments or differing arguments now **refuse the tool immediately**
+   (`rc=None` ⇒ the hook client blocks) and record the reason; `request_args_match` is `True` only on
+   a real match, and `None` no longer relaxes validation.
+2. **Separate reads, then correlation by EXACT target.** Guard records require this run's task,
+   `request_matched` and `request_args_match` True (a BLOCK must carry a real block verdict, never
+   GUARD_ERROR). Strace records are read by their own structure (pid, target, flags, rc, errno) and are
+   **not** skipped for lacking a tool_call_id. allowed = guard ALLOW on that exact target **and** a
+   strace `WRITE_OK` on it; protected = guard ALLOW **and** a strace `OS_DENIED` on the same exact
+   target; forbidden = a valid guard BLOCK, and a write on the forbidden target still appearing makes
+   acceptance **FAIL** (breach). Exact target matching only (no prefixes); read-only opens never count;
+   any missing correspondence stays NOT_PROVEN.
+
+Focused check (`recovery/correlation-tests.sh`, this round: **2 runs** — the first had one broken
+assertion of mine, while the parser was already correct, then the re-verify): **10/10**. Local
+behaviour only — **not** host isolation acceptance.
+
+```text
+REAL_MODEL_TASK=PASS (kept)
+GUARD_COPY_PROVENANCE=PINNED (Stack commit + hash)
+GUARD_RETURN_SOURCE=controller subprocess (pinned verified copy as aegl-ai)
+OS_DENIAL_SOURCE=strace of the real sandbox tool branch (exact target + errno)
+REQUEST_CORRELATION=strict (id + name + full args; refuses on any mismatch)
+CORRELATION_CHECK=10/10 (2 runs, local only)
+ACCEPTANCE_EVIDENCE=NOT_VERIFIED (wired, not host-tested)
+AI_BOUNDARY=BLOCKED
+TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show d777c50acb5ebdc57d5e760cb7c5004a0747e3bd:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit d777c50acb5ebdc57d5e760cb7c5004a0747e3bd --self-test; echo "trial_exit=$?"
+```
+
+Commit: AEGL branch `plan/request-correl` @ `d777c50` (implementation; not merged).
+
 ## Round update 36: controller guard interface WIRED (guard path); OS capture still unwired
 
 **Guard return — wired** (implementation `dd29577`, not host-tested):
