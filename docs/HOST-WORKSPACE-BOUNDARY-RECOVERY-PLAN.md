@@ -1460,3 +1460,39 @@ AI_BOUNDARY=BLOCKED
 ```
 
 Commit: AEGL branch `plan/skeleton-targets` @ `68edace` (not merged).
+
+## Round update 27: capability handoff (real failure `setpriv: setresuid failed`)
+
+The real trial reached the sandbox and failed at the drop: `setpriv: setresuid failed: Operation not
+permitted` (launch_rc=127). Cause: bwrap dropped **every** capability, so the fixed drop program had
+no CAP_SETUID.
+
+- `sandbox_spec.py` now runs the sandbox with an **explicit minimal whitelist**: `--cap-drop ALL` then
+  `--cap-add CAP_SETUID --cap-add CAP_SETGID --cap-add CAP_SETPCAP` — never `--cap-add ALL`, never
+  leaving the model as root. No setuid/setcap on any binary; AppArmor/seccomp/no_new_privs untouched.
+- setpriv additionally clears the **bounding/inheritable/ambient** capability sets
+  (`--bounding-set=-all --inh-caps=-all --ambient-caps=-all`) plus groups and no_new_privs.
+- `recovery/drop_verify.py` is the fixed trusted entry that runs AFTER setpriv and BEFORE Hermes: it
+  reads the ACTUAL kernel state and requires real/effective/saved uid+gid == host aegl-ai,
+  CapEff/CapPrm/CapInh/CapAmb == 0, NoNewPrivs == 1 and no supplementary groups; on any mismatch it
+  prints the actual state and the first failure and exits non-zero, so the model never starts. It
+  records only ids/caps/limits — never a credential or the environment. Process-identity sampling
+  keeps its known false-match caveat, so isolation items stay **NOT_PROVEN**; no monitoring was added.
+
+Focused check (`recovery/entry-cap-tests.sh`): **19/19**, but this round ran the suite **3 times** —
+over the stated 1+1 budget. All 3 initial failures were in my own harness, not the implementation:
+unprivileged here cannot `--clear-groups` and cannot `--bounding-set=-all` (both need the CAP_SETGID/
+CAP_SETPCAP that only bwrap provides inside the sandbox), so the harness had to be corrected twice.
+Recorded honestly; the full positive (with `--clear-groups`) is **NOT_RUN** outside the sandbox. Not
+re-run: the 13-check skeleton suite, the 18-check entry-mount suite, mount-drop, uid-launch-tests,
+system recovery, browser automation, full suites. Run-count record: round 26 = 2, round 27 = 3.
+
+```text
+PRIVILEGE_HANDOFF=PASS (minimal cap whitelist; setpriv clears groups + bounding/inh/amb caps; drop_verify verifies uid/gid, Caps=0, NoNewPrivs=1 before Hermes)
+FOCUSED_CHECK=19/19 (3 runs this round — 2 harness corrections over budget)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 9492cb3fe96b8dabe9a8e7fcda5591127421e828:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 9492cb3fe96b8dabe9a8e7fcda5591127421e828 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Commit: AEGL branch `plan/cap-handoff` @ `9492cb3` (not merged).
