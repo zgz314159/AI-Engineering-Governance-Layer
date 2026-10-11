@@ -1,117 +1,121 @@
 #!/usr/bin/env bash
-# broker-tests.sh — targeted functional tests for the trusted promotion broker.
+# broker-tests.sh — targeted tests for the trusted-registry broker (run as a unit).
 #
-# One throwaway repo tree under /var/tmp; the broker is started on a throwaway socket
-# (same uid here — this proves FUNCTIONAL correctness only, never an independent
-# identity boundary). It asserts that the broker validates and applies through the
-# central gate, and that invalid/unsafe requests are refused.
+# Prior executions of this script (recorded, not erased):
+#   round 12: 3 runs (1 test-harness bug, 1 merge-identity bug, then 13/13 on the old design)
+#   this round: 1 run (below), + at most one re-verify after a concrete fix.
+#
+# Same-uid here: this proves FUNCTIONAL correctness only, never the independent
+# identity boundary. The broker is started from a FLAT installed layout (launcher +
+# modules in one dir) so case (6) — "the installed layout can start" — is exercised.
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 CORE="$AEGL_ROOT/recovery/promotion_core.py"
-BROKER="$AEGL_ROOT/recovery/promotion_broker.py"
 
 ST="$(mktemp -d /var/tmp/aegl-broker-tests-XXXXXX)" || { echo "mktemp failed"; exit 2; }
-PROOT="$ST/projects"; TROOT="$ST/tasks"; SOCK="$ST/broker.sock"
-mkdir -p "$PROOT" "$TROOT"
+PROOT="$ST/projects"; REG="$ST/registry"; SOCK="$ST/broker.sock"; LIB="$ST/lib"
+mkdir -p "$PROOT" "$REG" "$LIB"
 PASS=0; FAIL=0
 ok(){ echo "  PASS: $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
 cleanup(){ [ -n "${BPID:-}" ] && kill "$BPID" 2>/dev/null; wait "${BPID:-}" 2>/dev/null; chmod -R u+w "$ST" 2>/dev/null; rm -rf "$ST"; }
 trap cleanup EXIT
 
-manifest(){ ( cd "$1" && find . -name .git -prune -o -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum 2>/dev/null ); }
-
-# make_task <id> <project-dir> <branch> <setup-cmd-run-in-worktree>
-make_task(){
-  local id="$1" proj="$2" branch="$3" setup="$4"
-  local td wt
-  td="$TROOT/$id"; wt="$td/worktree"
-  mkdir -p "$td"
-  git -C "$proj" worktree add -q -b "$branch" "$wt" HEAD || return 1
-  ( cd "$wt" && eval "$setup" )
-  manifest "$wt" > "$td/verify.manifest"
-  printf 'PASS\n' > "$td/verify.status"
-  python3 - "$td/task.json" "$id" "$proj" "$wt" "$branch" <<'PY'
-import json,sys
-p,id_,proj,wt,branch=sys.argv[1:6]
-json.dump({"id":id_,"project":proj,"name":id_,"worktree":wt,"branch":branch}, open(p,"w"), indent=2)
-PY
+# --- flat "installed" layout: launcher + python modules in ONE dir ------------- #
+install_layout(){
+  install -m 0755 "$AEGL_ROOT/bin/aegl-promote-broker" "$LIB/aegl-promote-broker"
+  install -m 0644 "$AEGL_ROOT/recovery/promotion_broker.py" "$LIB/promotion_broker.py"
+  install -m 0644 "$AEGL_ROOT/recovery/promotion_core.py" "$LIB/promotion_core.py"
 }
+BROKER="$LIB/aegl-promote-broker"
 
-ask(){ python3 "$BROKER" client --socket "$SOCK" --task "$1" --op "${2:-promote}" 2>/dev/null; }
-decision(){ printf '%s' "$1" | python3 -c 'import json,sys
+req(){ "$BROKER" client --request "$1" 2>/dev/null; }
+dec(){ printf '%s' "$1" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("decision",""))
 except Exception: print("PARSE_ERROR")' 2>/dev/null; }
+digest(){ python3 "$AEGL_ROOT/recovery/promotion_core.py" digest "$1" "$2" "$3"; }
 
-# --- fixtures ---------------------------------------------------------------- #
-git -C "$PROOT" init -q 2>/dev/null || true
-# allowed project (name in the allowed set)
-mkdir -p "$PROOT/Google-Android-Agent-Development-Stack"
-git -C "$PROOT/Google-Android-Agent-Development-Stack" init -q
-( cd "$PROOT/Google-Android-Agent-Development-Stack" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base )
-# disallowed-project fixture (name NOT in the allowed set)
-mkdir -p "$PROOT/Testapp"
-git -C "$PROOT/Testapp" init -q
-( cd "$PROOT/Testapp" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base )
+new_project(){ local d="$PROOT/$1"; mkdir -p "$d"; git -C "$d" init -q
+  ( cd "$d" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base ); printf '%s' "$d"; }
+base_of(){ git -C "$1" rev-parse HEAD; }
 
-APP="$PROOT/Google-Android-Agent-Development-Stack"
+# make_wt <project> <branch> <setup-cmd>  -> prints worktree path
+make_wt(){ local proj="$1" br="$2" setup="$3"; local wt="$ST/wt-$br"
+  git -C "$proj" worktree add -q -b "$br" "$wt" HEAD
+  ( cd "$wt" && eval "$setup" )
+  printf '%s' "$wt"; }
 
-# --- start broker (same uid; FUNCTIONAL test only) --------------------------- #
-AEGL_BROKER_SOCKET="$SOCK" AEGL_TASKS_ROOT="$TROOT" PROJECTS_ROOT="$PROOT" \
-  python3 "$BROKER" serve --socket "$SOCK" >"$ST/broker.log" 2>&1 &
+# --- fixtures ----------------------------------------------------------------- #
+APP="$(new_project Google-Android-Agent-Development-Stack)"
+BASE="$(base_of "$APP")"
+
+install_layout
+[ -f "$BROKER" ] || { echo "install layout missing launcher"; exit 2; }
+export AEGL_BROKER_SOCKET="$SOCK" AEGL_BROKER_REGISTRY_DIR="$REG" PROJECTS_ROOT="$PROOT" \
+       AEGL_PROJECT_ALLOWLIST="Google-Android-Agent-Development-Stack" \
+       AEGL_BROKER_ALLOW_REQUESTERS="$(id -u)" AEGL_BROKER_ALLOW_RECORDERS="$(id -u)"
+"$BROKER" serve >"$ST/broker.log" 2>&1 &
 BPID=$!
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
-[ -S "$SOCK" ] || { echo "broker did not start"; cat "$ST/broker.log"; exit 2; }
-echo "broker up (pid $BPID, socket $SOCK)"
+if [ -S "$SOCK" ]; then ok "installed layout starts (flat launcher+modules)"; else no "installed layout did not start"; cat "$ST/broker.log"; exit 2; fi
 
-# 1. legitimate change -> APPLIED and merged
-make_task t1 "$APP" aegl-task/t1 'echo hello > feature.txt'
-r="$(ask t1)"; d="$(decision "$r")"
-[ "$d" = APPLIED ] && ok "legitimate promotion APPLIED" || no "legitimate promotion ($d: $r)"
-git -C "$APP" cat-file -e HEAD:feature.txt 2>/dev/null && ok "change merged into the project" || no "change not merged"
+# --- 1. tampered task/acceptance cannot obtain promotion authorization --------- #
+WT1="$(make_wt "$APP" r1 'echo one > one.txt')"; D1="$(digest "$WT1" "$BASE" r1)"
+# a fake, AI-writable acceptance file that the broker must ignore
+mkdir -p "$ST/tasks/r1"; printf 'PASS\n' > "$ST/tasks/r1/verify.status"; echo '{"id":"r1"}' > "$ST/tasks/r1/task.json"
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r1\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "unregistered task + fake verify.status -> REJECTED (${r##*decision*})" || no "tampered acceptance authorized ($d)"
+# registered but never recorded (no acceptance record) -> REJECTED
+req "{\"op\":\"register\",\"task_id\":\"r1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT1\",\"branch\":\"r1\"}" >/dev/null
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r1\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "registered without an acceptance record -> REJECTED" || no "missing record authorized ($d)"
 
-# 2. validate-only does not modify the target
-make_task t2 "$APP" aegl-task/t2 'echo two > two.txt'
-r="$(ask t2 validate)"; d="$(decision "$r")"
-[ "$d" = VALIDATED ] && ok "validate-only returns VALIDATED" || no "validate-only ($d)"
-git -C "$APP" cat-file -e HEAD:two.txt 2>/dev/null && no "validate modified the target" || ok "validate did not modify the target"
+# --- 5a. normal approved content promotes (target then carries the change) ------ #
+req "{\"op\":\"record\",\"task_id\":\"r1\",\"verify_result\":\"PASS\",\"candidate_digest\":\"$D1\"}" >/dev/null
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r1\"}")"; d="$(dec "$r")"
+[ "$d" = APPLIED ] && ok "approved content promotes" || no "approved promote ($d: $r)"
+git -C "$APP" cat-file -e HEAD:one.txt 2>/dev/null && ok "approved change merged" || no "approved change not merged"
 
-# 3. unsupported op
-r="$(ask t2 rm -rf / 2>/dev/null)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "unsupported op REJECTED" || no "unsupported op ($d)"
+# --- 2. committed violating content still rejected (target unchanged) ---------- #
+WT2="$(make_wt "$APP" r2 'mkdir -p build && echo z > build/app.class && git add -A && git -c user.email=t@t -c user.name=t commit -qm bad')"
+D2="$(digest "$WT2" "$BASE" r2)"
+req "{\"op\":\"register\",\"task_id\":\"r2\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT2\",\"branch\":\"r2\"}" >/dev/null
+req "{\"op\":\"record\",\"task_id\":\"r2\",\"verify_result\":\"PASS\",\"candidate_digest\":\"$D2\"}" >/dev/null
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r2\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "committed violating content -> REJECTED" || no "committed violation allowed ($d)"
+git -C "$APP" cat-file -e HEAD:build/app.class 2>/dev/null && no "violating content merged" || ok "target unchanged after reject"
 
-# 4. unknown task
-r="$(ask does-not-exist)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "unknown task REJECTED" || no "unknown task ($d)"
+# --- 3. candidate verify-layout.sh must NOT run as the broker ------------------ #
+SIDE="$ST/broker_side_effect"
+WT3="$(make_wt "$APP" r3 'echo ok > r3.txt')"
+mkdir -p "$WT3/scripts"
+printf '#!/bin/sh\ntouch %s\n' "$SIDE" > "$WT3/scripts/verify-layout.sh"
+chmod +x "$WT3/scripts/verify-layout.sh"
+D3="$(digest "$WT3" "$BASE" r3)"
+req "{\"op\":\"register\",\"task_id\":\"r3\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT3\",\"branch\":\"r3\"}" >/dev/null
+req "{\"op\":\"record\",\"task_id\":\"r3\",\"verify_result\":\"PASS\",\"candidate_digest\":\"$D3\"}" >/dev/null
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r3\"}")"; d="$(dec "$r")"
+[ -e "$SIDE" ] && no "candidate verify-layout.sh executed by the broker" || ok "candidate script not executed by the broker ($d)"
 
-# 5. task_id traversal
-r="$(python3 "$BROKER" client --socket "$SOCK" --task '../escape' --op promote 2>/dev/null)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "task_id traversal REJECTED" || no "task_id traversal ($d)"
+# --- 4. candidate content swapped after record -> REJECTED -------------------- #
+WT4="$(make_wt "$APP" r4 'echo four > four.txt')"; D4="$(digest "$WT4" "$BASE" r4)"
+req "{\"op\":\"register\",\"task_id\":\"r4\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT4\",\"branch\":\"r4\"}" >/dev/null
+req "{\"op\":\"record\",\"task_id\":\"r4\",\"verify_result\":\"PASS\",\"candidate_digest\":\"$D4\"}" >/dev/null
+echo swapped >> "$WT4/four.txt"
+r="$(req "{\"op\":\"promote\",\"task_id\":\"r4\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "candidate swapped after record -> REJECTED" || no "swapped candidate allowed ($d)"
+git -C "$APP" cat-file -e HEAD:four.txt 2>/dev/null && no "swapped content merged" || ok "target unchanged after swapped reject"
 
-# 6. disallowed project target (Testapp) -> REJECTED, target unchanged
-make_task t6 "$PROOT/Testapp" aegl-task/t6 'echo six > six.txt'
-r="$(ask t6)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "disallowed project REJECTED" || no "disallowed project ($d)"
-git -C "$PROOT/Testapp" cat-file -e HEAD:six.txt 2>/dev/null && no "disallowed project was modified" || ok "disallowed project unchanged"
+# --- 5b. disallowed project target rejected, target unchanged ------------------ #
+BAD="$(new_project Testapp)"; BB="$(base_of "$BAD")"
+WT5="$(make_wt "$BAD" r5 'echo five > five.txt')"
+r="$(req "{\"op\":\"register\",\"task_id\":\"r5\",\"project\":\"$BAD\",\"base\":\"$BB\",\"worktree\":\"$WT5\",\"branch\":\"r5\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "disallowed project rejected at register" || no "disallowed project registered ($d)"
 
-# 7. modified after verify -> REJECTED
-make_task t7 "$APP" aegl-task/t7 'echo seven > seven.txt'
-echo tampered >> "$TROOT/t7/worktree/seven.txt"
-r="$(ask t7)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "modified_after_verify REJECTED" || no "modified_after_verify ($d)"
-git -C "$APP" cat-file -e HEAD:seven.txt 2>/dev/null && no "tampered change merged" || ok "tampered change not merged"
-
-# 8. generated/secret content -> REJECTED
-make_task t8 "$APP" aegl-task/t8 'mkdir -p build && echo x > build/app.class'
-r="$(ask t8)"; d="$(decision "$r")"
-[ "$d" = REJECTED ] && ok "generated/secret REJECTED" || no "generated/secret ($d)"
-
-# 9. serialization: two more promotions both apply cleanly
-make_task t9 "$APP" aegl-task/t9 'echo nine > nine.txt'
-make_task t10 "$APP" aegl-task/t10 'echo ten > ten.txt'
-d9="$(decision "$(ask t9)")"; d10="$(decision "$(ask t10)")"
-[ "$d9" = APPLIED ] && [ "$d10" = APPLIED ] && ok "serialized promotions both APPLIED" || no "serialization ($d9/$d10)"
+# --- requester/unauthorized op ------------------------------------------------ #
+r="$(req "{\"op\":\"kill\",\"task_id\":\"r1\"}")"; d="$(dec "$r")"
+[ "$d" = REJECTED ] && ok "unsupported op rejected" || no "unsupported op ($d)"
 
 echo "BROKER_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

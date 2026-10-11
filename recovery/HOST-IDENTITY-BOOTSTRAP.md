@@ -95,19 +95,31 @@ Files:
   by an flock; the project target is derived from the task's own `task.json`.
 - `recovery/promotion_core.py` — the ONE central gate + apply (also used by `bin/aegl-task verify`).
 
-Install steps (printed by `host-identity-bootstrap.sh broker-plan`; run manually with `sudo`):
+Install steps (printed by `host-identity-bootstrap.sh broker-plan`; run manually with `sudo`;
+`broker-plan` only PRINTS — it never runs sudo and never writes the marker):
 
-1. Install the program root-owned under `/usr/local/lib/aegl-promote` (0755 root:root) so
-   neither the AI nor the broker identity can modify it; record the reviewed hashes.
+1. Install the exact files **from the pinned isolated branch commit** (`git show <pin>:<path>`),
+   root-owned under `/usr/local/lib/aegl-promote` (flat layout: launcher + `promotion_broker.py`
+   + `promotion_core.py` in ONE directory, so the launcher resolves its module next to itself).
+   Do not copy from an unmerged working checkout; verify each installed file's sha256 against
+   `git show <pin>:<path> | sha256sum`.
 2. Create group `aegl-broker`, add `aegl-ai` to it (socket access), create `/run/aegl-promote`
-   owned `aegl-promote:aegl-broker` mode 2770.
-3. Install a systemd unit running `aegl-promote-broker serve` as `User=aegl-promote` with
-   `AEGL_BROKER_SOCKET=/run/aegl-promote/broker.sock`.
-4. Run `recovery/broker-tests.sh` as `aegl-promote` against a throwaway tree; **only if it
-   passes** write root-owned `/etc/aegl/broker-verified`.
+   (`aegl-promote:aegl-broker` 2770) and the broker-owned registry dir `/var/lib/aegl-promote`
+   (`aegl-promote:aegl-broker` 0700).
+3. Install a systemd unit running `aegl-promote-broker serve` as `User=aegl-promote`, with the
+   registry location and allowlists **explicit**: `AEGL_BROKER_REGISTRY_DIR=/var/lib/aegl-promote`,
+   `PROJECTS_ROOT`, `AEGL_PROJECT_ALLOWLIST=Google-Android-Agent-Development-Stack,KeepLab-Relay,
+   AI-Engineering-Governance-Layer`, `AEGL_BROKER_ALLOW_REQUESTERS=aegl-ai`,
+   `AEGL_BROKER_ALLOW_RECORDERS=root,<operator>`.
+4. Run `recovery/broker-tests.sh` as `aegl-promote` against a throwaway tree; **only if it passes**
+   write the reviewed pin into root-owned `/etc/aegl/broker-verified` (manual root step).
 5. `switch` (the bulk project permission migration + entry lock) still refuses until that marker
    exists — do not run it as part of this step.
 
-Functional acceptance ≠ installed isolation: `broker-tests.sh` runs same-uid and proves the
-broker logic only. The independent-identity boundary exists only once the broker runs as
-`aegl-promote` with the marker written; `INDEPENDENT_IDENTITY_INSTALLED=NO` until then.
+Trust model: the broker authorizes by kernel peer uid (`SO_PEERCRED`) against the allowlists, and
+binds the project target, baseline and approved candidate content in its own registry — never in the
+AI-writable `task.json` / `verify.status`. The candidate is re-pinned at promote time, so swapped
+files or branches are refused; candidate scripts are never executed as the broker identity; git
+operations disable hooks. Functional acceptance ≠ installed isolation: `broker-tests.sh` runs
+same-uid and proves the broker logic only. The independent-identity boundary exists only once the
+broker runs as `aegl-promote` with the marker written; `INDEPENDENT_IDENTITY_INSTALLED=NO` until then.

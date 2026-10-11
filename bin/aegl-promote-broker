@@ -2,13 +2,18 @@
 # aegl-promote-broker — the independent AEGL promotion broker (identity: aegl-promote).
 #
 #   serve   run the broker daemon on $AEGL_BROKER_SOCKET
-#   client  submit a bounded request (--task <id> [--op promote|validate]) and print the reply
+#   client  submit a bounded request (--request '<json>'; op + task_id only) and print the reply
 #
-# The broker validates AND applies promotions through recovery/promotion_core.py; a
-# client only ever submits an op + task_id — never a shell command or target path.
+# The module is resolved next to this launcher first (the installed layout is flat:
+# launcher + promotion_broker.py + promotion_core.py in one root-owned directory),
+# falling back to the in-repo layout (../recovery/). Client exit codes: 0 applied/
+# validated, 2 unreachable, 3 rejected, 4 failed.
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BROKER_PY="$SELF_DIR/../recovery/promotion_broker.py"
+
+BROKER_PY="$SELF_DIR/promotion_broker.py"
+[ -f "$BROKER_PY" ] || BROKER_PY="$SELF_DIR/../recovery/promotion_broker.py"
+[ -f "$BROKER_PY" ] || { echo "BLOCKED: promotion_broker.py not found next to $SELF_DIR" >&2; exit 2; }
 
 case "${1:-}" in
   serve)
@@ -19,5 +24,5 @@ case "${1:-}" in
     : "${AEGL_BROKER_SOCKET:?AEGL_BROKER_SOCKET must be set}"
     exec python3 "$BROKER_PY" client --socket "$AEGL_BROKER_SOCKET" "$@" ;;
   *)
-    sed -n '2,8p' "$0"; exit 2 ;;
+    sed -n '2,10p' "$0"; exit 2 ;;
 esac

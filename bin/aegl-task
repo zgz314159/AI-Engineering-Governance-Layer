@@ -320,30 +320,49 @@ classify() { # <id> <outfile>  -> prints rejected count (last line)
 }
 
 # --------------------------------------------------------------------------- #
-# task promote — submit a bounded request to the independent broker.
-#
-# The broker (a different identity) re-validates candidate content, the allowed
-# project target and the content pin, then applies the promotion. This AI-side
-# command only authenticates, requires a verified broker, and relays the decision:
-# it never applies the diff and never touches the canonical project after the reply.
+# bounded broker call — a request carries op + task_id only (requester ops); the
+# requester never supplies a shell command or a target path. Returns the client rc.
 # --------------------------------------------------------------------------- #
+broker_call() { # <request-json>
+  python3 "$AEGL_ROOT/recovery/promotion_broker.py" client \
+      --socket "${AEGL_BROKER_SOCKET:-}" --request "$1" 2>/dev/null
+}
+
+# task register / record — RECORDER ops, authorized server-side by peer uid against a
+# trusted recorder allowlist. The trusted registry (not task.json) binds the project
+# target, baseline and approved candidate content.
+task_register() {
+  local id="${1:?task register <id>}" td wt proj branch base req
+  _verify_paths "$id"
+  branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
+  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5]}))' "$id" "$proj" "$base" "$wt" "$branch")"
+  broker_call "$req"
+}
+
+task_record() {
+  local id="${1:?task record <id>}" td wt proj branch base digest req
+  _verify_paths "$id"
+  branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
+  digest="$(python3 "$AEGL_ROOT/recovery/promotion_core.py" digest "$wt" "$base" "$branch")"
+  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"record","task_id":sys.argv[1],"verify_result":"PASS","candidate_digest":sys.argv[2]}))' "$id" "$digest")"
+  broker_call "$req"
+}
+
+# task promote — requester op. The broker re-pins the candidate against its registry,
+# re-validates, then applies; this side never applies the diff or touches the canonical
+# project after the reply.
 task_promote() {
-  local id="${1:?task promote <id>}" td wt proj branch
+  local id="${1:?task promote <id>}"
   controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
   require_broker   # default-deny: a verified independent broker is mandatory
-  local reply decision
-  reply="$(python3 "$AEGL_ROOT/recovery/promotion_broker.py" client \
-             --socket "${AEGL_BROKER_SOCKET:-}" --task "$id" --op promote 2>/dev/null || true)"
-  decision="$(printf '%s' "$reply" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("decision",""))
-except Exception: print("")' 2>/dev/null)"
+  local reply rc
+  reply="$(broker_call "{\"protocol\":\"AEGL-BROKER/1\",\"op\":\"promote\",\"task_id\":\"$id\"}")"; rc=$?
   say "BROKER_REPLY=$reply"
-  case "$decision" in
-    APPLIED)   say "PROMOTE=APPLIED id=$id"; return 0 ;;
-    VALIDATED) say "PROMOTE=VALIDATED id=$id"; return 0 ;;
-    REJECTED)  say "PROMOTE_REJECTED id=$id"; return 3 ;;
-    *)         say "PROMOTE_FAILED id=$id (broker ${decision:-unreachable})"; return 4 ;;
+  case "$rc" in
+    0) say "PROMOTE=APPLIED id=$id"; return 0 ;;
+    3) say "PROMOTE_REJECTED id=$id"; return 3 ;;
+    *) say "PROMOTE_FAILED id=$id"; return 4 ;;
   esac
 }
 
@@ -368,8 +387,9 @@ case "${1:-}" in
   task) shift; sub="${1:-}"; shift || true
         case "$sub" in
           start) task_start "$@" ;; verify) task_verify "$@" ;;
+          register) task_register "$@" ;; record) task_record "$@" ;;
           promote) task_promote "$@" ;; discard) task_discard "$@" ;;
-          *) die "usage: task {start|verify|promote|discard}" ;;
+          *) die "usage: task {start|verify|register|record|promote|discard}" ;;
         esac ;;
   controller) shift; [ "${1:-}" = probe ] || die "usage: controller probe <id> <cmd>"; shift; controller_probe "$@" ;;
   identity)   shift; [ "${1:-}" = status ] || die "usage: identity status"; identity_status ;;
