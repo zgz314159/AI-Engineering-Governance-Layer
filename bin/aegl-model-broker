@@ -19,6 +19,7 @@ case "${1:-}" in
       --socket "$AEGL_MODEL_SOCKET" \
       --upstream "$AEGL_MODEL_UPSTREAM" \
       --credential-env "${AEGL_MODEL_CREDENTIAL_ENV:-COMMANDCODE_API_KEY}" \
+      --credential-source "${AEGL_MODEL_CREDENTIAL_SOURCE:-}" \
       --credential-file "${AEGL_MODEL_CREDENTIAL_FILE:-}" \
       ${AEGL_MODEL_AUTH_HEADER:+--auth-header "$AEGL_MODEL_AUTH_HEADER"} ;;
   *)

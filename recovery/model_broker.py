@@ -28,20 +28,52 @@ DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_PREFIX = "Bearer "
 
 
-def _load_credential(env_name: str, path: str) -> str:
-    """Read the credential from the EXISTING env var, else an explicit file.
+def _parse_dotenv_data(path: str, name: str) -> str:
+    """Read ``NAME=value`` from a file as DATA — never sourced or eval'd.
 
-    Never printed, never written to the trial directory. The trusted component reads it
-    at its original location only.
+    No shell syntax, no command substitution, no expansion: the file is opened and
+    scanned line by line; only a literal ``NAME=`` line is honoured.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, _, value = text.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        if key != name:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value:
+            return value
+    return ""
+
+
+def _load_credential(env_name: str, source_file: str, path: str) -> str:
+    """Credential from the env, else the EXISTING source file parsed as data.
+
+    Never printed, never written to the trial directory, and never executed.
     """
     if env_name and os.environ.get(env_name, "").strip():
         return os.environ[env_name].strip()
+    if source_file:
+        value = _parse_dotenv_data(source_file, env_name or "COMMANDCODE_API_KEY")
+        if value:
+            return value
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as handle:
             value = handle.read().strip()
         if value:
             return value
-    raise SystemExit("model broker: no credential (set %s or pass --credential-file)" % env_name)
+    raise SystemExit("model broker: no credential (env %s / source %s)" % (env_name, source_file or "-"))
 
 
 def _read_headers(conn: socket.socket) -> tuple:
@@ -158,10 +190,11 @@ def main(argv):
     p.add_argument("--socket", required=True)
     p.add_argument("--upstream", required=True)
     p.add_argument("--credential-file", default="")
+    p.add_argument("--credential-source", default="")
     p.add_argument("--credential-env", default="COMMANDCODE_API_KEY")
     p.add_argument("--auth-header", default=DEFAULT_AUTH_HEADER)
     args = parser.parse_args(argv)
-    credential = _load_credential(args.credential_env, args.credential_file)
+    credential = _load_credential(args.credential_env, args.credential_source, args.credential_file)
     if args.auth_header.lower() == "authorization":
         credential = credential if credential.lower().startswith(("bearer ", "token ")) else DEFAULT_AUTH_PREFIX + credential
     return serve(args.socket, args.upstream, credential, args.auth_header)
