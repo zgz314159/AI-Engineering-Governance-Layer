@@ -634,11 +634,11 @@ control conversation was touched. The user's other Chrome windows were preserved
 Loop acceptance checklist — **a box is checked only when that real hop actually completed**
 (the provider-only fact below is NOT part of this chain and never checks a box here):
 
-- [x] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge (Round 8)
-- [x] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider (Round 8: outcome `SUCCESS`, exit_code 0)
-- [x] `task_acceptance` — the deterministic acceptance for the read-only task passes (Round 8: the model produced the exact fixed line `ORIG-LOOP-RESULT=ORIGLOOP-2F7C9A` read from the input file)
-- [ ] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session (Round 8: sent once and visibly present, but the exact-canonical confirmation returned `SEND_UNCERTAIN`; see Round 8)
-- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above) — one hop remains
+- [x] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge (Round 8; reconfirmed Round 9)
+- [ ] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider (Round 9: the model emitted `CONTRACT_DEVIATION`; its terminal cwd is the canonical project so the contract in the external worktree was unreachable. Round 8's `SUCCESS` was not reproducible. UNCHECKED.)
+- [ ] `task_acceptance` — the deterministic acceptance for the read-only task passes (Round 9: no fixed result produced — the task never ran. UNCHECKED.)
+- [x] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session (Round 9: `send.status=CONFIRMED_SENT`; the delivered user turn carries real newlines and equals the canonical message)
+- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above) — `hermes_task_executed` and `task_acceptance` remain open
 
 Provider-only fact (separate from, and NOT counting toward, the checklist above):
 
@@ -737,3 +737,48 @@ the canonical multi-line `HERMES_RESULT_V1` message; then re-run one round.
 acceptance only (see above) — it does not cover the ChatGPT transport or the loop. `AI_BOUNDARY`
 stays `BLOCKED` by actual evidence (no confinement, no broker); a passing communication loop would
 not change it.
+
+## Round update 9: multi-line send fix + one loop acceptance
+
+The multi-line result-send defect is fixed and proven end to end; the single loop acceptance still
+fails at Hermes execution for an environment/seam reason.
+
+Fix (isolated Stack branch `plan/hermes-chatgpt-control-url`, not merged):
+
+- `2521b90` — `chatgpt_adapter.type_multiline()` sends a multi-line message line by line with a soft
+  break (Shift+Enter, `modifiers=8`) between lines, clearing only the first line, so blank lines and a
+  trailing newline survive and the composer never submits early. Live draft check in a new session:
+  5/5 paragraphs preserved (consecutive blank lines, Chinese, JSON quotes), no early submit, draft
+  cleared. Focused tests 7/7.
+
+One real loop acceptance (real entry `bridge_cli.py round`; a new independent ChatGPT session; fresh
+isolated external Bridge state; the read-only contract `ORIG-LOOP-TRIAL-001`):
+
+```text
+MULTILINE_INPUT=PASS               (5/5 paragraphs, no submit; focused tests 7/7)
+CHATGPT_TASK_RECEIVED=PASS
+HERMES_TASK_EXECUTED=BLOCKED       (CONTRACT_DEVIATION)
+TASK_ACCEPTANCE=BLOCKED            (no fixed result produced)
+CHATGPT_RESULT_DELIVERED=PASS      (send.status = CONFIRMED_SENT; user turn equals the canonical message)
+ORIGINAL_AUTOMATION=BLOCKED
+FIRST_FAILED_HOP=hermes_task_executed — the Hermes model emitted CONTRACT_DEVIATION ("contract
+  package absent", read_first input NOT FOUND) and stopped at §0. Its terminal cwd is the CANONICAL
+  project (/home/zhong/Projects/Google-Android-Agent-Development-Stack), while the compiler-generated
+  contract and its read_first input live in the external worktree; the model resolved the prompt's
+  project-relative paths against the canonical checkout and found nothing. The Bridge's own process
+  cwd was the worktree and its contract gate passed, but the model's tool cwd is profile-pinned.
+```
+
+- The multi-line delivery hop now passes: the delivered user turn contains the real newlines and the
+  exact-canonical confirmation matched (`CONFIRMED_SENT`).
+- The loop does not complete: `hermes_task_executed` and `task_acceptance` are open, so
+  `ORIGINAL_AUTOMATION` stays `BLOCKED` and their checkboxes were reset to unchecked.
+- Per the round's single-acceptance rule, no second acceptance was run.
+- Root cause is an environment/seam mismatch, not the transport: the profile pins the terminal cwd to
+  the canonical project, so a contract that must live outside the canonical checkout (to keep it
+  read-only) cannot be reached by project-relative paths. Minimal next change: make the contract
+  location absolute in the generated prompt, or run the loop with a Hermes terminal cwd inside the
+  worktree.
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` are unchanged. `AI_BOUNDARY` stays `BLOCKED` by
+actual evidence (no confinement, no broker).
