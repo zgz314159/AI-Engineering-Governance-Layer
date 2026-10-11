@@ -106,9 +106,8 @@ boundary_audit() {
 
 # --------------------------------------------------------------------------- #
 # RuleSync: PLAN + dry-run diff ONLY — never writes, never overwrites/deletes.
-# Global-mode support is read from the pinned RuleSync v25 docs
-# (reference/supported-tools.md): the first data column is the `rules` feature and
-# 🌏 means it supports global mode.
+# Capability paths are pinned to the reviewed v25 rules adapters. Cursor has no
+# global rules path; project AGENTS.md/CLAUDE.md files are not deployment targets.
 # --------------------------------------------------------------------------- #
 RULESYNC_TARGETS=(claudecode codexcli cursor)
 rulesync_global_support() { # <target> -> yes|no|unknown (from pinned v25 docs)
@@ -118,40 +117,39 @@ rulesync_global_support() { # <target> -> yes|no|unknown (from pinned v25 docs)
     *)                   echo unknown ;;
   esac
 }
-rulesync_project_files() { # <target> -> project-relative paths it would own
+rulesync_global_file() { # <target> -> path relative to the operator home
   case "$1" in
-    claudecode) echo "CLAUDE.md" ;;
-    codexcli)   echo "AGENTS.md" ;;
-    cursor)     echo ".cursor/rules/00-governance.mdc" ;;
+    claudecode) echo ".claude/CLAUDE.md" ;;
+    codexcli)   echo ".codex/AGENTS.md" ;;
   esac
 }
 
 rulesync_plan() {
-  local docs="$AEGL_ROOT/upstream/rulesync/docs/reference/supported-tools.md"
+  local source="$AEGL_ROOT/governance/global-agent-policy.md"
   say "RULESYNC PLAN (dry-run; writes nothing)"
-  if [ -f "$docs" ]; then say "  doc source: $docs (present; Table: ✅ project 🌏 global)"
-  else say "  doc source: submodule absent — using the table recorded from pinned v25.0.0"; fi
-  local unsupported=0 conflicts=0 t p d f
+  say "  policy source: $source"
+  local unsupported=0 conflicts=0 missing=0 t f dest
+  [ -f "$source" ] || { say "  policy source missing"; missing=1; }
   for t in "${RULESYNC_TARGETS[@]}"; do
     local g; g="$(rulesync_global_support "$t")"
     say "  target=$t global_rules=$g"
-    [ "$g" = yes ] || { say "    -> global mode NOT supported for rules: mark target NOT_DONE"; unsupported=$((unsupported+1)); }
-    for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do
-      d="$PROJECTS_ROOT/$p"
-      for f in $(rulesync_project_files "$t"); do
-        if [ -e "$d/$f" ]; then
-          local h; h="$(sha256sum "$d/$f" 2>/dev/null | awk '{print $1}')"
-          say "    would write: $p/$f  EXISTS sha256=${h:0:16}…  CONFLICT (existing file is not rulesync-owned)"
-          conflicts=$((conflicts+1))
-        else
-          say "    would write: $p/$f  (absent)"
-        fi
-      done
-    done
+    if [ "$g" != yes ]; then
+      say "    -> global rules NOT supported: target NOT_DONE"
+      unsupported=$((unsupported+1))
+      continue
+    fi
+    f="$(rulesync_global_file "$t")"; dest="$HOME/$f"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+      local h; h="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
+      say "    would write: $dest  EXISTS sha256=${h:-unreadable}  CONFLICT (never overwrite automatically)"
+      conflicts=$((conflicts+1))
+    else
+      say "    would write: $dest  (absent)"
+    fi
   done
-  say "  conflicts=$conflicts unsupported_targets=$unsupported"
-  if [ "$unsupported" -gt 0 ] || [ "$conflicts" -gt 0 ]; then
-    say "RULESYNC_PLAN=NOT_DONE (unsupported targets and/or conflicts; no partial success, nothing written)"
+  say "  conflicts=$conflicts unsupported_targets=$unsupported missing_source=$missing"
+  if [ "$unsupported" -gt 0 ] || [ "$conflicts" -gt 0 ] || [ "$missing" -gt 0 ]; then
+    say "RULESYNC_PLAN=NOT_DONE (unsupported targets, conflicts, or missing source; nothing written)"
     return 1
   fi
   say "RULESYNC_PLAN=OK (no conflicts; a deploy may be proposed for operator approval)"
@@ -292,6 +290,7 @@ PY
 # --------------------------------------------------------------------------- #
 task_promote() {
   local id="${1:?task promote <id>}" td wt proj branch
+  controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
   branch="$(task_field "$td/task.json" branch)"
   [ "$(cat "$td/verify.status" 2>/dev/null)" = "PASS" ] || die "task verify has not PASSed"
@@ -317,6 +316,7 @@ task_promote() {
 
 task_discard() {
   local id="${1:?task discard <id>}" td wt proj branch
+  controller_auth || die "task discard authentication failed"
   _verify_paths "$id"
   branch="$(task_field "$td/task.json" branch)"
   git -C "$proj" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"

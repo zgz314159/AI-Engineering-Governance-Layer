@@ -349,6 +349,33 @@ Per-item evidence (affected gates run once, after the fixes):
 The earlier PASS claim is withdrawn; `SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS`
 stand. Stage 1/2 were not re-run.
 
+## Subsequent isolated-branch implementation (not merged or deployed)
+
+The `ai-boundary-stage3` worktree holds follow-up code only. This section records
+implementation state; it does not replace the historical result above or claim
+final acceptance.
+
+- [x] Add an offline AI launcher that places the command and its children inside
+  Bubblewrap. Cloud mode fails before any model credential is copied; offline mode
+  does not pass one, and a pre-existing per-task credential path is masked.
+- [x] Require the controller token for `task promote` and `task discard`, not just
+  `controller probe`. This is a same-UID check, **not** a kernel-enforced operator
+  identity boundary.
+- [x] Make RuleSync a no-write plan for actual user-global Claude/Codex paths.
+  Keep a generic global policy source separate from the fixture-specific policy;
+  do not write project `AGENTS.md` or `CLAUDE.md`. Cursor global rules remain
+  unsupported by the pinned adapter.
+- [x] Targeted self-check: `bash -n` and `recovery/boundary-tests.sh` 22/22 after
+  the follow-up fixes. This is not the full negative matrix or real-agent test.
+- [ ] Independently accept the real AI-agent launch, full affected negative matrix,
+  promotion under a separated operator identity, and any real RuleSync deployment.
+
+`AI_BOUNDARY=BLOCKED` remains the only honest overall status. Unblock conditions
+include an operator/AI identity boundary stronger than a same-UID token, a
+controlled cloud network/credential broker if cloud models are required, and a
+clobber-safe RuleSync deployment strategy that accounts for unsupported global
+targets. No archive, backup, or snapshot was created by this follow-up.
+
 # Future computer migration contract
 
 - Transfer project body with `git clone`, or with a verified full `git bundle` when offline; do not copy the entire Projects directory as a filesystem snapshot.

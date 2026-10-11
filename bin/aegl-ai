@@ -6,14 +6,8 @@
 # not an AI entry). Canonical projects are read-only, host credential paths are
 # masked, and the environment is a fixed whitelist.
 #
-# Cloud models need network + credentials. This entry handles them explicitly and
-# FAILS CLOSED where it cannot be done safely:
-#   * credential: only from a per-task file `<task>/model-credential` (mode 600),
-#     bound into the sandbox and referenced by $AEGL_MODEL_CREDENTIAL_FILE — never
-#     from the host environment;
-#   * network: `--net off` (default) unshares the network namespace. `--net cloud`
-#     requires egress filtering, which bubblewrap cannot provide and which needs a
-#     host firewall/netns privilege this user does not have -> BLOCKED.
+# Cloud mode is deliberately unavailable until a controlled network and credential
+# handoff exist. Offline mode must never copy or expose a model credential.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,6 +37,9 @@ sandbox_exec() {
   # mask the controller token so the sandboxed AI can never read it
   local tf="${AEGL_CONTROLLER_TOKEN_FILE:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/aegl-controller.token}"
   [ -e "$tf" ] && args+=( --ro-bind /dev/null "$tf" )
+  # A leftover per-task credential must not become readable through --ro-bind / /.
+  local task_cred="${wt%/worktree}/model-credential"
+  [ -e "$task_cred" ] && args+=( --ro-bind /dev/null "$task_cred" )
   args+=( --clearenv
           --setenv PATH "$SANDBOX_PATH"
           --setenv HOME "$scratch/home"
@@ -53,7 +50,6 @@ sandbox_exec() {
           --setenv AEGL_AI_SANDBOX 1
           --setenv MISE_DATA_DIR "${MISE_DATA_DIR:-$HOME/.local/share/mise}"
           --setenv MISE_CACHE_DIR "${MISE_CACHE_DIR:-$HOME/.cache/mise}" )
-  [ -n "${AEGL_MODEL_CREDENTIAL_FILE:-}" ] && args+=( --setenv AEGL_MODEL_CREDENTIAL_FILE "$AEGL_MODEL_CREDENTIAL_FILE" )
   # network: unshare unless the caller explicitly requests cloud egress
   if [ "$net" = "cloud" ]; then args+=( --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup )
   else args+=( --unshare-all ); fi
@@ -73,22 +69,15 @@ ai_run() {
   done
   [ -n "$task" ] || die "usage: aegl-ai run --task <id> [--net off|cloud] -- <ai-cmd...>"
   [ "${#cmd[@]}" -gt 0 ] || die "no AI command given"
+  case "$net" in
+    off) ;;
+    cloud) die "cloud/network mode cannot be made safe: no controlled egress or credential handoff is installed; an operator-provided broker is required" ;;
+    *) die "unknown network mode: $net" ;;
+  esac
   local td="$TASKS_ROOT/$task"
   [ -f "$td/task.json" ] || die "no such task: $task"
   local wt scratch gh
   wt="$(task_field "$td/task.json" worktree)"; scratch="$(task_field "$td/task.json" scratch)"; gh="$(task_field "$td/task.json" gradle_home)"
-
-  local cred="$td/model-credential"
-  if [ -f "$cred" ]; then
-    [ "$(stat -c '%a' "$cred")" = "600" ] || die "model credential $cred must be mode 600"
-    # expose a copy inside the sandbox scratch (never the host env)
-    install -m 0400 "$cred" "$scratch/model-credential"
-    export AEGL_MODEL_CREDENTIAL_FILE="$scratch/model-credential"
-  fi
-
-  if [ "$net" = "cloud" ]; then
-    die "cloud/network mode cannot be made safe: bubblewrap cannot filter egress, and an egress proxy/firewall needs a host privilege this user lacks (no sudo, no netns capability). Precise condition to unblock: a host-level allowlist egress proxy (e.g. a per-task HTTP(S) proxy on loopback) plus firewall rules restricting the sandbox to it. Until then cloud models must run with --net off."
-  fi
 
   say "AI_ENTRY sandbox=on net=$net task=$task"
   sandbox_exec "$wt" "$scratch" "$gh" "$net" "${cmd[@]}"

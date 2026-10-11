@@ -7,10 +7,14 @@
 set -uo pipefail
 export AEGL_TRUSTED_CONTROLLER=1
 
-AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+AEGL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK="$AEGL/bin/aegl-task"
 export AEGL_STATE_HOME="${MATRIX_STATE:-$(mktemp -d /tmp/aegl-matrix-XXXXXX)}"
 export AEGL_TASKS_ROOT="$AEGL_STATE_HOME/tasks"
+export AEGL_CONTROLLER_TOKEN_FILE="$AEGL_STATE_HOME/controller.token"
+printf 'matrix-controller-%s\n' "$RANDOM" > "$AEGL_CONTROLLER_TOKEN_FILE"
+chmod 600 "$AEGL_CONTROLLER_TOKEN_FILE"
+export AEGL_CONTROLLER_TOKEN="$(<"$AEGL_CONTROLLER_TOKEN_FILE")"
 
 pass=0; fail=0
 ok() { pass=$((pass+1)); printf 'PASS  %s\n' "$1"; }
