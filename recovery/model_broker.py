@@ -109,6 +109,39 @@ def _map_path(base_path: str, path: str) -> str:
     return base_path + path
 
 
+def _handle_guard(conn: socket.socket, body: bytes) -> None:
+    """Controller-side pre_tool_call evaluation: run the guard OURSELVES and return its raw
+    stdout + exit code. The AI cannot influence this (its log/socket/self-report is ignored)."""
+    import guard_capture  # same directory as this module
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    guard = os.environ.get("AEGL_GUARD_PATH") or ""
+    try:
+        runner = json.loads(os.environ.get("AEGL_GUARD_RUNNER") or "[]")
+    except ValueError:
+        runner = []
+    if guard:  # the guard is run by the CONTROLLER, as the restricted identity
+        result = guard_capture.run_guard(guard, payload, runner=runner)
+    else:      # no guard configured -> fail closed, never silently allow
+        result = {"rc": None, "stdout": "", "verdict": None, "error": "no_guard_configured"}
+    result["task"] = os.environ.get("AEGL_TASK", "")
+    result["tool_call_id"] = str(payload.get("tool_call_id") or "")
+    result["operation"] = str(payload.get("tool_name") or "")
+    evidence = os.environ.get("AEGL_GUARD_EVIDENCE") or ""
+    if evidence:
+        try:
+            ai_uid = int(os.environ.get("AEGL_GUARD_AI_UID") or "-1")
+        except ValueError:
+            ai_uid = -1
+        result["evidence"] = guard_capture.record(evidence, ai_uid, result)
+    out = json.dumps(result, ensure_ascii=False).encode("utf-8")
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
+
+
 def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: str) -> None:
     head, body = _read_headers(conn)
     lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
@@ -131,6 +164,11 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
                 break
             body += chunk
         body = body[:need]
+
+    # the trusted controller ALSO answers pre_tool_call evaluations on this same socket
+    if path.split("?")[0] == "/guard":
+        _handle_guard(conn, body)
+        return
 
     url = urllib.parse.urlsplit(upstream)
     base_path = url.path.rstrip("/")
