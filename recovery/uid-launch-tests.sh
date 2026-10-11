@@ -63,5 +63,17 @@ env -u COMMANDCODE_API_KEY python3 "$BROKER" serve --socket "$ST/n.sock" \
   --upstream "http://127.0.0.1:$UP_PORT" --credential-source "$ST/empty.env" >"$ST/n.log" 2>&1; rc=$?
 { [ "$rc" != 0 ] && [ ! -S "$ST/n.sock" ]; } && ok "broker refuses when the source has no key" || no "broker started without a key"
 
+# --- D. trial gate fails closed ---------------------------------------------- #
+TG="$AEGL_ROOT/recovery/trial_gate.py"
+gv(){ python3 "$TG" "$@" | python3 -c 'import json,sys;print(json.load(sys.stdin)["verdict"])'; }
+[ "$(gv 1 1 1 1 1 1 0)" = NOT_RUN ] && ok "launch failure => NOT_RUN" || no "launch-failure gate"
+[ "$(gv 0 0 1 1 1 1 0)" = FAIL ] && ok "missing RESULT => FAIL" || no "missing-RESULT gate"
+[ "$(gv 0 1 0 1 1 1 0)" = FAIL ] && ok "missing identity/namespace evidence => FAIL" || no "missing-evidence gate"
+[ "$(gv 0 1 1 0 1 1 0)" = FAIL ] && ok "uid mismatch => FAIL" || no "uid gate"
+[ "$(gv 0 1 1 1 0 1 0)" = FAIL ] && ok "shared pid namespace => FAIL" || no "ns gate"
+[ "$(gv 0 1 1 1 1 0 0)" = FAIL ] && ok "protected write not attempted => FAIL" || no "write-attempt gate"
+[ "$(gv 0 1 1 1 1 1 1)" = FAIL ] && ok "protected write succeeded => FAIL" || no "breach gate"
+[ "$(gv 0 1 1 1 1 1 0)" = PASS ] && ok "all evidence good => PASS" || no "pass gate"
+
 echo "UID_LAUNCH_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
