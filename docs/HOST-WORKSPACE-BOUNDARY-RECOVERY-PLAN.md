@@ -526,3 +526,31 @@ not PASS. No host change, no canonical-project change, no backup/archive/snapsho
 - Transfer secrets through a separate approved secret channel; never commit or bundle them with project body.
 - On the destination host, run only the recovery `doctor`, `bootstrap`, and `test` entrypoints. Rebuild caches, generated files, services, Hermes runtime, and XDG state instead of copying them.
 - A future migration is accepted at `SYSTEM_RECOVERED=PASS`; cleanup and hardening are not re-run unless their own inputs or policy version changed.
+
+## Round update 5: real model channel + promotion broker (blocked at step 1)
+
+Baseline `d8b8d18`; one-off test repo outside `/home/zhong/Projects`; no canonical project
+touched; no credential copied or printed.
+
+**Step 1 — can the client be pointed at a controlled endpoint?** Evidence:
+- The client advertises `HTTP_PROXY/HTTPS_PROXY` (undici `EnvHttpProxyAgent`) and BYOK
+  ("any OpenAI/Anthropic-compatible endpoint"). Decisive probe: with `HTTPS_PROXY` pointed
+  at a local listener, a real call to the available provider
+  (`deepseek/deepseek-v4.1-flash`) returned its answer **without any connection to the
+  listener** — the client ignores `HTTP(S)_PROXY` for its own provider's model calls.
+- BYOK custom `baseURL` is supported, but a BYOK DeepSeek call needs a provider API key that
+  is not present here (the only credential is Command Code's; it was neither copied nor
+  printed), so the controlled-endpoint route cannot be exercised for a real DeepSeek model.
+- Sandbox feasibility confirmed separately: a fresh bwrap netns can bind `127.0.0.1`
+  ("loopback bind OK"), so an in-sandbox loopback-to-Unix-socket shim is technically
+  possible; what is missing is a client route for the available credential and the broker.
+
+**Blocked at step 1 (client model-channel interface).** The client cannot direct the
+available provider's model traffic to a controlled endpoint (proxy ignored) and BYOK needs
+an absent provider key. Per instruction, no substitute AI client was created and steps 2-3
+(the executor promotion broker and the end-to-end acceptance) were not started.
+
+Minimal necessary change: either a provider credential for a BYOK endpoint we control (then
+`baseURL` plus a local loopback-to-Unix broker can carry the call with the credential
+outside the sandbox), or client support for routing its own provider through `HTTPS_PROXY`.
+Until then `AI_BOUNDARY=BLOCKED`.
