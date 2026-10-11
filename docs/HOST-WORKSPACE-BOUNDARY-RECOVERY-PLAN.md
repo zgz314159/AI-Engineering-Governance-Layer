@@ -1222,3 +1222,44 @@ The `--self-test` is the bounded (~5 min) real trial; no `switch`, no project pe
 merge, no backup/archive. No sudo was executed; browser automation and active chain state unchanged.
 
 Commit: AEGL branch `plan/uid-mount-fix` @ `9fdab21` (not merged).
+
+## Round update 21: real entry fixed (complete install, writable task mounts, live evidence)
+
+Three defects in the round-20 entry, all fixed (AEGL branch `plan/entry-fix`, not merged):
+
+- **Install completeness.** `install-model-broker.sh` staged `bind_fd_exec.py` / `trial_gate.py` but the
+  install loop only copied `model_broker.py` / `loopback_shim.py`, so the installed entry was missing
+  modules. The loop now installs every `FILES` entry and asserts each `REFERENCED` module exists in the
+  flat dir; a new no-root `--check-layout` stages the pinned commit and checks the flat layout.
+- **Writable task mounts.** The generated bwrap argv only had read-only mounts — the worktree/scratch
+  `--bind` were missing. The argv is now built by `recovery/sandbox_spec.py` (testable without root)
+  and includes `--bind <wt> <wt>` and `--bind <scr> <scr>` from the trusted registry — the only
+  writable project paths.
+- **Live evidence.** `recovery/capture_evidence.py` takes the actual child pid from bwrap `--info-fd`
+  and reads its uid + pid namespace from host `/proc` **while it is alive**; the self-test launches
+  asynchronously, captures, then waits. Missing/failed/inconsistent evidence FAILS; model FACTS are
+  never the authority.
+- **Required runtime paths.** The launcher checks the Hermes entry, Python toolchain, android-stack
+  profile, shim and contract-guard source before any host change; the contract package is required
+  (stop if absent); the guard source is bound read-only at its canonical path; the android-stack
+  profile is generated with the ORIGINAL hooks.
+
+Tests (`recovery/uid-launch-tests.sh`, 1 run): **20/20** — data-only credential parse, all fail-closed
+gate cases, flat-layout completeness, argv writable mounts, live uid/namespace capture (and its
+fail-closed absent case), and the referenced runtime paths.
+
+```text
+INSTALLED_MODULES_COMPLETE=PASS
+TASK_WRITABLE_MOUNTS=PASS
+LIVE_PROCESS_EVIDENCE_CAPTURE=PASS
+REQUIRED_RUNTIME_PATHS=PASS
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show d8199c99f5aba50bdf5db8bab30f43a1963ecdf0:recovery/install-model-broker.sh | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit d8199c99f5aba50bdf5db8bab30f43a1963ecdf0 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Run-count record: round 17 = 3, round 18 = 6, round 19 = 1, round 20 = 1, round 21 = 1. No sudo was
+executed; no `switch`, no project permission change, no merge, no backup/archive. Browser automation
+and active chain state unchanged.
+
+Commit: AEGL branch `plan/entry-fix` @ `d8199c9` (not merged).
