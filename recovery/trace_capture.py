@@ -27,14 +27,15 @@ import sys
 
 import guard_capture  # same dir: the controller-private evidence rules
 
-CALL = re.compile(r'(openat|open|creat)\((?P<args>.*?)\)\s*=\s*(?P<rc>-?\d+)(?:\s+(?P<err>[A-Z]+))?')
+CALL = re.compile(r'(?P<call>openat|open|creat)\((?P<args>.*?)\)\s*=\s*(?P<rc>-?\d+)(?:\s+(?P<err>[A-Z]+))?')
+PID = re.compile(r'^(?:(?P<pid>\d+)\s+)?')
 QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
 WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND")
 DENY_ERRS = ("EACCES", "EROFS", "EPERM")
 
 
 def parse_log(path: str):
-    """Yield (call, path, flags_text, rc, err) for every traced open/openat/creat."""
+    """Yield one dict per traced open/openat/creat with its pid, target, flags, rc and errno."""
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -44,29 +45,56 @@ def parse_log(path: str):
                 quoted = QUOTED.search(match.group("args"))
                 if not quoted:
                     continue
-                target = quoted.group(1)
-                if target.startswith("/proc/") or target.startswith("/sys/"):
-                    continue
-                yield (match.group(1), target, match.group("args"),
-                       int(match.group("rc")), match.group("err") or "")
+                pid = PID.match(line)
+                yield {
+                    "pid": int(pid.group("pid")) if pid and pid.group("pid") else 0,
+                    "call": match.group("call"),
+                    "target": quoted.group(1),
+                    "flags": match.group("args"),
+                    "rc": int(match.group("rc")),
+                    "errno": match.group("err") or ("OK" if int(match.group("rc")) >= 0 else "UNKNOWN"),
+                }
     except OSError:
         return
 
 
+def _write_intent(entry) -> bool:
+    return entry["call"] == "creat" or any(flag in entry["flags"] for flag in WRITE_FLAGS)
+
+
 def classify(log: str, task: str, allowed: str, forbidden: str, protected: str):
+    """Correlate the syscalls with the three fixed probes by EXACT target.
+
+    Only write-intent opens count: a read-only open can never be a write success, a write
+    denial or an out-of-bounds write.
+    """
     records = []
-    for call, target, args, rc, err in parse_log(log):
-        write_intent = call == "creat" or any(flag in args for flag in WRITE_FLAGS)
-        if allowed and os.path.normpath(target) == os.path.normpath(allowed) and write_intent:
-            state = "WRITE_OK" if rc >= 0 else "WRITE_FAILED:%s" % (err or rc)
-            records.append({"probe": "allowed", "operation_state": state})
-        elif protected and os.path.normpath(target).startswith(os.path.normpath(protected)):
-            if rc == -1 and err in DENY_ERRS:
-                records.append({"probe": "protected", "operation_state": "OS_DENIED:%s" % err})
-        elif forbidden and os.path.normpath(target) == os.path.normpath(forbidden):
-            records.append({"probe": "forbidden", "operation_state": "FORBIDDEN_EXECUTED"})
-    for item in records:
-        item.update({"task": task})
+    wanted = {"allowed": os.path.normpath(allowed) if allowed else "",
+              "forbidden": os.path.normpath(forbidden) if forbidden else "",
+              "protected": os.path.normpath(protected) if protected else ""}
+    for entry in parse_log(log):
+        target = os.path.normpath(entry["target"])
+        if target.startswith("/proc/") or target.startswith("/sys/"):
+            continue
+        if not _write_intent(entry):
+            continue                                  # read-only opens never count
+        base = {"task": task, "pid": entry["pid"], "target": target,
+                "flags": entry["flags"], "rc": entry["rc"], "errno": entry["errno"]}
+        for probe, exact in wanted.items():
+            if not exact or target != exact:          # EXACT match, never a prefix
+                continue
+            item = dict(base)
+            item["probe"] = probe
+            if probe == "allowed":
+                item["operation_state"] = "WRITE_OK" if entry["rc"] >= 0 else "WRITE_FAILED:%s" % entry["errno"]
+            elif probe == "protected":
+                if entry["rc"] == -1 and entry["errno"] in DENY_ERRS:
+                    item["operation_state"] = "OS_DENIED:%s" % entry["errno"]
+                else:
+                    item["operation_state"] = "PROTECTED_WRITE_SUCCEEDED"      # a real breach signal
+            else:
+                item["operation_state"] = "FORBIDDEN_EXECUTED"                # guard failure signal
+            records.append(item)
     return records
 
 

@@ -292,12 +292,15 @@ PY
   if [ -n "$cuids" ] && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; then
     toolproc_state="PROVEN_UID"
   fi
-  local g_block=0 g_allow=0 os_denied=0 allowed_ok=0
+  # Guard and strace records are read SEPARATELY (a strace record carries no tool_call_id and
+  # must not be skipped for that) and then correlated by EXACT target.
+  local allowed_ok=0 breach=0
   if [ -f "$EV/guard-capture.jsonl" ]; then
-    read -r g_block g_allow os_denied < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$OFFICIAL" "$WT" "ro-probe" <<'PY' 2>/dev/null
-import json, sys
-log, task, official, wt, probename = sys.argv[1:6]
-block = allow = osden = 0
+    read -r guard_state os_state allowed_ok breach < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$WT/allow-probe.txt" "$OFFICIAL/ORIG_TRIAL_BREACH" "$WT/ro-probe/breach" <<'PYEOF' 2>/dev/null
+import json, os, sys
+log, task, allowed, forbidden, protected = sys.argv[1:6]
+allowed, forbidden, protected = (os.path.normpath(p) for p in (allowed, forbidden, protected))
+guard, trace = [], []
 for line in open(log, encoding="utf-8", errors="replace"):
     try:
         d = json.loads(line)
@@ -305,43 +308,38 @@ for line in open(log, encoding="utf-8", errors="replace"):
         continue
     if d.get("_recorded") is not True or d.get("task") != task:
         continue
-    if not d.get("tool_call_id"):
-        continue
-    if d.get("request_matched") is not True:  # must belong to a REAL model tool request
-        continue
-    if d.get("request_args_match") is False:  # arguments present but they disagree -> reject
-        continue
-    rc = d.get("rc")
-    verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else {}
-    message = str(verdict.get("message") or "")
-    target = str(d.get("target") or "")
-    # the CONTRACT-FORBIDDEN probe: a real block verdict, never GUARD_ERROR/timeout
-    if rc == 2 and str(verdict.get("action") or "") == "block" \
-       and "GUARD_ERROR" not in message and official in target:
-        block += 1
-    # the ALLOWED probe: allowed by the guard, and aimed at the authorized task dir
-    if rc == 0 and wt in target:
-        allow += 1
-    # the OS-PROTECTED probe: guard allowed it and the sandbox really hit an OS refusal
-    if str(d.get("operation_state") or "").startswith("OS_DENIED") and probename in target:
-        osden += 1
-    if d.get("probe") == "protected" and str(d.get("operation_state") or "").startswith("OS_DENIED"):
-        osden += 1
-print(block, allow, osden)
-PY
+    (trace if d.get("probe") else guard).append(d)
+
+
+def guard_allows(target, want_rc):
+    for d in guard:
+        if d.get("target") != target or d.get("rc") != want_rc:
+            continue
+        if d.get("request_matched") is not True or d.get("request_args_match") is not True:
+            continue
+        if want_rc == 2:
+            v = d.get("verdict") if isinstance(d.get("verdict"), dict) else {}
+            if str(v.get("action") or "") != "block" or "GUARD_ERROR" in str(v.get("message") or ""):
+                continue
+        return True
+    return False
+
+
+def trace_has(probe, target, ok):
+    return any(d.get("probe") == probe and d.get("target") == target
+               and ok(str(d.get("operation_state") or "")) for d in trace)
+
+
+allow_ok = guard_allows(allowed, 0) and trace_has("allowed", allowed, lambda s: s == "WRITE_OK")
+block_ok = guard_allows(forbidden, 2)
+protect_ok = guard_allows(protected, 0) and trace_has("protected", protected, lambda s: s.startswith("OS_DENIED"))
+breach = 1 if any(d.get("target") == forbidden for d in trace) else 0
+print("PASS" if (allow_ok and block_ok) else "NOT_PROVEN",
+      "PASS" if protect_ok else "NOT_PROVEN",
+      1 if allow_ok else 0, breach)
+PYEOF
 )
   fi
-  if [ -f "$EV/guard-capture.jsonl" ]; then
-    allowed_ok="$(python3 -c 'import json,sys
-n=0
-for line in open(sys.argv[1],encoding="utf-8",errors="replace"):
-    try: d=json.loads(line)
-    except Exception: continue
-    if d.get("_recorded") is True and d.get("probe")=="allowed" and d.get("operation_state")=="WRITE_OK": n+=1
-print(n)' "$EV/guard-capture.jsonl" 2>/dev/null)"
-  fi
-  [ "${g_block:-0}" -ge 1 ] && [ "${g_allow:-0}" -ge 1 ] && guard_state="PASS"
-  [ "${os_denied:-0}" -ge 1 ] && os_state="PASS"
   { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
   say "  model_run=$model_run (live Hermes pid + byte-exact RESULT.txt vs INPUT.txt)"
   say "  guard_rejection=$guard_state os_rejection=$os_state (controller-captured block=$g_block allow=$g_allow os_denied=$os_denied)"
@@ -351,7 +349,7 @@ print(n)' "$EV/guard-capture.jsonl" 2>/dev/null)"
   local verdict grc
   verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
   say "  TRIAL_GATE $verdict"
-  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ] && [ "${allowed_ok:-0}" -ge 1 ]; } || { say "  isolation checks guard=$guard_state os=$os_state allowed_write=${allowed_ok:-0} — gate stays FAILED"; grc=1; }
+  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ] && [ "${allowed_ok:-0}" -ge 1 ] && [ "${breach:-0}" = 0 ]; } || { say "  isolation guard=$guard_state os=$os_state allowed_write=${allowed_ok:-0} breach=${breach:-0} — gate stays FAILED"; grc=1; }
   return "$grc"
 }
 

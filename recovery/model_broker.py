@@ -116,17 +116,67 @@ def _map_path(base_path: str, path: str) -> str:
 REQUEST_INDEX: dict = {}
 
 
-def _index_requests(payload: bytes) -> None:
-    text = payload.decode("utf-8", "replace")
-    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"', text):
-        REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})
-    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"[\s\S]{0,400}?"name"\s*:\s*"([^"]*)"', text):
-        REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})["name"] = match.group(2)
-    for match in re.finditer(r'"id"\s*:\s*"(call_[^"]+)"[\s\S]{0,800}?"arguments"\s*:\s*"((?:[^"\\]|\\.)*)"', text):
+def _record_request(call_id, name, arguments) -> None:
+    """Store one assembled tool call; arguments are parsed only after full assembly."""
+    parsed = None
+    if arguments:
         try:
-            REQUEST_INDEX.setdefault(match.group(1), {"name": "", "args": None})["args"] = json.loads('"%s"' % match.group(2))
+            parsed = json.loads(arguments)
         except ValueError:
-            pass
+            parsed = None
+    REQUEST_INDEX[call_id] = {"name": name or "", "args": parsed if isinstance(parsed, dict) else None,
+                              "assembled": bool(arguments)}
+
+
+def _index_requests(payload: bytes) -> None:
+    """Store the tool requests the UPSTREAM MODEL really returned.
+
+    A normal response is parsed as structured JSON. An SSE response is accumulated per
+    (choice index, tool_call index) — id, function name and argument fragments are joined in
+    order and the arguments are parsed only once assembled; no cross-fragment regex guessing.
+    """
+    text = payload.decode("utf-8", "replace")
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return
+        for choice in data.get("choices") or []:
+            message = choice.get("message") or {}
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") or {}
+                if call.get("id"):
+                    _record_request(call["id"], function.get("name"), function.get("arguments"))
+        return
+
+    # SSE: accumulate deltas by (choice index, tool index)
+    acc = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[5:].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            data = json.loads(chunk)
+        except ValueError:
+            continue
+        for choice in data.get("choices") or []:
+            for delta in (choice.get("delta") or {}).get("tool_calls") or []:
+                key = (choice.get("index", 0), delta.get("index", 0))
+                slot = acc.setdefault(key, {"id": "", "name": "", "args": ""})
+                if delta.get("id"):
+                    slot["id"] = delta["id"]
+                function = delta.get("function") or {}
+                if function.get("name"):
+                    slot["name"] += function["name"]
+                if function.get("arguments"):
+                    slot["args"] += function["arguments"]
+    for slot in acc.values():
+        if slot["id"]:
+            _record_request(slot["id"], slot["name"], slot["args"])
 
 
 def _handle_guard(conn: socket.socket, body: bytes) -> None:
@@ -154,18 +204,36 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
     result["tool_call_id"] = guard_capture.tool_call_id(payload)   # top level OR extra
     result["operation"] = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    result["target"] = str(tool_input.get("path") or tool_input.get("command") or "")[:200]
+    raw_target = str(tool_input.get("path") or "")
+    if not raw_target:
+        match = re.search(r">>?\s*['\"]?([^\s'\"]+)", str(tool_input.get("command") or ""))
+        raw_target = match.group(1) if match else ""
+    result["target"] = os.path.normpath(raw_target) if raw_target else ""
+    # STRICT, fail-closed correlation with a REAL model tool request: id, name and the FULL
+    # argument values must all agree; a missing/unparsable/mismatching request refuses the tool.
     request = REQUEST_INDEX.get(result["tool_call_id"]) if result["tool_call_id"] else None
     result["request_matched"] = bool(request)
-    result["request_name"] = (request or {}).get("name") or ""
-    match = None
-    if request and request.get("args"):
-        try:
-            want = set(json.loads(request["args"]).keys())
-            match = want == set(tool_input.keys())
-        except (ValueError, TypeError):
-            match = None
-    result["request_args_match"] = match
+    result["request_name"] = str((request or {}).get("name") or "")
+    result["request_args"] = (request or {}).get("args")
+    args_match = False
+    reason = ""
+    if not result["tool_call_id"]:
+        reason = "hook carried no tool_call_id"
+    elif request is None:
+        reason = "no such tool request from the model"
+    elif result["request_name"] != result["operation"]:
+        reason = "tool name mismatch (%s vs %s)" % (result["request_name"], result["operation"])
+    elif request.get("args") is None:
+        reason = "request arguments missing or unparsable"
+    else:
+        args_match = request["args"] == tool_input
+        if not args_match:
+            reason = "argument values differ from the model request"
+    result["request_args_match"] = args_match
+    if reason:
+        result["refused_reason"] = reason
+        result["rc"] = None            # refuse the tool: it never runs on an unproven request
+        result["error"] = "request_correlation_failed"
     evidence = os.environ.get("AEGL_GUARD_EVIDENCE") or ""
     if evidence:
         try:
