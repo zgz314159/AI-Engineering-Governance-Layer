@@ -1331,3 +1331,57 @@ No sudo was executed; no `switch`, no project permission change, no merge, no ba
 session and active run config unchanged. Temp output cleaned on success, failure and timeout.
 
 Commit: AEGL branch `plan/entry-fix2` @ `f144a98` (not merged).
+
+## Round update 24: mount + privilege-drop order fixed (real first failure)
+
+The real trial this round reached the launcher and failed at the mount step — a **mount/launch
+defect**, not the model, credentials or the contract compile:
+
+```text
+CONTRACT_COMPILE=PASS
+REAL_HERMES_SANDBOX=NOT_RUN
+FIRST_FAILURE=mount: /proc/self/fd/3 Permission denied
+launch_rc=1
+```
+
+Fix (mount + drop split):
+- `sandbox_spec.py` no longer uses `--ro-bind-fd` / `--unshare-all` / `--uid`/`--gid`. The **root**
+  phase does only bwrap's mount/pid/net isolation and the declared-path mounts (plain `--ro-bind` —
+  root resolves the 0750 `/home/zhong` sources directly) with **no user namespace**, so host ids are
+  preserved (no namespace uid mistaken for the host uid).
+- The **first** in-sandbox process is the fixed trusted drop entry (`setpriv`): `--clear-groups`,
+  `--no-new-privs`, `--inh-caps=-all`, `--ambient-caps=-all`, then `--reuid`/`--regid` to the HOST
+  aegl-ai and the runner. No model / project / AI-tool code runs before the drop. `exec_spec.py`
+  replaces the fd-mount helper; `bind_fd_exec.py` is removed.
+- Process sampling: `capture_evidence.py` also samples the children from the host `/proc`; the
+  installer requires the **HOST** uid of the process **and its children** to be aegl-ai (never root,
+  never a printed `ai_uid`, never an in-namespace `id -u`). Guard/OS rejection stay **NOT_PROVEN** (no
+  trusted decision source yet).
+- Cleanup: the launcher removes its run dir on `EXIT/TERM/INT`; the installer removes this task's
+  exact run dir and registry entry on `RETURN/EXIT/TERM/INT`. No global scan, no backup.
+
+Read-only canonical projects, task-dir-limited writes, credential isolation and controlled networking
+are unchanged; host HOME perms, setuid and the global userns policy are untouched.
+
+Focused check (`recovery/mount-drop-tests.sh`, this round: **2 runs** — 1 initial failure on my own
+argv matcher, 1 re-verify): **23/23**. Not re-run: uid-launch-tests, system recovery, browser
+automation, full suites. Run-count record: round 23 = 1, round 24 = 2.
+
+```text
+MOUNT_LAUNCH_FIX=PASS (argv: no userns/uid drop, plain root ro-binds, setpriv drop entry)
+HOST_UID_DROP=setpriv --clear-groups --no-new-privs --inh-caps=-all --ambient-caps=-all --reuid/--regid (real acceptance NOT_RUN)
+TRIAL_CLEANUP=PASS (installer/launcher clean this task's exact run dir + registry entry on normal/failure/TERM; SIGKILL cannot be guaranteed)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 63f008f479f0a981bb700bf41757e39c2d9b0b52:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 63f008f479f0a981bb700bf41757e39c2d9b0b52 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Pending residue from the failed run: `/run/aegl-model/trial` (root:aegl-ai). Precise cleanup (root
+terminal; nothing else, no global scan):
+
+```text
+sudo rm -rf /run/aegl-model/trial
+pgrep -af 'aegl-hermes-sandbox|hermes -p android-stack' || true
+```
+
+Commit: AEGL branch `plan/mount-drop` @ `63f008f` (not merged).
