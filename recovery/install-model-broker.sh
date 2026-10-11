@@ -342,7 +342,7 @@ PYEOF
   fi
   { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
   say "  model_run=$model_run (live Hermes pid + byte-exact RESULT.txt vs INPUT.txt)"
-  say "  guard_rejection=$guard_state os_rejection=$os_state (controller-captured block=$g_block allow=$g_allow os_denied=$os_denied)"
+  say "  guard_rejection=$guard_state os_rejection=$os_state"
   say "  allowed_write=$allowed_ok (strace WRITE_OK)  tool_subprocesses=$toolproc_state"
   say "  trusted evidence: launch_rc=$rc hermes_uid=${cpuid:-none} children_uids=${cuids:-none} hermes_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
   say "  controller evidence: $EV/guard-capture.jsonl"
