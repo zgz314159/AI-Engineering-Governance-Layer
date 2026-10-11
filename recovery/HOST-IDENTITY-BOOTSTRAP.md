@@ -78,3 +78,36 @@ by the non-mutating acceptance).
 3. Root filesystem supports the immutable attribute on `/home/zhong/Projects`.
 
 Until all three hold, **apply is currently not runnable**, and `AI_BOUNDARY=BLOCKED`.
+
+## 6. Trusted promotion broker — install (reviewable; root-owned)
+
+The promotion broker is the independent identity that *validates and applies* promotions.
+`bin/aegl-task promote` no longer applies anything: it authenticates, requires a verified
+broker, submits a bounded request (`op` + `task_id`) and relays the reply. The AI side can
+never pass a shell command or a target path, and never touches the canonical project after
+the broker replies.
+
+Files:
+
+- `bin/aegl-promote-broker` — wrapper (`serve` / `client`).
+- `recovery/promotion_broker.py` — daemon: `AEGL-BROKER/1` PING/PONG handshake, bounded request
+  (op ∈ {validate, promote}, `task_id` regex, task dir proven under the tasks root), serialized
+  by an flock; the project target is derived from the task's own `task.json`.
+- `recovery/promotion_core.py` — the ONE central gate + apply (also used by `bin/aegl-task verify`).
+
+Install steps (printed by `host-identity-bootstrap.sh broker-plan`; run manually with `sudo`):
+
+1. Install the program root-owned under `/usr/local/lib/aegl-promote` (0755 root:root) so
+   neither the AI nor the broker identity can modify it; record the reviewed hashes.
+2. Create group `aegl-broker`, add `aegl-ai` to it (socket access), create `/run/aegl-promote`
+   owned `aegl-promote:aegl-broker` mode 2770.
+3. Install a systemd unit running `aegl-promote-broker serve` as `User=aegl-promote` with
+   `AEGL_BROKER_SOCKET=/run/aegl-promote/broker.sock`.
+4. Run `recovery/broker-tests.sh` as `aegl-promote` against a throwaway tree; **only if it
+   passes** write root-owned `/etc/aegl/broker-verified`.
+5. `switch` (the bulk project permission migration + entry lock) still refuses until that marker
+   exists — do not run it as part of this step.
+
+Functional acceptance ≠ installed isolation: `broker-tests.sh` runs same-uid and proves the
+broker logic only. The independent-identity boundary exists only once the broker runs as
+`aegl-promote` with the marker written; `INDEPENDENT_IDENTITY_INSTALLED=NO` until then.

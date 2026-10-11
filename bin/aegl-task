@@ -310,66 +310,41 @@ controller_probe() {
 }
 
 # --------------------------------------------------------------------------- #
-# classification (fresh, at promote time) — includes ignored + untracked
+# classification (fresh) — delegated to the ONE central gate (promotion_core.py)
+# so the promotion rules are never duplicated here.
 # --------------------------------------------------------------------------- #
 classify() { # <id> <outfile>  -> prints rejected count (last line)
   local id="$1" out="$2" td wt scratch gh proj
   _verify_paths "$id"
-  python3 - "$wt" "$out" <<'PY'
-import json,os,re,subprocess,sys
-wt,out=sys.argv[1],sys.argv[2]
-st=subprocess.run(["git","-C",wt,"status","--porcelain","--ignored"],capture_output=True,text=True).stdout
-rows=[]
-for line in st.splitlines():
-    code,path=line[:2],line[3:].strip()
-    if path.startswith(".git") or path==".git": continue
-    rows.append({"status":code,"path":path})
-GEN=re.compile(r'(^|/)(build|\.gradle|\.kotlin|node_modules|\.cache|\.pytest_cache)/|\.(apk|aab|class|pyc|log|png|jpe?g|keystore|pem|p12)$|(^|/)secrets\.json$|(^|/)credentials\.json$|(^|/)\.env($|\.)')
-WT=os.path.realpath(wt)
-def bad(r):
-    p=r["path"]; code=r["status"]
-    if p.startswith("/") or ".." in p.split("/"): return "path_escape"
-    if code.strip()=="!!": return "ignored_file_present"
-    if GEN.search(p): return "generated_or_secret"
-    fp=os.path.join(wt,p)
-    if os.path.islink(fp) and not os.path.realpath(fp).startswith(WT+os.sep): return "symlink_escape"
-    if os.path.isfile(fp) and os.path.getsize(fp) > 5_000_000: return "oversize"
-    if "D" in code: return "deleted_project_body"
-    return None
-for r in rows: r["reject"]=bad(r)
-json.dump({"changes":rows,"rejected":[r for r in rows if r["reject"]]}, open(out,"w"), indent=2)
-print(len([r for r in rows if r["reject"]]))
-PY
+  python3 "$AEGL_ROOT/recovery/promotion_core.py" classify "$wt" "$out"
 }
 
 # --------------------------------------------------------------------------- #
-# task promote — re-classify + content-pin before applying
+# task promote — submit a bounded request to the independent broker.
+#
+# The broker (a different identity) re-validates candidate content, the allowed
+# project target and the content pin, then applies the promotion. This AI-side
+# command only authenticates, requires a verified broker, and relays the decision:
+# it never applies the diff and never touches the canonical project after the reply.
 # --------------------------------------------------------------------------- #
 task_promote() {
   local id="${1:?task promote <id>}" td wt proj branch
   controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
   require_broker   # default-deny: a verified independent broker is mandatory
-  branch="$(task_field "$td/task.json" branch)"
-  [ "$(cat "$td/verify.status" 2>/dev/null)" = "PASS" ] || die "task verify has not PASSed"
-  [ -f "$td/verify.manifest" ] || die "no verify manifest (re-run task verify)"
-  # "modified after verify": candidate content must be byte-identical to what was verified
-  worktree_manifest "$wt" "$td/promote.manifest"
-  if ! cmp -s "$td/verify.manifest" "$td/promote.manifest"; then
-    say "PROMOTE_REJECTED modified_after_verify"; return 3
-  fi
-  # fresh classification over changed + ignored + untracked
-  local nrej; nrej="$(classify "$id" "$td/promote-changes.json" | tail -1)"
-  [ "$nrej" = 0 ] || { say "PROMOTE_REJECTED reasons=$(python3 -c "import json;print(sorted({c['reject'] for c in json.load(open('$td/promote-changes.json'))['rejected']}))")"; return 3; }
-  if [ -f "$wt/scripts/verify-layout.sh" ]; then
-    bash "$wt/scripts/verify-layout.sh" --root "$wt" --quiet || { say "PROMOTE_REJECTED layout"; return 3; }
-  fi
-  git -C "$wt" add -A || { say "PROMOTE_FAILED add"; return 4; }
-  git -C "$wt" -c user.email=aegl@local.invalid -c user.name="AEGL Controller" \
-      commit -qm "aegl-task($id): approved change" || { say "PROMOTE_FAILED commit"; return 4; }
-  git -C "$proj" merge --no-ff -m "aegl-promote: $id" "$branch" >/dev/null 2>&1 || { say "PROMOTE_FAILED merge"; return 4; }
-  say "PROMOTE=APPLIED id=$id project=$proj"
-  task_discard "$id" >/dev/null 2>&1 || true
+  local reply decision
+  reply="$(python3 "$AEGL_ROOT/recovery/promotion_broker.py" client \
+             --socket "${AEGL_BROKER_SOCKET:-}" --task "$id" --op promote 2>/dev/null || true)"
+  decision="$(printf '%s' "$reply" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("decision",""))
+except Exception: print("")' 2>/dev/null)"
+  say "BROKER_REPLY=$reply"
+  case "$decision" in
+    APPLIED)   say "PROMOTE=APPLIED id=$id"; return 0 ;;
+    VALIDATED) say "PROMOTE=VALIDATED id=$id"; return 0 ;;
+    REJECTED)  say "PROMOTE_REJECTED id=$id"; return 3 ;;
+    *)         say "PROMOTE_FAILED id=$id (broker ${decision:-unreachable})"; return 4 ;;
+  esac
 }
 
 task_discard() {

@@ -21,7 +21,8 @@ case "${1:-}" in
   switch)  MODE=switch ;;
   verify)  MODE=verify ;;
   selftest) MODE=selftest ;;
-  *) echo "usage: $0 [plan|prepare|switch|verify|selftest]"; exit 2 ;;
+  broker-plan|broker-install) MODE=broker_plan ;;
+  *) echo "usage: $0 [plan|prepare|switch|verify|selftest|broker-plan]"; exit 2 ;;
 esac
 
 AI_USER="aegl-ai";          AI_GROUP="aegl-ai"
@@ -193,6 +194,53 @@ selftest(){
   say "  selftest failures=$fails"; [ "$fails" -eq 0 ]
 }
 
+# --------------------------------------------------------------------------- #
+# trusted promotion broker — reviewable install plan (root-owned; NEVER run here)
+# --------------------------------------------------------------------------- #
+BROKER_LIBDIR="/usr/local/lib/aegl-promote"
+BROKER_RUNDIR="/run/aegl-promote"
+BROKER_SOCKET="$BROKER_RUNDIR/broker.sock"
+
+broker_install_plan(){
+  phase "trusted promotion broker — reviewable install plan (root-owned; NOT executed here)"
+  say "The broker runs as $BROKER_USER and is the only identity that may apply a promotion."
+  say "Its program + config must not be writable by the AI ($AI_USER) or even by the broker itself."
+  say ""
+  say "A. review + install the program root-owned (read-only to every other identity):"
+  say "   AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer"
+  say "   git -C \"\$AEGL\" rev-parse plan/trusted-promotion-broker   # pin the reviewed commit"
+  say "   sudo install -d -o root -g root -m 0755 $BROKER_LIBDIR"
+  say "   sudo install -o root -g root -m 0755 \"\$AEGL/bin/aegl-promote-broker\" \\"
+  say "       \"\$AEGL/recovery/promotion_core.py\" \"\$AEGL/recovery/promotion_broker.py\" $BROKER_LIBDIR/"
+  say "   sudo sha256sum $BROKER_LIBDIR/*   # record the reviewed hashes"
+  say ""
+  say "B. socket dir + group (the AI connects; only $BROKER_GROUP may):"
+  say "   sudo getent group $BROKER_GROUP >/dev/null || sudo groupadd --system $BROKER_GROUP"
+  say "   sudo usermod -aG $BROKER_GROUP $AI_USER     # allow the AI identity to connect"
+  say "   sudo install -d -o $BROKER_USER -g $BROKER_GROUP -m 2770 $BROKER_RUNDIR"
+  say ""
+  say "C. service (systemd; socket $BROKER_SOCKET):"
+  say "   sudo tee /etc/systemd/system/aegl-promote-broker.service >/dev/null <<'UNIT'"
+  say "   [Service]"
+  say "   User=$BROKER_USER"; say "   Group=$BROKER_GROUP"; say "   RuntimeDirectory=aegl-promote"
+  say "   Environment=AEGL_BROKER_SOCKET=$BROKER_SOCKET PROJECTS_ROOT=$PROJECTS_PARENT"
+  say "   ExecStart=$BROKER_LIBDIR/aegl-promote-broker serve"
+  say "   Restart=on-failure"; say "   [Install]"; say "   WantedBy=multi-user.target"; say "   UNIT"
+  say "   sudo systemctl daemon-reload && sudo systemctl enable --now aegl-promote-broker"
+  say ""
+  say "D. isolated acceptance, THEN write the marker (ONLY after the broker passes):"
+  say "   sudo -u $BROKER_USER bash \"\$AEGL/recovery/broker-tests.sh\"   # expect failed=0"
+  say "   sudo sh -c 'printf \"commit=%s\\n\" \"\$(git -C /home/zhong/Projects/AI-Engineering-Governance-Layer rev-parse plan/trusted-promotion-broker)\" > $BROKER_MARKER'"
+  say "   sudo chown root:root $BROKER_MARKER; sudo chmod 0644 $BROKER_MARKER"
+  say ""
+  say "E. NOT part of this step: the bulk project permission migration stays in 'switch', which"
+  say "   still refuses until the marker exists. Do NOT run 'switch' here."
+  say ""
+  say "Impact if installed: only $BROKER_USER may apply promotions; the AI can only submit a bounded"
+  say "request (op + task_id) — no shell command, no target path — and cannot modify the installed"
+  say "program. Unfinished after this step: the bulk project chown ('switch') and its entry lock."
+}
+
 main(){
   say "AEGL host identity bootstrap  [mode: $MODE]"
   case "$MODE" in
@@ -202,6 +250,7 @@ main(){
     switch)  switch ;;
     verify)  do_verify ;;
     selftest) selftest ;;
+    broker_plan) broker_install_plan ;;
   esac
 }
 main "$@"
