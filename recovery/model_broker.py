@@ -90,6 +90,25 @@ def _read_headers(conn: socket.socket) -> tuple:
     return head.decode("latin-1"), rest
 
 
+def _map_path(base_path: str, path: str) -> str:
+    """Map the client's local ``/v1`` API prefix onto the upstream base path.
+
+    The sandbox talks to ``<base_url>/v1/...`` (what the provider SDK appends); the broker's
+    fixed upstream already carries its own API base (e.g. ``/provider/v1``). A blind join
+    produced ``/provider/v1/v1/chat/completions``. Here the ``/v1`` prefix is REPLACED by the
+    upstream base path — no global replace, and the upstream host is never taken from the
+    request.
+    """
+    if not base_path:
+        return path
+    local = "/v1"
+    if path == local or path.startswith(local + "/"):
+        return base_path + path[len(local):]
+    if path == base_path or path.startswith(base_path + "/"):
+        return path
+    return base_path + path
+
+
 def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: str) -> None:
     head, body = _read_headers(conn)
     lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
@@ -115,11 +134,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
 
     url = urllib.parse.urlsplit(upstream)
     base_path = url.path.rstrip("/")
-    # join without duplicating a shared prefix (avoid e.g. /v1/v1/...)
-    if base_path and (path == base_path or path.startswith(base_path + "/")):
-        target = path
-    else:
-        target = (base_path + path) if base_path else path
+    # separate the query BEFORE mapping so it is preserved verbatim
+    path_only, qsep, query = path.partition("?")
+    target = _map_path(base_path, path_only) + (qsep + query if qsep else "")
     if url.scheme == "https":
         ctx = ssl.create_default_context()
         up = http.client.HTTPSConnection(url.hostname, url.port or 443, context=ctx, timeout=120)
@@ -135,6 +152,8 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     try:
         up.request(method, target, body=body if body else None, headers=fwd)
         resp = up.getresponse()
+        # minimal routing record: method, inbound path, forwarded path, status ONLY
+        print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
         payload = resp.read()
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
@@ -146,6 +165,10 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         out.append("")
         out.append("")
         conn.sendall("\r\n".join(out).encode("latin-1") + payload)
+    except Exception as exc:  # noqa: BLE001 — log the route only, never the message/headers/body
+        print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=ERROR %s"
+              % (method, path, target, type(exc).__name__), flush=True)
+        raise
     finally:
         try:
             up.close()
