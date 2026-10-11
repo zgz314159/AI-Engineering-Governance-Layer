@@ -493,6 +493,33 @@ Remaining conditions before the switch: (1) broker built and isolated-tested →
 supports the immutable attribute on `/home/zhong/Projects`. Until then **apply is currently
 not runnable**.
 
+## Round update 4: bounded real end-to-end trial (is the AEGL route viable?)
+
+One complete attempt using the existing AEGL entries on an isolated test repo outside
+`/home/zhong/Projects` (no canonical project was touched; task discarded afterwards).
+
+- **(a) Real model task inside the sandbox — NO.** A **new** model task was launched as a
+  sandboxed child: `bin/aegl-ai run --task … --net off -- command-code -p "…" -m
+  deepseek/deepseek-v4.1-flash …`. The client started inside Bubblewrap (`AI_ENTRY
+  sandbox=on net=off`) but could not complete a model call — it returned
+  `Error: Not authenticated`, because the sandbox masks `~/.commandcode` (the credential)
+  and `--net off` provides no network; `--net cloud` is refused by design ("no controlled
+  egress or credential handoff is installed"). The worktree was unchanged: the model made no
+  edit. A version command, the already-running out-of-sandbox process, and probes are not
+  substitutes for a real model call.
+- **(b) Out-of-bound writes denied — NOT PROVEN (no model ran).** The model never executed,
+  so no model write was attempted; earlier probe-level denials are not evidence of a real
+  model's writes.
+- **(c) Promotion of the test repo through the gate — NO.** `task promote` is default-deny
+  and refused (`BROKER=NOT_AVAILABLE … promotion requires a VERIFIED independent broker`);
+  `task verify` also failed because the test repo declares no test task.
+
+Route judgement: the existing AEGL route **cannot work yet**. Minimal necessary change: a
+controlled egress + credential **broker** that performs the model call on behalf of the
+sandboxed task (so the AI environment holds neither the credential nor direct egress), plus
+a **verified promotion broker**. Until those exist, `AI_BOUNDARY=BLOCKED` and this trial is
+not PASS. No host change, no canonical-project change, no backup/archive/snapshot.
+
 # Future computer migration contract
 
 - Transfer project body with `git clone`, or with a verified full `git bundle` when offline; do not copy the entire Projects directory as a filesystem snapshot.
