@@ -1629,6 +1629,39 @@ TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Govern
 
 Commit: AEGL branch `plan/entry-gaps` @ `2cc32cd` (implementation; not merged).
 
+## Round update 31: profile instruction projection + read-only config (NOT re-verified)
+
+1. **Instruction-source access** — the host android-stack profile, `skills` and `hooks` are **0700**, and
+   a bind alias does not change owner/mode, so aegl-ai still could not read them after the drop. The
+   launcher now builds a **task-level read-only projection**: it copies only the declared non-secret
+   instruction content (`SOUL.md`, `profile.yaml`, `skills/`, `hooks/`) into a task dir, owns it as
+   root and grants `a+rX`, then mounts that read-only. Host sources are never chmod'd/chowned; no
+   `.env`, credentials, history DB, sessions or logs are included; the projection is removed with the
+   task dir (no archive).
+2. **Config read-only** — the trusted generated `config.yaml` is now mounted read-only **over** the
+   writable task profile (`android-stack/config.yaml`), so the model cannot edit the model config or
+   its hooks. The profile dir itself remains a writable task view for `state.db`/sessions/logs/locks.
+3. **Reachability check fixed** — `entry-gaps-tests.sh` now parses the **real argv** (it previously
+   read the program from a heredoc and then read stdin, so the check was empty) and has a **positive
+   control**: a `/home/zhong` source must be flagged, while the legitimate `--ro-bind / /` must not.
+   Path location is explicitly **not** treated as permission proof.
+
+**NOT YET RE-VERIFIED.** The focused gate had already run twice this round-pair and was not run a
+third time, so these corrections are recorded as unverified; only syntax checks were run. The next
+step is **one** real host trial, not another fixture-audit loop.
+
+```text
+HOST_UID_DROP=PASS (unchanged; real output uid=994 gid=972, Caps=0, NoNewPrivs=1, groups=[])
+HERMES_STARTUP=BLOCKED (re-verify pending the user's real run)
+MODEL_CALL=NOT_RUN
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=NOT RE-RUN (corrections unverified; prior run 12/12)
+REAL_AEGL_AI_HERMES=NOT_RUN
+TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show dbb261b4f1eeca38423f197e43dce21b9072a598:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit dbb261b4f1eeca38423f197e43dce21b9072a598 --self-test; echo "trial_exit=$?"
+```
+
+Commit: AEGL branch `plan/profile-projection` @ `dbb261b` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
