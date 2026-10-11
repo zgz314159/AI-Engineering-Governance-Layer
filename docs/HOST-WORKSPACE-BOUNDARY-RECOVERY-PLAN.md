@@ -634,11 +634,11 @@ control conversation was touched. The user's other Chrome windows were preserved
 Loop acceptance checklist — **a box is checked only when that real hop actually completed**
 (the provider-only fact below is NOT part of this chain and never checks a box here):
 
-- [ ] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge
-- [ ] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider
-- [ ] `task_acceptance` — the deterministic acceptance for the read-only task passes
-- [ ] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session
-- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above)
+- [x] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge (Round 8)
+- [x] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider (Round 8: outcome `SUCCESS`, exit_code 0)
+- [x] `task_acceptance` — the deterministic acceptance for the read-only task passes (Round 8: the model produced the exact fixed line `ORIG-LOOP-RESULT=ORIGLOOP-2F7C9A` read from the input file)
+- [ ] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session (Round 8: sent once and visibly present, but the exact-canonical confirmation returned `SEND_UNCERTAIN`; see Round 8)
+- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above) — one hop remains
 
 Provider-only fact (separate from, and NOT counting toward, the checklist above):
 
@@ -689,3 +689,51 @@ offline gates; AEGL suite; KeepLab backend `test build`; KeepLab Android unit te
 device install/launch `NOT_RUN`). It does **not** cover — and must not be read as covering — the
 ChatGPT/Browser-Harness transport or the end-to-end automation loop. Those remained `BLOCKED` at
 the end of Round 6 and are only partly repaired here (browser接入 fixed, loop not run to completion).
+
+## Round update 8: browser接入 fixes + one real loop re-verification
+
+This round fixed the Chrome/ChatGPT接入 and ran exactly **one** real loop re-verification through
+the real entry. No Stage 1/2 run; no canonical project source, bridge state, campaign state or
+control conversation was touched. The canonical checkout stayed clean.
+
+Fixes (isolated branches; not merged):
+
+- Dedicated Chrome profile + Browser-Harness daemon (Round 7) were reused; a **new ChatGPT test
+  conversation** was used after the operator had logged in.
+- Stack branch `plan/hermes-chatgpt-control-url`:
+  - `246cf0f` — `HERMES_CHATGPT_CONTROL_URL` control-conversation selector.
+  - `7fa5989` — accept the current user-turn DOM (`[data-user-message-bubble="true"]`) in delivery confirmation.
+
+The one real re-verification (real entry `bridge_cli.py round`; isolated external Bridge state; a
+minimal read-only compiler-generated contract `ORIG-LOOP-TRIAL-001`; the new test conversation):
+
+```text
+BROWSER_READY=PASS
+CHATGPT_TASK_RECEIVED=PASS
+HERMES_TASK_EXECUTED=PASS          (outcome SUCCESS, exit_code 0)
+TASK_ACCEPTANCE=PASS               (model returned the exact fixed line ORIG-LOOP-RESULT=ORIGLOOP-2F7C9A)
+CHATGPT_RESULT_DELIVERED=BLOCKED   (SEND_UNCERTAIN)
+ORIGINAL_AUTOMATION=BLOCKED
+AI_BOUNDARY=BLOCKED
+FIRST_FAILED_HOP=chatgpt_result_delivered — bridge returned SEND_UNCERTAIN ("result message was not
+  confirmed in a user turn after the single send attempt"). The result was sent once (send.sent=true)
+  and IS visible in the session's user turn, but Browser-Harness fill_input types newline characters
+  as nothing, so the rendered user turn is the canonical multi-line message with every newline
+  removed; the exact-canonical delivery authority can therefore never match.
+```
+
+- The loop advanced three hops further than Round 6 (task read + validated; Hermes executed with a
+  real `SUCCESS`; the fixed result was produced). The only remaining failure is the delivery
+  confirmation, whose root cause is a transport defect (newline loss), not the model or the contract.
+- Per the round's single-re-verification budget, no further fix was applied after this failure.
+- **Provider-only PASS vs loop result are recorded separately**: the provider-only fact above stays a
+  standalone proof; the loop is only partly complete and `ORIGINAL_AUTOMATION` stays `BLOCKED`.
+
+Minimal next change (not applied this round): make the result send preserve newline characters (a
+faithful `Input.insertText`-based fill, or Shift+Enter per line) so the delivered user turn equals
+the canonical multi-line `HERMES_RESULT_V1` message; then re-run one round.
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` are unchanged. `SYSTEM_RECOVERED` covers build/test
+acceptance only (see above) — it does not cover the ChatGPT transport or the loop. `AI_BOUNDARY`
+stays `BLOCKED` by actual evidence (no confinement, no broker); a passing communication loop would
+not change it.
