@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (targeted Stage 3 fixes in progress).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -111,7 +111,7 @@ SYSTEM_RECOVERED=PASS | BLOCKED
 
 - [x] Set `SYSTEM_RECOVERED=PASS` only when every required system result is `PASS`, all three integer counts are `0`, and only the optional device check may be `NOT_RUN`. (Satisfied by the final clean-copy verification above.)
 - [x] If recovery is `BLOCKED`, stop before deletion and return the exact missing prerequisite or failed second gate. Do not start cleanup or hardening. (Applied: Stage 2/3 not started.)
-- [ ] If recovery is `PASS`, preserve the printed checkpoint and proceed directly to Stage 2 under this already-authorized total plan.
+- [x] If recovery is `PASS`, preserve the printed checkpoint and proceed directly to Stage 2 under this already-authorized total plan. (Stage 2 was completed; this previously unchecked transition was bookkeeping, not an outstanding gate.)
 
 ### Recorded Stage 1.4 result (this execution)
 
@@ -227,7 +227,7 @@ HISTORY_CLEANUP_RESULT
 HISTORY_CLEAN=PASS | BLOCKED
 ```
 
-- [ ] Proceed to Stage 3 only when `HISTORY_CLEAN=PASS` and both remaining-artifact counts are `0`.
+- [x] Proceed to Stage 3 only when `HISTORY_CLEAN=PASS` and both remaining-artifact counts are `0`. (Stage 3 began after the recorded Stage 2 PASS and zero remaining counts.)
 
 ### Recorded Stage 2 result (this execution)
 
@@ -264,7 +264,7 @@ the projects. This is long-term enforcement, not a prerequisite for recovery.
 
 ## 3.2 OS-enforced sandbox
 
-- [x] Use a pinned, checksum-verified Linux sandbox backend based on Bubblewrap or an equivalently reviewed implementation and apply it to the entire AI process tree. (bubblewrap 0.11.1, `/usr/bin/bwrap`, sha256 `523da3e7…`; the whole task command tree runs under `bwrap --unshare-all`.)
+- [ ] Use a pinned, checksum-verified Linux sandbox backend based on Bubblewrap or an equivalently reviewed implementation and apply it to the entire AI process tree. (The pinned backend and offline `aegl-ai` entry work for launched processes, but the current DeepSeek process is outside that entry; real-agent confinement is not accepted.)
 - [x] Allow writes only to the task worktree, task scratch, and declared per-task caches; deny canonical Projects, unrelated home/config/credential paths, other repositories, Docker socket, and unsafe host daemons. (`--ro-bind / /` + re-bind of the three writable roots; verified by N1/N2/N9.)
 - [x] Use per-task Gradle homes and prevent a pre-existing daemon from escaping the boundary; put Android device actions behind a trusted AEGL runner. (Per-task `GRADLE_USER_HOME` in the workspace; device actions remain behind the existing trusted device-lock runner.)
 - [x] Fail closed when sandbox setup, path canonicalization, mount policy, or network policy cannot be established. (Verified by N7: a missing backend aborts before any command runs.)
@@ -274,15 +274,15 @@ the projects. This is long-term enforcement, not a prerequisite for recovery.
 - [x] Keep executable enforcement only in AEGL; projects may contain one thin declarative manifest when auto-detection is insufficient. (`bin/aegl-task` owns enforcement; projects carry only thin `mise.toml`.)
 - [x] Capture the task baseline and classify every changed, deleted, renamed, ignored, and untracked path before promotion. (`git status --porcelain` in the worktree vs the recorded base commit.)
 - [x] Reject generated artifacts, secrets, binaries, APKs, logs, screenshots, caches, unexpected large files, path escapes, and project-owned source that exists only outside the candidate clean copy. (Verified by N3 symlink/escape, N4/N4b generated+secret, N5 body loss.)
-- [x] Require project tests, layout audit, clean-copy reconstruction, and a reviewable source diff; only the trusted controller may apply the approved diff. (Verify gate + layout audit + trusted commit/merge; no auto-push.)
-- [x] Extend the existing RuleSync v25 source for installed agents without introducing Ruler. Rules and hooks are defense in depth; the OS sandbox and promotion gate remain authoritative. (RuleSync pin `v25.0.0`; Ruler absent; the AEGL fixture projects rules to the installed agent formats Claude/Codex/Cursor and its freshness check passes. No new agent targets added — recorded as a leftover, see below.)
+- [ ] Require project tests, layout audit, clean-copy reconstruction, and a reviewable source diff; only the trusted controller may apply the approved diff. (Classification and content pin exist, but a same-UID token is not a kernel-enforced trusted-controller identity; final promotion acceptance remains open.)
+- [ ] Extend the existing RuleSync v25 source for installed agents without introducing Ruler. Rules and hooks are defense in depth; the OS sandbox and promotion gate remain authoritative. (Global Claude/Codex rules were created from a separate generic policy using RuleSync v25; Cursor global rules are unsupported by the pinned adapter, so all-target acceptance remains open.)
 
 ## 3.4 Fixed final matrix
 
 - [x] Positive case: legitimate source/test change builds, verifies, promotes, and leaves the canonical tree clean. (PASS.)
-- [x] Negative cases: canonical write, cross-project/home write, symlink/`..`/absolute escape, generated-artifact promotion, external-only source, disabled hook, failed sandbox startup, Git metadata mutation, and Docker-socket access all fail closed. (14/14 fixed cases PASS.)
+- [x] Negative cases: canonical write, cross-project/home write, symlink/`..`/absolute escape, generated-artifact promotion, external-only source, disabled hook, failed sandbox startup, Git metadata mutation, and Docker-socket access all fail closed. (Historical 14/14; the later affected matrix ran once at 18/18. Neither result proves confinement of an already-running DeepSeek process.)
 - [x] Lifecycle cases: accepted, rejected, and explicitly discarded/interrupted tasks leave no completed worktree or output archive. (PASS.)
-- [x] Run one final host audit after this fixed matrix; do not add new cases or begin another cycle. (`boundary audit`: `BOUNDARY_AUDIT_BAD=0`; no new cases added.)
+- [ ] Run one final host audit after this fixed matrix; do not add new cases or begin another cycle. (A historical audit reported `BOUNDARY_AUDIT_BAD=0`; defer final acceptance until the outstanding identity/network/agent conditions are resolved. Do not re-audit unchanged inputs.)
 
 Print once and stop:
 
@@ -304,7 +304,7 @@ HOST_WORKSPACE_BOUNDARY_RESULT
 AI_BOUNDARY=PASS | BLOCKED
 ```
 
-### Recorded Stage 3 result (this execution) — targeted fixes applied
+### Historical Stage 3 result (superseded by the current progress record below)
 
 ```text
 HOST_WORKSPACE_BOUNDARY_RESULT
@@ -349,11 +349,11 @@ Per-item evidence (affected gates run once, after the fixes):
 The earlier PASS claim is withdrawn; `SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS`
 stand. Stage 1/2 were not re-run.
 
-## Subsequent isolated-branch implementation (not merged or deployed)
+## Current Stage 3 progress (isolated branch; not merged)
 
-The `ai-boundary-stage3` worktree holds follow-up code only. This section records
-implementation state; it does not replace the historical result above or claim
-final acceptance.
+The `ai-boundary-stage3` branch contains follow-up code introduced at `f840afe`;
+the earlier temporary worktree was removed. This section updates the implementation
+record without claiming final acceptance or changing the Stage 1/2 results.
 
 - [x] Add an offline AI launcher that places the command and its children inside
   Bubblewrap. Cloud mode fails before any model credential is copied; offline mode
@@ -366,15 +366,38 @@ final acceptance.
   do not write project `AGENTS.md` or `CLAUDE.md`. Cursor global rules remain
   unsupported by the pinned adapter.
 - [x] Targeted self-check: `bash -n` and `recovery/boundary-tests.sh` 22/22 after
-  the follow-up fixes. This is not the full negative matrix or real-agent test.
-- [ ] Independently accept the real AI-agent launch, full affected negative matrix,
-  promotion under a separated operator identity, and any real RuleSync deployment.
+  the follow-up fixes.
+- [x] Run the affected negative matrix once after those changes. (DeepSeek reported
+  18/18 PASS with no code fix or second run; this was not independently rerun here.)
+- [x] Generate the generic policy with pinned RuleSync v25 in an isolated HOME/XDG,
+  then create only absent real global files. (`~/.claude/CLAUDE.md` and
+  `~/.codex/AGENTS.md` are regular files, each SHA-256
+  `30111358efb8f18ebba6dd4665dba366b970f59e387bd069115e279dd6421120`;
+  their existence and hashes were independently checked. No existing file was
+  overwritten. Cursor remains `NOT_DONE`.)
+- [x] Probe a newly started task through `aegl-ai run --net off`. (DeepSeek
+  reported allowed writes 4/4 in the task worktree/scratch/cache, denied writes
+  9/9 elsewhere, canonical project new files 0, unauthorized external new files
+  0, and task leftovers 0. A first harness discard omitted its controller token;
+  the corrected Part-B run cleaned its own task. The full probe was not rerun here.)
+- [x] Start an installed AI client inside the offline sandbox for a bounded
+  version check. (`claude --version` returned 2.1.285; this is not a model-path
+  acceptance test.)
+- [ ] Launch the actual DeepSeek/model task as a sandbox child with controlled
+  network and credentials; an already-running out-of-sandbox process is not confined.
+- [ ] Enforce trusted promotion with an independent operator identity or broker;
+  a same-UID token is insufficient.
+- [ ] Resolve Cursor's lack of global rules support without overwriting any
+  existing project instruction file, or explicitly narrow the all-agent target.
+- [ ] Accept and promote the isolated Stage 3 implementation into the canonical
+  AEGL checkout through the trusted path after the required conditions are met.
 
 `AI_BOUNDARY=BLOCKED` remains the only honest overall status. Unblock conditions
 include an operator/AI identity boundary stronger than a same-UID token, a
 controlled cloud network/credential broker if cloud models are required, and a
 clobber-safe RuleSync deployment strategy that accounts for unsupported global
-targets. No archive, backup, or snapshot was created by this follow-up.
+targets. The two global rule files are intentional installed configuration, not
+task artifacts. No archive, backup, or snapshot was created by this follow-up.
 
 # Future computer migration contract
 
