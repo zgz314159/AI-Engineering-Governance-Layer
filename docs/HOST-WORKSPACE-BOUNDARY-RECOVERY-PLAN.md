@@ -950,3 +950,44 @@ chain state were preserved. **Functional testing and independent-identity instal
 separately**: 12/12 is the broker logic; the identity boundary is not installed.
 
 Commit: AEGL branch `plan/broker-trusted-registry` @ `9616d73` (not merged).
+
+## Round update 14: broker exact-object apply, role separation, real installer
+
+Corrects the previous install-readiness record.
+
+Fixed (AEGL branch `plan/broker-exact-apply`, not merged):
+
+- **Exact candidate apply (no TOCTOU).** `record` builds a broker-controlled deterministic Git object
+  — a tree from a *private temp index* binding file contents, symlink targets and Git file modes,
+  then a commit with a fixed identity/date — and stores `{baseline, approved tree, approved commit}`
+  in the broker registry. `promote` applies **exactly that object**: it never re-reads the AI-writable
+  worktree and never uses a mutable branch name. A worktree swap after record cannot change what is
+  applied; a missing/inconsistent object leaves the target unchanged. Candidate code is still never
+  executed as the broker; git runs with `core.hooksPath=/dev/null`.
+- **Production role separation.** The recorder default is **root only** — the AI-running identity
+  (`zhong`) can never register/record or declare `verify_result=PASS`. The AI requester may only
+  validate/promote a task a recorder already approved. Same-uid allowlists are test-only.
+- **Real installer** `recovery/install-broker.sh` (idempotent, reviewable): installs the confirmed
+  files from a fixed full commit (sha256-verified, flat layout), creates the `aegl-promote`/`aegl-ai`
+  identities, the root-owned service + registry dir, and offers a bounded `--self-test`
+  independent-UID acceptance. It never runs `switch`, changes project permissions, merges, or writes
+  the marker. `broker-plan` still only prints and is NOT the install command.
+
+Targeted tests (`recovery/broker-tests.sh`, throwaway repo, one consolidated run): **13/13**.
+Harness invocations this round: **1**.
+
+```text
+EXACT_CANDIDATE_APPLY=PASS
+PRODUCTION_ROLE_SEPARATION=PASS
+TARGETED_TESTS=13/13 (1 run this round)
+INSTALLER_READY=PASS
+INDEPENDENT_IDENTITY_INSTALLED=NO
+AI_BOUNDARY=BLOCKED
+INSTALL_COMMAND=sudo bash -c 'git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 26cf1a76605ec1e2f34f0c2f615a32c2079bfd57:recovery/install-broker.sh | bash -s -- --commit 26cf1a76605ec1e2f34f0c2f615a32c2079bfd57 --self-test'
+REMAINING_BLOCKERS=independent-identity install (interactive sudo); /etc/aegl/broker-verified marker; bulk project chown ('switch') + entry lock
+```
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` unchanged. Browser automation + active chain state
+preserved. Functional testing (13/13) and independent-identity installation are recorded separately.
+
+Commit: AEGL branch `plan/broker-exact-apply` @ `26cf1a7` (not merged).
