@@ -1826,6 +1826,49 @@ interface check; existing model/auth/networking/mount/launch chain untouched.
 
 Commit: AEGL branch `plan/trusted-capture` @ `b3f8294` (implementation; not merged).
 
+## Round update 36: controller guard interface WIRED (guard path); OS capture still unwired
+
+**Guard return — wired** (implementation `dd29577`, not host-tested):
+- the broker (existing task-scoped controller) answers `pre_tool_call` on the same socket and runs
+  the **verified read-only guard COPY** (`/usr/local/lib/aegl-model/guard/contract_guard.py`, mode
+  0444, with a source+hash manifest) under a **fixed unprivileged runner** (setpriv → aegl-ai) with a
+  minimal env allowlist — it never inherits the broker's credentials and root never runs/imports
+  user-writable project code;
+- the generated profile's `pre_tool_call` is rewired to `guard_hook_client` (only when the verified
+  copy + client exist — otherwise the official hook is kept **verbatim**, so the working chain is
+  never changed merely because the wiring is absent);
+- the installer creates a **controller-private root-0700 evidence dir** and the self-test derives
+  `guard_state` from that captured evidence (a BLOCK record with `rc=2` **and** an ALLOW record with
+  `rc=0`, with `evidence=appended`), still failing closed when absent.
+
+**Interface fixes:** no runner / unparseable runner ⇒ **refuse to run** (never run the guard as the
+broker identity); the evidence-dir check uses the real AI uid+gid and rejects AI-owned,
+AI-group-writable and other-writable-without-sticky dirs, with `O_NOFOLLOW` writes; a **recording
+failure is never an acceptable ALLOW** (status folded into the result, `rc=None` ⇒ client blocks);
+`tool_call_id` comes from the real hook payload (top level **or** `extra`).
+
+**OS capture — implemented but NOT invoked ⇒ NOT_PROVEN.** `recovery/os_watch.py` exists
+(controller-side pid-namespace identity + target + whether the operation ran, and an **in-sandbox**
+errno probe via `nsenter` for the protected target, reporting NOT_PROVEN when unobservable), but the
+launcher/installer do **not** invoke it during a run. Until that invocation is wired (the installer
+must run it while the sandbox is alive, using the info-fd pid and the three fixed targets), the third
+probe has no trusted source.
+
+No host test was run; the guard-capture gate was **not** re-run (it had already run twice), so this
+wiring is **NOT RE-VERIFIED**. Consequently `ACCEPTANCE_EVIDENCE=NOT_VERIFIED` and **no re-run
+command is provided** (the OS-denial probe would knowingly fail).
+
+```text
+REAL_MODEL_TASK=PASS (kept)
+GUARD_RETURN_SOURCE=controller subprocess (verified copy run as aegl-ai) — WIRED, host-untested
+OS_DENIAL_SOURCE=in-sandbox nsenter errno probe — IMPLEMENTED, NOT INVOKED => NOT_PROVEN
+ACCEPTANCE_EVIDENCE=NOT_VERIFIED
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=NOT RE-RUN (gate already ran twice)
+```
+
+Commit: AEGL branch `plan/wire-capture` @ `dd29577` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
