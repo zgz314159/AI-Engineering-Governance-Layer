@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted. A reality check of the **original** Hermes automation loop — Round update 6 — confirms the Hermes/Command-Code/DeepSeek hop works with the existing credential and closes the ChatGPT transport hop as the blocking link).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted. The **original** Hermes automation loop's browser接入 is now fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -624,3 +624,68 @@ Minimal necessary change for the original loop: bring up the Browser-Harness-own
 on `127.0.0.1:9333` with the dedicated ChatGPT profile logged in, and point the bridge at a
 **new** test conversation (a configured control-URL/transport seam — never the off-limits
 session). The Hermes provider hop requires no change.
+
+## Round update 7: browser接入 fix + loop re-verification attempt
+
+The two minimal necessary changes from Round 6 were made and the real loop was re-attempted
+once. No Stage 1/2 run was repeated; no canonical project source, bridge/campaign state, or
+control conversation was touched. The user's other Chrome windows were preserved.
+
+Loop acceptance checklist — **a box is checked only when that real hop actually completed**
+(the provider-only fact below is NOT part of this chain and never checks a box here):
+
+- [ ] `chatgpt_task_received` — a valid `HERMES_TASK_V1` task from a **new** ChatGPT session, read by the Bridge
+- [ ] `hermes_task_executed` — Hermes actually executes the contract via the Command Code provider
+- [ ] `task_acceptance` — the deterministic acceptance for the read-only task passes
+- [ ] `chatgpt_result_delivered` — one `HERMES_RESULT_V1` delivery confirmed in the test session
+- [ ] `ORIGINAL_AUTOMATION` complete (all real hops above)
+
+Provider-only fact (separate from, and NOT counting toward, the checklist above):
+
+- [x] `hermes -p android-stack chat --oneshot` returned `HERMES_COMMANDCODE_OK` (Round 6) using the
+  existing Command Code credential — the Hermes→Command-Code→DeepSeek hop is proven working and
+  needs **no** new key.
+
+Browser接入 progress (this round):
+
+- [x] **Dedicated browser config created** at the project-external XDG browser state path
+  (`$XDG_STATE_HOME/google-android-agent-stack/browser/chrome-profile`), because no dedicated
+  automation profile existed (the only ChatGPT login is the user's personal `google-chrome/Default`;
+  its cookies/config were neither read nor copied).
+- [x] **Chrome 154 launched** with `--remote-debugging-port=9333 --remote-debugging-address=127.0.0.1
+  --user-data-dir=<dedicated>`; `http://127.0.0.1:9333/json/version` answers and the listener is
+  **loopback-only** (`127.0.0.1:9333`).
+- [x] **Browser-Harness daemon started** (`BU_NAME=hermes-chatgpt`; `BH_HOME`/`BH_RUNTIME_DIR` under the
+  same XDG browser state; `BU_CDP_URL=http://127.0.0.1:9333`) and **confirmed to reach Chrome**:
+  `list_tabs()`/`page_info()` returned live tab data. Environment variables alone were not treated
+  as proof.
+- [x] **Control-conversation selector added** on isolated Stack branch `plan/hermes-chatgpt-control-url`
+  (commit `246cf0f`): `HERMES_CHATGPT_CONTROL_URL` selects a **new** conversation; default behaviour
+  unchanged; an invalid value raises immediately with no fallback to the pinned conversation.
+  Focused config tests 5/5. Protocol/nonce/sequence and one-send/uncertain-send rules untouched.
+- [ ] **NEW ChatGPT session** — not established: the dedicated profile is not logged into ChatGPT
+  (the opened `https://chatgpt.com/` page shows the login gate; no composer). A one-time human login
+  in the dedicated window is required.
+
+Loop re-verification result (this round; the loop was not run to completion):
+
+```text
+BROWSER_READY=HUMAN_LOGIN_REQUIRED
+CHATGPT_TASK_RECEIVED=NOT_RUN
+HERMES_TASK_EXECUTED=NOT_RUN
+TASK_ACCEPTANCE=NOT_RUN
+CHATGPT_RESULT_DELIVERED=NOT_RUN
+ORIGINAL_AUTOMATION=BLOCKED
+AI_BOUNDARY=BLOCKED
+FIRST_FAILED_HOP=chatgpt_task_received — not reached: the dedicated ChatGPT profile needs a one-time human login (Chrome/CDP 9333 + Browser-Harness daemon are up and verified)
+NEXT_HUMAN_ACTION=Log in to ChatGPT once in the dedicated Google Chrome window (BU_NAME=hermes-chatgpt; profile .../browser/chrome-profile); a follow-up run then creates the new test conversation and sets HERMES_CHATGPT_CONTROL_URL
+```
+
+### SYSTEM_RECOVERED scope (clarification)
+
+The recorded `SYSTEM_RECOVERED=PASS` (Stage 1.4) covers **build/test acceptance only**: the three
+project bodies rebuild and their required unit/integration tests pass in a clean copy (Google Stack
+offline gates; AEGL suite; KeepLab backend `test build`; KeepLab Android unit tests + debug APK;
+device install/launch `NOT_RUN`). It does **not** cover — and must not be read as covering — the
+ChatGPT/Browser-Harness transport or the end-to-end automation loop. Those remained `BLOCKED` at
+the end of Round 6 and are only partly repaired here (browser接入 fixed, loop not run to completion).
