@@ -86,8 +86,22 @@ def descendants(pid: int):
 
 
 def is_hermes(pid: int) -> bool:
-    cmd = cmdline(pid)
-    return "hermes" in cmd and ("chat" in cmd or "-p " in cmd)
+    """True only for the Hermes entry itself, never for a launcher wrapper.
+
+    A wrapper such as ``bash .../sandbox-run.sh hermes -p android-stack chat ...`` merely has
+    hermes/chat in its arguments; matching on that string made the sampler report the wrapper
+    as the model. The real process runs the entry script: either argv[0] is ``hermes`` or an
+    interpreter runs the ``hermes`` entry as argv[1].
+    """
+    parts = cmdline(pid).split()
+    if not parts:
+        return False
+    exe = os.path.basename(parts[0])
+    if exe == "hermes":
+        return True
+    if "python" in exe or exe in ("bash", "sh", "dash", "env"):
+        return len(parts) > 1 and os.path.basename(parts[1]) == "hermes"
+    return False
 
 
 def capture(info_file: str, max_wait: float = 30.0, hermes_wait: float = 240.0) -> dict:
