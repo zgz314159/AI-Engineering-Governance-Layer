@@ -1793,6 +1793,39 @@ FOCUSED_CHECK=NOT RE-RUN (corrections unverified; prior 8/8)
 
 Commit: AEGL branch `plan/acceptance-fix` @ `9f1ab94` (implementation; not merged).
 
+## Round update 35: controller-side guard capture implemented (interface only, NOT wired)
+
+Delivered **working controller-side capture code** (no new service — it reuses the existing
+task-scoped broker):
+- `recovery/guard_capture.py` — the controller **runs the guard itself** as a subprocess (restricted
+  runner supplied by the caller, e.g. setpriv), feeds the hook payload on stdin and takes the guard's
+  **RAW stdout + return code**; it binds the record to the task, the real `tool_call_id` and the
+  operation, and **refuses to record** when the evidence dir (or an ancestor) is owned by / writable
+  by the AI identity. Root never imports or in-lines user-writable project code.
+- `recovery/guard_hook_client.py` — the in-sandbox `pre_tool_call` client forwards the payload to the
+  controller and reproduces the guard's raw stdout + exit code; any interface failure (no socket,
+  timeout, bad reply, no guard configured) yields an explicit **BLOCK** (fail closed).
+- `model_broker.py` — answers `/guard` on the same task-scoped socket.
+
+Focused check (`recovery/guard-capture-tests.sh`, this round: **2 runs** — 1 initial failure caused by
+my fixture passing `ai_uid=0`, which collides with root owning `/tmp`, then the re-verify): **10/10**,
+with a stub guard proving the controller really executes it (side effect observed). Interface-local
+only — **not** real isolation acceptance.
+
+**Still NOT connected / not implemented (accurate gap):**
+- the launcher does **not** point the profile's `pre_tool_call` at the client, so the interface is not
+  wired into a run yet (and the controller-held evidence dir + task-level state root are not created);
+- **part II has no trusted source**: there is still no in-sandbox observation of the tool
+  subprocess/operation outcome, so "guard ALLOW → executed → OS permission denied" is NOT_PROVEN.
+  This needs either controller-side observation inside this run's namespaces or a cooperating
+  non-AI-writable reporter, and it must not be replaced by an out-of-sandbox probe.
+
+Therefore **ACCEPTANCE_EVIDENCE=NOT_VERIFIED** and no re-run command is provided (it would knowingly
+fail). `REAL_MODEL_TASK=PASS` is kept; `AI_BOUNDARY=BLOCKED`. No suite was re-run beyond the new
+interface check; existing model/auth/networking/mount/launch chain untouched.
+
+Commit: AEGL branch `plan/trusted-capture` @ `b3f8294` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
