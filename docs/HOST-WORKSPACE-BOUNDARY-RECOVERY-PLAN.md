@@ -991,3 +991,42 @@ REMAINING_BLOCKERS=independent-identity install (interactive sudo); /etc/aegl/br
 preserved. Functional testing (13/13) and independent-identity installation are recorded separately.
 
 Commit: AEGL branch `plan/broker-exact-apply` @ `26cf1a7` (not merged).
+
+## Round update 15: broker freeze/filter-free, object classification, explicit installer
+
+- **Candidate freeze + object classification.** `record` builds the candidate tree with
+  `git hash-object --no-filters` + `update-index --cacheinfo` (no `git add`, so no untrusted clean
+  filter, hook or fsmonitor runs) and classifies the **frozen tree** (generated/secret, oversize,
+  symlink/path escape, deletion, ignored presence). The trusted record binds that exact object;
+  `promote` applies it unchanged. The apply merge clears every repo-configured filter, so a candidate
+  cannot smuggle an exec entry point through the checkout.
+- **Production role separation retained**: recorder default is root only.
+- **Installer** `recovery/install-broker.sh` takes explicit `--repo`, `--projects-root` and a full
+  `--commit` and never relies on `$BASH_SOURCE`, so the delivered piped form works. It validates every
+  input, required file and extracted sha256 **before** any host change; any extraction/install/service/
+  acceptance failure returns non-zero and never prints `INSTALL_RESULT=OK`; it checks the real
+  `systemctl is-active` state. Its `--self-test` runs git operations as the repository-owning identity
+  (no `safe.directory=*`), under a bounded timeout with guaranteed process/temp-dir cleanup, and never
+  touches the official projects.
+
+Tests: `recovery/broker-tests.sh` **15/15** (one consolidated run + one re-verify after the filter
+fix), plus an isolated confirmation that the object-bound symlink escape is rejected for the right
+reason. Delivered entry check: the piped form parses the explicit inputs and fails closed (no false
+`INSTALL_RESULT=OK`).
+
+```text
+CANDIDATE_GATE=PASS
+INSTALL_ENTRY_CHECK=PASS
+TARGETED_TESTS=15/15 (2 runs this round: initial + one after the filter fix)
+ROOT_INSTALL=NOT_RUN
+INDEPENDENT_UID_ACCEPTANCE=NOT_RUN
+AI_BOUNDARY=BLOCKED
+INSTALL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 2aff9ee2d4fd2e337a448c4c9b6d3bed30a9229d:recovery/install-broker.sh | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --projects-root /home/zhong/Projects --commit 2aff9ee2d4fd2e337a448c4c9b6d3bed30a9229d --self-test
+REMAINING_BLOCKERS=independent-identity install (root/interactive sudo — ROOT_INSTALL=NOT_RUN); /etc/aegl/broker-verified marker; bulk project chown ('switch') + entry lock
+```
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` unchanged. Browser automation + active chain state
+preserved. Functional testing and the root/independent-UID installation results are recorded
+separately.
+
+Commit: AEGL branch `plan/broker-freeze-install` @ `2aff9ee` (not merged).
