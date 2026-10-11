@@ -1385,3 +1385,44 @@ pgrep -af 'aegl-hermes-sandbox|hermes -p android-stack' || true
 ```
 
 Commit: AEGL branch `plan/mount-drop` @ `63f008f` (not merged).
+
+## Round update 25: entry fixes — mount order, overlay source, sampling, cleanup
+
+Four entry fixes (no architecture change, no new gate, no re-run of old suites):
+
+1. **Mount order** — `--ro-bind / /` is now first; `--proc /proc`, `--dev /dev` and the other
+   overlays come after it, so a later root bind can no longer shadow them.
+2. **Overlay lower source** — `--overlay-src` now points at the REAL host `HERMES_INSTALLS`
+   (bwrap resolves the source before mounting, so a not-yet-created sandbox path can never work);
+   the upper layer stays an ephemeral tmp overlay — no host alias, no copy/archive.
+3. **Process sampling** — `capture_evidence.py` walks the trusted chain from the `--info-fd` pid to
+   the ACTUAL Hermes process and samples its HOST uid + pid namespace (and its tool children)
+   while alive. The root init process is never the model; a missing Hermes is `hermes_not_found`
+   (NOT_RUN/NOT_PROVEN); an empty children list is never "all passed".
+4. **Cleanup lifecycle** — one top-level, re-callable `cleanup_all` (no function-local refs → no
+   unbound variable under `set -u`) covers the install STAGE, this task's temp + RUN dirs and its
+   registry record. TERM/INT stop execution: end and WAIT for the trial's processes, then delete the
+   exact dirs (exit 143/130). SIGKILL cannot be caught → no automatic cleanup then.
+
+Focused check (`recovery/entry-mount-tests.sh`, this round: **2 runs** — 2 initial failures in my own
+harness (an unreliable negative-bwrap micro-assertion, and an init argv that itself looked like
+Hermes), then the re-verify): **18/18**. Not re-run: the 23-check mount-drop suite, uid-launch-tests,
+system recovery, browser automation, full suites. Run-count record: round 24 = 2, round 25 = 2.
+
+```text
+ENTRY_PATCH=mount_order=PASS overlay_source=PASS process_sampling=PASS cleanup_lifecycle=PASS
+FOCUSED_CHECK=18/18 (2 runs this round)
+CLEANUP=see the precise stop-then-delete command below (no rm-then-pgrep-||-true pattern)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show e3bb55d347ba29d5ac27db582730b21ea86f970c:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit e3bb55d347ba29d5ac27db582730b21ea86f970c --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Residue from the earlier failed run: `/run/aegl-model/trial` (root:aegl-ai). Precise cleanup in your
+root terminal — processes are stopped and waited FIRST, then the exact dir is removed:
+
+```text
+sudo pkill -f 'aegl-hermes-sandbox --task trial'; sleep 1; sudo rm -rf /run/aegl-model/trial
+```
+
+Commit: AEGL branch `plan/entry-mount` @ `e3bb55d` (not merged).
