@@ -162,37 +162,61 @@ SPEC="$RUN/spec.json"
 # aegl-ai cannot traverse the 0750 /home/zhong parents; the aliases live under a traversable
 # task dir, so bwrap (running AS aegl-ai) can resolve them. Nothing is copied and the mounts
 # exist only in this private namespace (never propagated to the host).
-SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/guard"; : > "$SRC/entry"
+SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/guard" "$SRC/gen" "$SRC/profile"; : > "$SRC/entry"
 chmod 0755 "$SRC"; chown root:root "$SRC"
 
 # --- task-level install state: SAME path Hermes expects, locks/leases writable --------- #
 KEY="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' "$(realpath "$HERMES_RUNTIME")")"
 GEN="$HERMES_HOME_REAL/installs/$KEY"
 { [ -d "$GEN" ] && [ -f "$GEN/facts.json" ]; } || die "no verified install generation at $GEN (refusing to fabricate one)"
-VIEW="$RUN/installs"; mkdir -p "$VIEW/$KEY/environments"
+VIEW="$RUN/installs"; mkdir -p "$VIEW/$KEY"
 # the small mutable pieces are reused VERBATIM (facts, declined packages, inputs stamps,
-# bootstrap cache, pm-runtime selected.json + .prepare.lock + generations) so every lock and
-# lease works in the writable view; only environments/ is a read-only sub-bind (the venv).
+# bootstrap cache, pm-runtime selection + locks) so every lock works in the writable view
 for entry in facts.json declined-packages.json inputs bootstrap pm-runtime; do
   [ -e "$GEN/$entry" ] && cp -a "$GEN/$entry" "$VIEW/$KEY/$entry"
 done
+# the SELECTED generation is parsed from the real facts (never hardcoded): its .leases and
+# .lease-managed must be writable, while venv/ + workspace/ are reused read-only
+GENHASH="$(python3 -c 'import json,os,sys;d=json.load(open(sys.argv[1]));print(os.path.basename(os.path.dirname(d["packages"]["venv"]["environment"])))' "$VIEW/$KEY/facts.json")" || die "cannot parse the selected generation from facts.json"
+GREAL="$GEN/environments/$GENHASH"; GVIEW="$VIEW/$KEY/environments/$GENHASH"
+[ -d "$GREAL" ] || die "selected generation missing: $GREAL"
+mkdir -p "$GVIEW/venv" "$GVIEW/workspace" "$GVIEW/.leases"
+[ -f "$GREAL/.lease-managed" ] && cp -a "$GREAL/.lease-managed" "$GVIEW/.lease-managed"
 chown -R "$AI_USER":"$AI_GROUP" "$VIEW"
-# the profile + home mutable RUN state (sessions/logs/locks) — task-level, writable by aegl-ai
-ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" \
-  "$ST/prof-sessions" "$ST/prof-logs" "$ST/prof-runtime" "$ST/prof-terminal"
+
+# --- task-level android-stack profile: writable run state, read-only instruction files -- #
+PROF_REAL="$HERMES_HOME_REAL/profiles/android-stack"
+PROFV="$RUN/profile"; mkdir -p "$PROFV/sessions" "$PROFV/logs" "$PROFV/runtime" \
+  "$PROFV/terminal-sessions" "$PROFV/cache" "$PROFV/sandboxes" "$PROFV/skills" "$PROFV/hooks"
+: > "$PROFV/state.db"; : > "$PROFV/SOUL.md"; : > "$PROFV/profile.yaml"; : > "$PROFV/models_dev_cache.json"
+cp -p "$SK/.hermes/config.yaml" "$PROFV/config.yaml"
+chown -R "$AI_USER":"$AI_GROUP" "$PROFV"
+
+# --- home-level mutable run state (sessions/logs/cache) -------------------------------- #
+ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" "$ST/home-cache"
 chown -R "$AI_USER":"$AI_GROUP" "$ST"
-STATE_ARGS=(
-  --state-bind "$ST/home-sessions:/home/zhong/.hermes/sessions"
-  --state-bind "$ST/home-logs:/home/zhong/.hermes/logs"
-  --state-bind "$ST/prof-sessions:/home/zhong/.hermes/profiles/android-stack/sessions"
-  --state-bind "$ST/prof-logs:/home/zhong/.hermes/profiles/android-stack/logs"
-  --state-bind "$ST/prof-runtime:/home/zhong/.hermes/profiles/android-stack/runtime"
-  --state-bind "$ST/prof-terminal:/home/zhong/.hermes/profiles/android-stack/terminal-sessions"
-)
+
+MOUNTS=()
+# install state (writable view is a fixed spec element); the generation content is read-only
+for d in venv workspace; do
+  MOUNTS+=("ro-bind:$SRC/gen/environments/$GENHASH/$d:/home/zhong/.hermes/installs/$KEY/environments/$GENHASH/$d")
+done
+# the profile dir is the writable task view; the instruction files are read-only reuse
+MOUNTS+=("bind:$PROFV:/home/zhong/.hermes/profiles/android-stack")
+for f in SOUL.md profile.yaml models_dev_cache.json; do
+  MOUNTS+=("ro-bind:$SRC/profile/$f:/home/zhong/.hermes/profiles/android-stack/$f")
+done
+for d in skills hooks; do
+  MOUNTS+=("ro-bind:$SRC/profile/$d:/home/zhong/.hermes/profiles/android-stack/$d")
+done
+MOUNTS+=("bind:$ST/home-sessions:/home/zhong/.hermes/sessions")
+MOUNTS+=("bind:$ST/home-logs:/home/zhong/.hermes/logs")
+MOUNTS+=("bind:$ST/home-cache:/home/zhong/.hermes/cache")
+MOUNT_ARGS=(); for m in "${MOUNTS[@]}"; do MOUNT_ARGS+=(--mount "$m"); done
+
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
   --wt "$WT_R" --scr "$SCR_R" --runtime "$SRC/runtime" --tools "$SRC/tools" \
-  --entry "$SRC/entry" --installs "$GEN" --installs-view "$VIEW" --install-key "$KEY" \
-  "${STATE_ARGS[@]}" --guard-src "$SRC/guard" \
+  --entry "$SRC/entry" --installs-view "$VIEW" "${MOUNT_ARGS[@]}" --guard-src "$SRC/guard" \
   --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 # create EVERY mount target under the read-only skeleton, derived from the ACTUAL argv
@@ -210,7 +234,8 @@ mount --make-rprivate /
 mount --bind '$HERMES_RUNTIME' '$SRC/runtime'
 mount --bind '$HERMES_TOOLS' '$SRC/tools'
 mount --bind '$HERMES_ENTRY' '$SRC/entry'
-mount --bind '$HERMES_INSTALLS' '$SRC/installs'
+mount --bind '$GEN' '$SRC/gen'
+mount --bind '$PROF_REAL' '$SRC/profile'
 mount --bind '$GUARD_SRC' '$SRC/guard'
 exec '$SETPRIV' --reuid '$AI_UID' --regid '$AI_GID' --clear-groups --no-new-privs \
   --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- \\

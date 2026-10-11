@@ -29,9 +29,8 @@ import json
 import sys
 
 
-def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, installs_view,
-          install_key, state_binds=(), guard_src, guard_dest, contract_package, info_fd="",
-          hermes_args) -> dict:
+def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs_view, guard_src,
+          guard_dest, contract_package, extra_mounts=(), info_fd="", hermes_args) -> dict:
     argv = [
         bwrap,
         # bwrap runs as the DROPPED aegl-ai and uses its AppArmor-permitted user namespace.
@@ -50,17 +49,16 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, ins
         "--ro-bind", runtime, "/home/zhong/.hermes/hermes-agent",
         "--ro-bind", tools, "/home/zhong/.hermes/tools",
         "--ro-bind", entry, "/home/zhong/.local/bin/hermes",
-        # install state: a task-level WRITABLE view at the SAME path Hermes expects, so
-        # locks / .install.lock / .leases / pm-runtime (.prepare.lock, selected.json) work.
-        # ONLY the heavy venv tree is reused read-only by sub-bind; the small mutable pieces
-        # are copied verbatim by the launcher (no copy of installs/venv, nothing forged).
+        # install state: a task-level WRITABLE view at the SAME path Hermes expects, so every
+        # lock / .install.lock / .leases / pm-runtime lock works. The generation content and
+        # the profile instruction files arrive as extra_mounts (below), always from aliases
+        # that are reachable AFTER the drop.
         "--bind", installs_view, "/home/zhong/.hermes/installs",
-        "--ro-bind", installs + "/environments", "/home/zhong/.hermes/installs/" + install_key + "/environments",
         # task config + generated android-stack profile (hooks preserved); secrets masked
         "--ro-bind", run + "/stage/home-zhong/.hermes/config.yaml", "/home/zhong/.hermes/config.yaml",
         "--ro-bind", run + "/stage/home-zhong/.hermes/profiles", "/home/zhong/.hermes/profiles",
-        # mutable RUN state (sessions/logs/locks) — task-level dirs writable by aegl-ai
-        *[x for pair in state_binds for x in ("--bind", pair[0], pair[1])],
+        # task-owned writable state + read-only reuse (sources are post-drop-reachable aliases)
+        *[x for kind, src, dest in extra_mounts for x in ("--" + kind, src, dest)],
         "--ro-bind", run + "/stage/empty", "/home/zhong/.hermes/.env",
         # the contract-guard source, at the canonical path the hooks reference
         "--ro-bind", guard_src, guard_dest,
@@ -89,18 +87,17 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, ins
 def main(argv):
     ap = argparse.ArgumentParser()
     for name in ("bwrap", "uid", "gid", "run", "wt", "scr", "runtime", "tools", "entry",
-                 "installs", "installs-view", "install-key", "guard-src", "guard-dest",
-                 "contract-package"):
+                 "installs-view", "guard-src", "guard-dest", "contract-package"):
         ap.add_argument("--" + name, required=True)
-    ap.add_argument("--state-bind", action="append", default=[], metavar="HOST:DEST")
+    ap.add_argument("--mount", action="append", default=[], metavar="KIND:SRC:DEST")
     ap.add_argument("--info-fd", default="")
     ap.add_argument("hermes", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
     hermes = args.hermes[1:] if args.hermes[:1] == ["--"] else args.hermes
     spec = build(bwrap=args.bwrap, uid=args.uid, gid=args.gid, run=args.run, wt=args.wt, scr=args.scr,
-                 runtime=args.runtime, tools=args.tools, entry=args.entry, installs=args.installs,
-                 installs_view=args.installs_view, install_key=args.install_key,
-                 state_binds=[tuple(sb.split(":", 1)) for sb in args.state_bind],
+                 runtime=args.runtime, tools=args.tools, entry=args.entry,
+                 installs_view=args.installs_view,
+                 extra_mounts=[tuple(m.split(":", 2)) for m in args.mount],
                  guard_src=args.guard_src, guard_dest=args.guard_dest,
                  contract_package=args.contract_package, info_fd=args.info_fd, hermes_args=hermes)
     json.dump(spec, sys.stdout)
