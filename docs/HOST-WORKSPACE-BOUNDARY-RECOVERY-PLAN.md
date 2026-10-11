@@ -827,3 +827,36 @@ The loop checklist is now fully checked; `ORIGINAL_AUTOMATION=PASS`. `SYSTEM_REC
 `HISTORY_CLEAN=PASS` are unchanged. `AI_BOUNDARY` stays `BLOCKED` by actual evidence (no confinement,
 no broker): a passing communication loop is not an isolation pass, and the model process is still
 unconfined.
+
+## Round update 11: Campaign Supervisor single automatic dispatch
+
+The **single-round communication chain (Rounds 6-10) is complete**. This round adds one real
+Supervisor run — the Supervisor, not a manual Bridge round. The Bridge chain was NOT reset; the fixed
+tab, `session.env` and the persisted XDG state were reused; no conversation was created.
+
+Evidence (real entry `run_campaign_session.sh` → `campaign_cli.py run --max-rounds 1
+--max-wall-seconds 600 --poll-seconds 5`):
+
+```text
+SUPERVISOR_DISPATCH_COUNT=1
+TASK_ACCEPTANCE=PASS                (exact line ORIG-LOOP-RESULT=ORIGLOOP-7D2A55)
+RESULT_DELIVERY=PASS                (bridge committed: WAITING_FOR_GPT, expected_sequence=3, no pending;
+                                     delivered user turn = the HERMES_RESULT_V1 for ORIG-LOOP-TRIAL-004)
+TERMINAL_OUTCOME=PAUSED / LIMIT_REACHED (max_rounds reached)
+SUPERVISOR_AUTOMATION=PASS
+AI_BOUNDARY=BLOCKED
+```
+
+- The Supervisor read the latest assistant response, validated the chain against the Bridge challenge,
+  and called the Bridge exactly once (`CAMPAIGN_DISPATCH sequence=2 task_id=ORIG-LOOP-TRIAL-004`).
+  `bridge_cli.py round` was never invoked to stand in for the Supervisor.
+- `LIMIT_REACHED` PAUSED is the expected bounded stop; its semantics were not changed to force exit 0,
+  and there was no repeat dispatch.
+- The Supervisor is recorded by this round only: one campaign, one dispatch. Chain state lives in
+  `$XDG_STATE_HOME/google-android-agent-stack/bridge` (expected_sequence=3, WAITING_FOR_GPT) and
+  `.../supervisor/ORIG-LOOP-TRIAL-CAMPAIGN-001` (PAUSED / LIMIT_REACHED).
+- Forced isolation and trusted promotion remain independent and `BLOCKED`; a passing communication
+  loop does not change them, and the model process is still unconfined.
+
+Commit: Stack branch `plan/hermes-chatgpt-control-url` @ `d5b9580` (supervisor session launcher;
+not merged — promotion gate default-deny).
