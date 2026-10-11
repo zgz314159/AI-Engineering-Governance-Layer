@@ -1030,3 +1030,63 @@ preserved. Functional testing and the root/independent-UID installation results 
 separately.
 
 Commit: AEGL branch `plan/broker-freeze-install` @ `2aff9ee` (not merged).
+
+## Round update 16: broker install + independent-UID acceptance (operator-executed)
+
+The operator completed the **root install and the independent-UID acceptance out-of-band**; the
+results are recorded here and were **not re-run** in this round:
+
+- fixed install commit: `2aff9ee2d4fd2e337a448c4c9b6d3bed30a9229d`
+- `systemctl is-active aegl-promote-broker` → **active**
+- independent-UID acceptance → **failures=0**
+- **`INSTALL_RESULT=OK`**
+
+Consequences: `ROOT_INSTALL=PASS`, `INDEPENDENT_UID_ACCEPTANCE=PASS`,
+**`INDEPENDENT_IDENTITY_INSTALLED=YES`** — the broker runs as `aegl-promote` (uid 997) and the AI
+identity `aegl-ai` (uid 994, in group `aegl-broker`) exists. `/etc/aegl/broker-verified` was not
+written (a later manual step) and `switch` was not run — the official projects are unchanged.
+
+This supersedes the earlier "identity NOT installed" record for the **broker**; it does **not** by
+itself complete the AI-boundary acceptance, which still requires the model to run confined (next).
+
+## Round update 17: Hermes sandbox接入 (broker + launcher delivered; real run NOT_RUN)
+
+Endpoint interface (verified against the installed Hermes): `model.base_url` (+ `model.api_key` for an
+explicit endpoint) and `custom_providers[].{name,base_url,api_key}` — a custom endpoint is configurable.
+
+Delivered (AEGL branch, not merged):
+
+- `recovery/model_broker.py` + `bin/aegl-model-broker` — the trusted egress + credential component: it
+  holds the credential (root-only file) OUTSIDE the sandbox and is the only component with egress; it
+  forwards requests to the real provider and injects the credential. The sandboxed client never sees
+  the credential and cannot open a direct external connection.
+- `recovery/loopback_shim.py` — an in-sandbox `127.0.0.1` → bound-Unix-socket forwarder for
+  http-only clients.
+- `bin/aegl-hermes-sandbox` — the trusted launcher: runs REAL Hermes (and its tool subprocesses) as the
+  AI identity inside `bwrap --unshare-all`, with the broker socket bound in, credential paths masked,
+  and a task-scoped `HERMES_HOME` whose `model.base_url` points at the in-sandbox shim. Requires root.
+- `recovery/install-model-broker.sh` — reviewable, explicit-input installer (fixed commit; installs the
+  broker + launcher + a root-only credential dir; does NOT run switch, change project permissions,
+  merge, or write the marker, and does not create the credential).
+
+Targeted tests (`recovery/model-broker-tests.sh`, one consolidated run): **6/6** — broker forwards and
+injects the credential held outside the client; refuses to start without a credential; in the sandbox
+the worktree is writable, the real credential paths (`~/.commandcode/auth.json`, `~/.hermes/.env`) are
+masked, the broker is reachable via the bound Unix socket, and an out-of-bound write is denied.
+Mechanism run as a non-root uid.
+
+```text
+REAL_HERMES_SANDBOX=NOT_RUN        (running the model as the aegl-ai uid needs the root-owned launcher, not yet installed)
+EXISTING_PROVIDER_CALL=NOT_RUN     (no trusted egress/credential component installed yet)
+TASK_WRITE_ALLOWED=NOT_RUN         (mechanism demonstrated as a non-root uid; the aegl-ai run was not executed)
+OUT_OF_BOUND_WRITE_DENIED=NOT_RUN  (mechanism demonstrated; the aegl-ai run was not executed)
+CREDENTIAL_BOUNDARY=NOT_RUN        (design + mechanism; not installed/run for aegl-ai)
+AI_BOUNDARY=BLOCKED
+NEXT_HUMAN_ACTION=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 5f7027f94c6351a6e0eee6a68be90ec8efea35e7:recovery/install-model-broker.sh | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 5f7027f94c6351a6e0eee6a68be90ec8efea35e7 ; then place the provider credential at /etc/aegl/model/provider.cred and run bin/aegl-hermes-sandbox
+```
+
+The real minimal task was **not run**: it requires the trusted launcher installed as root (to run as
+`aegl-ai`) and the credential present. Per instruction, its hops are recorded `NOT_RUN` rather than
+claimed. The browser automation and the active chain state are unchanged; no sudo was executed.
+
+Commit: AEGL branch `plan/hermes-sandbox` @ `5f7027f` (not merged).
