@@ -162,7 +162,7 @@ SPEC="$RUN/spec.json"
 # aegl-ai cannot traverse the 0750 /home/zhong parents; the aliases live under a traversable
 # task dir, so bwrap (running AS aegl-ai) can resolve them. Nothing is copied and the mounts
 # exist only in this private namespace (never propagated to the host).
-SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/guard" "$SRC/gen" "$SRC/profile"; : > "$SRC/entry"
+SRC="$RUN/src"; mkdir -p "$SRC/runtime" "$SRC/tools" "$SRC/guard" "$SRC/gen"; : > "$SRC/entry"
 chmod 0755 "$SRC"; chown root:root "$SRC"
 
 # --- task-level install state: SAME path Hermes expects, locks/leases writable --------- #
@@ -184,13 +184,21 @@ mkdir -p "$GVIEW/venv" "$GVIEW/workspace" "$GVIEW/.leases"
 [ -f "$GREAL/.lease-managed" ] && cp -a "$GREAL/.lease-managed" "$GVIEW/.lease-managed"
 chown -R "$AI_USER":"$AI_GROUP" "$VIEW"
 
-# --- task-level android-stack profile: writable run state, read-only instruction files -- #
+# --- task-level android-stack profile: writable run state ----------------------------- #
 PROF_REAL="$HERMES_HOME_REAL/profiles/android-stack"
 PROFV="$RUN/profile"; mkdir -p "$PROFV/sessions" "$PROFV/logs" "$PROFV/runtime" \
   "$PROFV/terminal-sessions" "$PROFV/cache" "$PROFV/sandboxes" "$PROFV/skills" "$PROFV/hooks"
-: > "$PROFV/state.db"; : > "$PROFV/SOUL.md"; : > "$PROFV/profile.yaml"; : > "$PROFV/models_dev_cache.json"
-cp -p "$SK/.hermes/config.yaml" "$PROFV/config.yaml"
+: > "$PROFV/state.db"; : > "$PROFV/config.yaml"          # mount points only
+: > "$PROFV/SOUL.md"; : > "$PROFV/profile.yaml"
 chown -R "$AI_USER":"$AI_GROUP" "$PROFV"
+# read-only PROJECTION of the declared instruction content: the host profile, skills and
+# hooks are 0700, so a bind alias would stay unreadable after the drop. Copy ONLY these
+# non-secret items into a task projection and grant a+rX (host sources untouched). No .env,
+# credentials, history database, sessions or logs. The projection dies with the task dir.
+PROJV="$RUN/proj"; mkdir -p "$PROJV"
+for f in SOUL.md profile.yaml; do [ -f "$PROF_REAL/$f" ] && cp -p "$PROF_REAL/$f" "$PROJV/$f"; done
+for d in skills hooks; do [ -d "$PROF_REAL/$d" ] && cp -a "$PROF_REAL/$d" "$PROJV/$d"; done
+chown -R root:root "$PROJV"; chmod -R a+rX,o-w "$PROJV"
 
 # --- home-level mutable run state (sessions/logs/cache) -------------------------------- #
 ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" "$ST/home-cache"
@@ -201,13 +209,15 @@ MOUNTS=()
 for d in venv workspace; do
   MOUNTS+=("ro-bind:$SRC/gen/environments/$GENHASH/$d:/home/zhong/.hermes/installs/$KEY/environments/$GENHASH/$d")
 done
-# the profile dir is the writable task view; the instruction files are read-only reuse
+# the profile dir is the writable task view; the trusted config and the projected
+# instruction files are mounted read-only OVER it (the model cannot edit config or hooks)
 MOUNTS+=("bind:$PROFV:/home/zhong/.hermes/profiles/android-stack")
-for f in SOUL.md profile.yaml models_dev_cache.json; do
-  MOUNTS+=("ro-bind:$SRC/profile/$f:/home/zhong/.hermes/profiles/android-stack/$f")
+MOUNTS+=("ro-bind:$SK/.hermes/config.yaml:/home/zhong/.hermes/profiles/android-stack/config.yaml")
+for f in SOUL.md profile.yaml; do
+  MOUNTS+=("ro-bind:$PROJV/$f:/home/zhong/.hermes/profiles/android-stack/$f")
 done
 for d in skills hooks; do
-  MOUNTS+=("ro-bind:$SRC/profile/$d:/home/zhong/.hermes/profiles/android-stack/$d")
+  MOUNTS+=("ro-bind:$PROJV/$d:/home/zhong/.hermes/profiles/android-stack/$d")
 done
 MOUNTS+=("bind:$ST/home-sessions:/home/zhong/.hermes/sessions")
 MOUNTS+=("bind:$ST/home-logs:/home/zhong/.hermes/logs")
@@ -235,7 +245,6 @@ mount --bind '$HERMES_RUNTIME' '$SRC/runtime'
 mount --bind '$HERMES_TOOLS' '$SRC/tools'
 mount --bind '$HERMES_ENTRY' '$SRC/entry'
 mount --bind '$GEN' '$SRC/gen'
-mount --bind '$PROF_REAL' '$SRC/profile'
 mount --bind '$GUARD_SRC' '$SRC/guard'
 exec '$SETPRIV' --reuid '$AI_UID' --regid '$AI_GID' --clear-groups --no-new-privs \
   --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- \\

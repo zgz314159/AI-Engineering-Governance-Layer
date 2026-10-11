@@ -34,6 +34,8 @@ mkdir -p "$GEN/environments/$HASH/venv" "$GEN/environments/$HASH/workspace" "$GE
          "$PROFV/sessions" "$PROFV/logs" "$PROFV/runtime" "$PROFV/cache" "$PROFV/skills" "$PROFV/hooks" \
          "$ST/home-sessions" "$ST/home-logs" "$ST/home-cache" "$SRC"
 : > "$GEN/environments/$HASH/.lease-managed"; : > "$GEN/environments/$HASH/venv/pyvenv.cfg"
+SKCFG="$T/skcfg/config.yaml"; mkdir -p "$(dirname "$SKCFG")"; : > "$SKCFG"       # trusted generated config
+PROJ="$T/proj"; mkdir -p "$PROJ/skills"; : > "$PROJ/SOUL.md"; chmod -R a+rX "$PROJ"  # instruction projection
 printf '{"schema":1,"packages":{"venv":{"environment":"%s/environments/%s/venv","schema":"1"}}}\n' "$GEN" "$HASH" > "$VIEW/$KEY/facts.json"
 cp -a "$GEN/environments/$HASH/.lease-managed" "$VIEW/$KEY/environments/$HASH/.lease-managed"
 PARSE_HASH="$(python3 -c 'import json,os,sys;d=json.load(open(sys.argv[1]));print(os.path.basename(os.path.dirname(d["packages"]["venv"]["environment"])))' "$VIEW/$KEY/facts.json")"
@@ -41,17 +43,18 @@ PARSE_HASH="$(python3 -c 'import json,os,sys;d=json.load(open(sys.argv[1]));prin
 touch "$VIEW/$KEY/environments/$HASH/.leases/$(uuidgen 2>/dev/null || echo lease1)" 2>/dev/null \
   && ok "a generation lease can be created in the task view (generation/.leases writable)" || no "generation .leases is not writable"
 
-ARGV="$(python3 - "$AEGL_ROOT/recovery/sandbox_spec.py" "$VIEW" "$HASH" "$KEY" "$PROFV" "$ST" "$T" <<'PY'
+ARGV="$(python3 - "$AEGL_ROOT/recovery/sandbox_spec.py" "$VIEW" "$HASH" "$KEY" "$PROFV" "$ST" "$T" "$SKCFG" "$PROJ" <<'PY'
 import importlib.util, sys
 m = importlib.util.module_from_spec(importlib.util.spec_from_file_location("ss", sys.argv[1]))
 importlib.util.spec_from_file_location("ss", sys.argv[1]).loader.exec_module(m)
-view, h, key, profv, st, T = sys.argv[2:8]
+view, h, key, profv, st, T, skcfg, proj = sys.argv[2:10]
 src = T + "/src"
 em = [("ro-bind", f"{src}/gen/environments/{h}/venv", f"/home/zhong/.hermes/installs/{key}/environments/{h}/venv"),
       ("ro-bind", f"{src}/gen/environments/{h}/workspace", f"/home/zhong/.hermes/installs/{key}/environments/{h}/workspace"),
       ("bind", profv, "/home/zhong/.hermes/profiles/android-stack"),
-      ("ro-bind", f"{src}/profile/SOUL.md", "/home/zhong/.hermes/profiles/android-stack/SOUL.md"),
-      ("ro-bind", f"{src}/profile/skills", "/home/zhong/.hermes/profiles/android-stack/skills"),
+      ("ro-bind", skcfg, "/home/zhong/.hermes/profiles/android-stack/config.yaml"),
+      ("ro-bind", f"{proj}/SOUL.md", "/home/zhong/.hermes/profiles/android-stack/SOUL.md"),
+      ("ro-bind", f"{proj}/skills", "/home/zhong/.hermes/profiles/android-stack/skills"),
       ("bind", f"{st}/home-sessions", "/home/zhong/.hermes/sessions"),
       ("bind", f"{st}/home-logs", "/home/zhong/.hermes/logs")]
 a = m.build(bwrap="/usr/bin/bwrap", uid="994", gid="972", run="/run/t", wt="/tmp/wt", scr="/tmp/scr",
@@ -66,23 +69,32 @@ grep -q -- "--ro-bind $SRC/gen/environments/$HASH/venv " <<<"$ONE" && ok "genera
 grep -q -- "--ro-bind $SRC/gen/environments/$HASH/workspace " <<<"$ONE" && ok "generation workspace is reused read-only" || no "workspace ro-bind missing"
 grep -q -- "--bind $VIEW /home/zhong/.hermes/installs" <<<"$ONE" && ok "install state view is writable at the expected path" || no "installs view bind missing"
 grep -q -- "--bind $PROFV /home/zhong/.hermes/profiles/android-stack" <<<"$ONE" && ok "profile run state (db/sessions/logs/locks) is a writable task dir" || no "profile view bind missing"
-grep -q -- "--ro-bind $SRC/profile/skills " <<<"$ONE" && ok "profile instruction files are read-only reuse" || no "profile instruction reuse missing"
+grep -q -- "--ro-bind $PROJ/skills " <<<"$ONE" && ok "instruction projection is the read-only source for skills" || no "instruction projection missing"
 
-# post-drop reachability: NO mount source is under /home/zhong
-BAD="$(python3 - "$ARGV" <<'PY'
+# post-drop reachability: a mount SOURCE under /home/zhong is a real defect; `/` is the
+# legitimate root bind and must NOT be flagged. Path location alone is NOT permission proof,
+# so host-level readability stays NOT_RUN.
+check_sources(){ python3 -c '
 import sys
-lines = [l for l in sys.stdin.read().splitlines()]
+lines = sys.stdin.read().splitlines()
 bad = []
 for i, tok in enumerate(lines):
     if tok in ("--ro-bind", "--bind") and i + 2 < len(lines):
-        if lines[i + 1].startswith("/home/zhong") or lines[i + 1] == "/":
-            bad.append(lines[i + 1])
+        src = lines[i + 1]
+        if src.startswith("/home/zhong"):
+            bad.append(src)
 print(",".join(bad))
-PY
-)" <<<"$ARGV"
-[ -z "$BAD" ] && ok "every mount SOURCE is a post-drop-reachable alias (none under /home/zhong)" || no "unreachable mount source(s): $BAD"
+'; }
+BAD_SRC="$(printf '%s\n' "$ARGV" | check_sources)"
+[ -z "$BAD_SRC" ] && ok "no mount SOURCE is under /home/zhong (private HOME)" || no "unreachable mount source(s): $BAD_SRC"
+CTRL="$(printf '%s\n' '--ro-bind' '/home/zhong/x' '/d' '--ro-bind' '/' '/' | check_sources)"
+[ "$CTRL" = "/home/zhong/x" ] && ok "positive control: the checker flags a /home/zhong source and allows /" || no "checker is broken (got '$CTRL')"
+grep -q -- "--ro-bind $PROJV/skills " <<<"$ONE" && ok "instruction projection (a+rX task copy) is the read-only source for skills" || no "instruction projection not used"
+grep -q -- "--ro-bind $SK/.hermes/config.yaml /home/zhong/.hermes/profiles/android-stack/config.yaml" <<<"$ONE" \
+  && ok "trusted config.yaml is mounted read-only over the writable profile" || no "config.yaml is not read-only over the profile"
+grep -q -- "--ro-bind $T/src/profile" <<<"$ONE" && no "the unreachable host-profile alias is still used" || ok "no unreachable host-profile alias remains"
 
-printf '  NOTE: fixture only; real aegl-ai host acceptance stays NOT_RUN\n'
+printf '  NOTE: path location is not permission proof; real aegl-ai host acceptance stays NOT_RUN\n'
 rm -rf "$T"
 echo "ENTRY_GAPS_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
