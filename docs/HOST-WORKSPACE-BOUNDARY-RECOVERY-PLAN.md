@@ -1180,3 +1180,45 @@ AI_BOUNDARY=BLOCKED
 No sudo was executed; the browser automation and active chain state are unchanged.
 
 Commit: AEGL branch `plan/uid-launch` @ `ee70e04` (not merged).
+
+## Round update 20: two-phase fd mounts + fail-closed trial gate
+
+The operator's real launch of `ee70e04` failed: `bwrap: Can't find source path
+/home/zhong/.hermes/hermes-agent: Permission denied` — bwrap resolved the `/home/zhong` source *inside*
+the unprivileged user namespace (uid 994), which cannot traverse the `0750 /home/zhong`. Hermes never
+started and the model was never called. This round therefore records the runtime/UID/namespace
+acceptance as **NOT_RUN**; a missing `BREACH` file alone is **not** evidence of a denied write.
+
+Fixes (AEGL branch `plan/uid-mount-fix`, not merged):
+
+- `recovery/bind_fd_exec.py` — two-phase mounting. Phase 1 (root) opens each declared source with a
+  file descriptor; phase 2 execs `bwrap` with `--ro-bind-fd`, so a `0750` source is never re-resolved
+  as the AI uid. Inside, `/home/zhong` is a **traversable skeleton** carrying only the declared
+  runtime + the task config; `installs` is an overlay whose lower layer is a traversable fd bind. The
+  host HOME/`.hermes` stay unexposed and their permissions are unchanged.
+- `--info-fd` is forwarded to bwrap so a caller can obtain the **actual child process**.
+- `recovery/trial_gate.py` — fail-closed verdict: a launch failure makes every downstream check
+  `NOT_RUN`; missing RESULT, missing trusted identity/namespace evidence, a uid/namespace mismatch, a
+  protected write that never happened, or a successful breach all `FAIL` (never a NOTE). Trusted
+  host `/proc/<pid>` evidence replaces the model-generated FACTS-only trust.
+- Installer: `--self-test` uses `--info-fd` + host `/proc` evidence, judges via `trial_gate`, always
+  cleans up (processes, temp dir, trial registry entry), and exits non-zero on failure; it migrates an
+  existing root config (adds missing keys; refuses if an un-defaultable key is absent).
+
+Tests (`recovery/uid-launch-tests.sh`, 1 run): **12/12** — data-only credential parse (a shell payload
+never executes) + every fail-closed gate case. Already-passing components (broker promotion, browser
+communication, full suites) were NOT re-run. Run-count record: round 17 = 3, round 18 = 6, round 19 = 1,
+round 20 = 1.
+
+```text
+RUNTIME_MOUNT_FIX=PASS           (two-phase fd mounts; host /home/zhong unmodified; execution needs root)
+TRIAL_GATE_FAIL_CLOSED=PASS      (12/12; missing evidence => FAIL, launch failure => NOT_RUN)
+REAL_HERMES_SANDBOX=NOT_RUN      (root trial not executed)
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 9fdab21adae98892e9d081d3401c961b8c91c576:recovery/install-model-broker.sh | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 9fdab21adae98892e9d081d3401c961b8c91c576 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+The `--self-test` is the bounded (~5 min) real trial; no `switch`, no project permission change, no
+merge, no backup/archive. No sudo was executed; browser automation and active chain state unchanged.
+
+Commit: AEGL branch `plan/uid-mount-fix` @ `9fdab21` (not merged).
