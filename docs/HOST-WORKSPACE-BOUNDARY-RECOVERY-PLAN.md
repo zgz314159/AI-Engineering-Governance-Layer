@@ -392,6 +392,37 @@ record without claiming final acceptance or changing the Stage 1/2 results.
 - [ ] Accept and promote the isolated Stage 3 implementation into the canonical
   AEGL checkout through the trusted path after the required conditions are met.
 
+### Round update: model confinement, operator identity, Cursor (new evidence only)
+
+No Stage 1/2 run and no re-run of the 22/22 self-check, 18/18 matrix, or the sandbox
+probe was performed. Open checkboxes above remain unchecked.
+
+- **Real model-process isolation — BLOCKED.** Read-only forensics of the running agent:
+  `command-code` (pid 8742) is a child of the desktop terminal
+  (`systemd → ptyxis → bash → command-code`); its mount and user namespaces are identical
+  to the host's (`mnt:[4026531832]`, `user:[4026531837]`, i.e. no Bubblewrap), and it holds
+  direct TCP/443 connections to public endpoints. A confinement test is impossible without
+  restarting the model as a child of the sandbox entry; a version command, the offline
+  probe, or the already-running process are not proof. Unblock condition: run the model
+  task through `bin/aegl-ai` (offline) or supply the controlled egress/credential broker
+  below.
+- **Trusted-controller identity — BLOCKED (fail-closed code added).** No independent
+  operator identity or broker exists here (single uid 1000; `sudo` requires interactive
+  auth; unprivileged `unshare -Ur` is denied). `bin/aegl-task` now provides
+  `identity status` and an `AEGL_REQUIRE_INDEPENDENT_IDENTITY=1` gate that makes
+  `task promote`/`task discard` refuse unless `AEGL_BROKER_SOCKET` is a socket owned by a
+  **different** uid; a same-uid socket is rejected. Targeted tests T7 pass and the affected
+  self-check is **25/25**. Unblock condition: provide a broker socket owned by a different
+  uid (or an equivalent kernel-enforced boundary). Next command:
+  `AEGL_BROKER_SOCKET=<path> AEGL_REQUIRE_INDEPENDENT_IDENTITY=1 bin/aegl-task identity status`.
+- **Cursor global rules — NOT_DONE (confirmed).** With the pinned RuleSync `25.0.0`,
+  `generate --global --targets cursor --features rules` prints "supports the feature
+  'rules' only in project scope … Skipping" and writes **0** files; the docs table marks
+  Cursor's rules column project-only. No existing instruction file was touched. Minimal
+  operator decisions (pick one): (a) accept Cursor as project-scope only and deploy
+  per-project via the trusted path; (b) drop Cursor from the global target set; (c) leave
+  Cursor `NOT_DONE`.
+
 `AI_BOUNDARY=BLOCKED` remains the only honest overall status. Unblock conditions
 include an operator/AI identity boundary stronger than a same-UID token, a
 controlled cloud network/credential broker if cloud models are required, and a

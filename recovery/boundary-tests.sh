@@ -93,6 +93,15 @@ trusted_task promote "$ID" >/dev/null 2>&1 && grep -q candidate "$TARGET/app.txt
 ID2="$(bash "$TASK" task start "$TARGET" t6-discard 2>&1 | sed -n 's/^TASK_STARTED id=//p')"
 bash "$TASK" task discard "$ID2" >/dev/null 2>&1 && no "T6 no-token discard rejected" || ok "T6 no-token discard rejected"
 trusted_task discard "$ID2" >/dev/null 2>&1 && ok "T6 authenticated discard accepted" || no "T6 authenticated discard accepted"
+# ---- T7: independent operator identity is required and fails closed ----
+bash "$TASK" identity status >/dev/null 2>&1 && no "T7 absent broker rejected" || ok "T7 absent broker rejected"
+SOCK="$T/sameuid.sock"
+python3 -c "import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1])" "$SOCK" 2>/dev/null
+AEGL_BROKER_SOCKET="$SOCK" bash "$TASK" identity status >/dev/null 2>&1 && no "T7 same-uid broker rejected" || ok "T7 same-uid broker rejected"
+ID3="$(bash "$TASK" task start "$TARGET" t7-ident 2>&1 | sed -n 's/^TASK_STARTED id=//p')"
+AEGL_REQUIRE_INDEPENDENT_IDENTITY=1 trusted_task discard "$ID3" >/dev/null 2>&1 && no "T7 require-identity fails closed" || ok "T7 require-identity fails closed"
+trusted_task discard "$ID3" >/dev/null 2>&1
+
 rm -rf "$T" "$AEGL_STATE_HOME"
 echo "BOUNDARY_TESTS passed=$pass failed=$fail"
 exit $(( fail>0 ? 1 : 0 ))

@@ -242,6 +242,38 @@ sys.exit(0 if hmac.compare_digest(a,b) else 1)' "$tf" "$AEGL_CONTROLLER_TOKEN" \
   return 0
 }
 
+# --------------------------------------------------------------------------- #
+# Independent operator identity (fail closed).
+#
+# A same-UID token is NOT an identity boundary. An independent identity requires a
+# broker socket owned by a DIFFERENT uid (or an equivalent kernel-enforced boundary).
+# Set AEGL_BROKER_SOCKET to that socket. `identity status` fails closed when the
+# broker is absent or same-UID. Set AEGL_REQUIRE_INDEPENDENT_IDENTITY=1 to make
+# promotion/discard refuse unless the independent identity is present.
+# --------------------------------------------------------------------------- #
+identity_status() {
+  local sock="${AEGL_BROKER_SOCKET:-}"
+  if [ -z "$sock" ]; then
+    say "INDEPENDENT_IDENTITY=NOT_AVAILABLE (no AEGL_BROKER_SOCKET configured)"
+    say "  condition: a broker socket owned by a different uid (or an equivalent kernel-enforced boundary)"
+    return 1
+  fi
+  [ -S "$sock" ] || { say "INDEPENDENT_IDENTITY=NOT_AVAILABLE ($sock is not a socket)"; return 1; }
+  local owner; owner="$(stat -c '%u' "$sock" 2>/dev/null)"
+  [ -n "$owner" ] || { say "INDEPENDENT_IDENTITY=NOT_AVAILABLE (cannot stat $sock)"; return 1; }
+  if [ "$owner" = "$(id -u)" ]; then
+    say "INDEPENDENT_IDENTITY=NOT_AVAILABLE ($sock is owned by our own uid $owner; a same-uid broker is not independent)"
+    return 1
+  fi
+  say "INDEPENDENT_IDENTITY=AVAILABLE (broker $sock owned by uid $owner)"
+  return 0
+}
+require_identity() {
+  [ "${AEGL_REQUIRE_INDEPENDENT_IDENTITY:-0}" = 1 ] || return 0
+  identity_status >&2 || die "independent operator identity required (AEGL_REQUIRE_INDEPENDENT_IDENTITY=1) but unavailable"
+  return 0
+}
+
 # trusted-controller primitive: run an arbitrary command in the sandbox for a task.
 # It is NOT an AI entry (`bin/aegl-ai` is) and requires token authentication.
 controller_probe() {
@@ -292,6 +324,7 @@ task_promote() {
   local id="${1:?task promote <id>}" td wt proj branch
   controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
+  require_identity
   branch="$(task_field "$td/task.json" branch)"
   [ "$(cat "$td/verify.status" 2>/dev/null)" = "PASS" ] || die "task verify has not PASSed"
   [ -f "$td/verify.manifest" ] || die "no verify manifest (re-run task verify)"
@@ -318,6 +351,7 @@ task_discard() {
   local id="${1:?task discard <id>}" td wt proj branch
   controller_auth || die "task discard authentication failed"
   _verify_paths "$id"
+  require_identity
   branch="$(task_field "$td/task.json" branch)"
   git -C "$proj" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
   git -C "$proj" branch -D "$branch" >/dev/null 2>&1 || true
@@ -339,5 +373,6 @@ case "${1:-}" in
           *) die "usage: task {start|verify|promote|discard}" ;;
         esac ;;
   controller) shift; [ "${1:-}" = probe ] || die "usage: controller probe <id> <cmd>"; shift; controller_probe "$@" ;;
+  identity)   shift; [ "${1:-}" = status ] || die "usage: identity status"; identity_status ;;
   *) sed -n '2,18p' "$0"; exit 2 ;;
 esac
