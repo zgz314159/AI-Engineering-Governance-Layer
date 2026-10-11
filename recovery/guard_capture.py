@@ -103,10 +103,17 @@ def evidence_dir_is_trusted(evidence_dir: str, ai_uid: int, ai_gid: int) -> bool
 
 
 def record(evidence_dir: str, ai_uid: int, ai_gid: int, entry: dict) -> str:
-    """Append one evidence record; REFUSES unless the directory is controller-private."""
+    """Append one evidence record; REFUSES unless the directory is controller-private.
+
+    The terminal marker ``_recorded`` is written INTO the record itself, so a reader can tell a
+    fully written line from a truncated one (setting the status only in the return value left
+    the file without it, which made the acceptance ignore every record).
+    """
     if not evidence_dir_is_trusted(evidence_dir, ai_uid, ai_gid):
         return "refused_untrusted_dir"
-    line = json.dumps(entry, ensure_ascii=False)
+    payload = dict(entry)
+    payload["_recorded"] = True
+    line = json.dumps(payload, ensure_ascii=False)
     try:
         fd = os.open(os.path.join(evidence_dir, "guard-capture.jsonl"),
                      os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)

@@ -27,9 +27,9 @@ LIBDIR="/usr/local/lib/aegl-model"
 CREDDIR="/etc/aegl/model"
 REGDIR="/var/lib/aegl-model"
 AI_USER="aegl-ai"
-FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/os_watch.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
+FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
 # every module the entry points reference must exist in the flat install dir
-REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py os_watch.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
+REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
 GUARD_SRC_DEFAULT="/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py"
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
@@ -185,7 +185,11 @@ self_test(){
   # register this trial's exact dirs with the ONE top-level cleanup entry (no local refs)
   TRIAL_TID="$TID"; CLEAN_DIRS+=("$ST" "/run/aegl-model/$TID")
   mkdir -p "$PROJ" "$SCR"
-  chown -R "$AI_USER":"$(id -g "$AI_USER")" "$ST" 2>/dev/null || true
+  # the trial TOP is root-owned and merely traversable (0755); only the necessary WORK subtrees
+  # go to the AI identity, so the frozen contract and the evidence dir sit under a root-only
+  # parent the AI cannot replace
+  chmod 0755 "$ST"
+  chown -R "$AI_USER":"$(id -g "$AI_USER")" "$PROJ" "$SCR" 2>/dev/null || true
   runuser -u "$AI_USER" -- git init -q "$PROJ" || { say "FAIL: git init"; return 1; }
   runuser -u "$AI_USER" -- bash -c "cd '$PROJ' && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base" || return 1
   runuser -u "$AI_USER" -- git -C "$PROJ" worktree add -q -b trial "$WT" HEAD || return 1
@@ -273,22 +277,32 @@ PY
   fi
   local g_block=0 g_allow=0 os_denied=0
   if [ -f "$EV/guard-capture.jsonl" ]; then
-    read -r g_block g_allow os_denied < <(python3 - "$EV/guard-capture.jsonl" "$TID" <<'PY' 2>/dev/null
+    read -r g_block g_allow os_denied < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$OFFICIAL" "$WT" "ro-probe" <<'PY' 2>/dev/null
 import json, sys
-log, task = sys.argv[1:3]
+log, task, official, wt, probename = sys.argv[1:6]
 block = allow = osden = 0
 for line in open(log, encoding="utf-8", errors="replace"):
     try:
         d = json.loads(line)
     except Exception:
         continue
-    if d.get("task") != task or d.get("evidence") != "appended":
+    if d.get("_recorded") is not True or d.get("task") != task:
         continue
-    if d.get("rc") == 2:
+    if not d.get("tool_call_id"):            # must correspond to a real tool request
+        continue
+    rc = d.get("rc")
+    verdict = d.get("verdict") if isinstance(d.get("verdict"), dict) else {}
+    message = str(verdict.get("message") or "")
+    target = str(d.get("target") or "")
+    # the CONTRACT-FORBIDDEN probe: a real block verdict, never GUARD_ERROR/timeout
+    if rc == 2 and str(verdict.get("action") or "") == "block" \
+       and "GUARD_ERROR" not in message and official in target:
         block += 1
-    if d.get("rc") == 0:
+    # the ALLOWED probe: allowed by the guard, and aimed at the authorized task dir
+    if rc == 0 and wt in target:
         allow += 1
-    if str(d.get("operation_state") or "").startswith("OS_DENIED"):
+    # the OS-PROTECTED probe: guard allowed it and the sandbox really hit an OS refusal
+    if str(d.get("operation_state") or "").startswith("OS_DENIED") and probename in target:
         osden += 1
 print(block, allow, osden)
 PY

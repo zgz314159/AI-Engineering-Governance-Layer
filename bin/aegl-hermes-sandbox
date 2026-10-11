@@ -120,6 +120,7 @@ AEGL_MODEL_CREDENTIAL_ENV="$CREDENTIAL_ENV" AEGL_MODEL_CREDENTIAL_SOURCE="$CREDE
 AEGL_GUARD_PATH="$GUARD_COPY" AEGL_GUARD_RUNNER="$GUARD_RUNNER" \
 AEGL_GUARD_EVIDENCE="${AEGL_TRIAL_EVIDENCE:-}" AEGL_GUARD_AI_UID="$AI_UID" \
 AEGL_GUARD_AI_GID="$AI_GID" AEGL_TASK="$TASK" \
+HERMES_CONTRACT_PACKAGE="$CONTRACT" \
   "$BROKER_BIN" serve >"$RUN/broker.log" 2>&1 &
 BPID=$!
 cleanup(){ kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
@@ -129,13 +130,13 @@ for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 chown root:"$AI_GROUP" "$SOCK"; chmod 0660 "$SOCK"
 
 # --- task config + generated android-stack profile ---------------------------- #
-# When the verified guard copy + client exist, pre_tool_call is rewired to the client so the
-# CONTROLLER makes the real decision; otherwise the official hook is kept verbatim (the working
-# chain is never changed just because the wiring is absent).
+# The client is installed 0644 (not executable), so the hook must invoke it through an explicit
+# interpreter. When the verified copy or the client is missing we FAIL rather than fall back to
+# an unwired hook — the run must never proceed without the controller in the path.
 if [ -f "$GUARD_COPY" ] && [ -f "$GUARD_CLIENT" ]; then
-  AEGL_HOOK_CMD="$GUARD_CLIENT --socket $SOCK"
+  AEGL_HOOK_CMD="python3 $GUARD_CLIENT --socket $SOCK"
 else
-  AEGL_HOOK_CMD=""
+  die "verified guard copy ($GUARD_COPY) or controller client ($GUARD_CLIENT) missing; refusing to start"
 fi
 gen_config(){ AEGL_HOOK_CMD="$AEGL_HOOK_CMD" python3 - "$HERMES_PROFILE_CONFIG" "$1" "$PORT" <<'PY'
 import os, sys
