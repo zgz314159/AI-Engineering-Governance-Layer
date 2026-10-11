@@ -1141,3 +1141,42 @@ The real `aegl-ai` Hermes run is **NOT_RUN** (needs the root-owned launcher). No
 the browser automation and active chain state are unchanged.
 
 Commit: AEGL branch `plan/sandbox-runtime-fix` @ `b4f62d8` (not merged).
+
+## Round update 19: independent-UID launch path
+
+- **UID runtime access.** `/home/zhong` is `0750 zhong:zhong`, so `aegl-ai` cannot traverse it. The
+  launcher now runs `bwrap` as **root** (it may open the declared bind sources) and drops to the AI
+  uid/gid **inside** the namespace (`--unshare-all --uid 994 --gid 972`); only the declared runtime,
+  the guard source and the task dirs are mapped. Host HOME/project permissions are NOT changed — no
+  ACL, no `switch`.
+- **Socket access.** The run dir is root-owned; the broker creates the socket and it is then
+  `root:aegl-broker 0660`, so exactly the AI group may connect while the AI cannot unlink/replace it.
+- **Credential.** The launcher no longer *sources* the user-writable `CREDENTIAL_SOURCE`; the broker
+  parses that file as **DATA** (`--credential-source`; literal `NAME=value` only, no shell), reading
+  the existing `COMMANDCODE_API_KEY` into its memory. No print/copy; no new key.
+- **Trusted task + guard.** Task paths come from a **root-owned registry**
+  (`/var/lib/aegl-model/registry.json`), not the AI-writable `task.json`; the launcher refuses if the
+  guard config has no `hooks:` block.
+- **Installer.** Trusted registry + `--self-test` that runs a REAL trial through
+  `aegl-hermes-sandbox` (aegl-ai + real Command Code/DeepSeek), auto-preparing the task and prompt
+  (no placeholders).
+
+Tests (`recovery/uid-launch-tests.sh`, 1 run this round): **4/4** — the credential file is parsed as
+data (a shell payload in it never executes), the literal key is injected, and the broker refuses
+without a key. Already-passing components were NOT re-verified. Over-budget run counts recorded:
+`model-broker-tests` round 17 = 3 runs, round 18 = 6 runs; `uid-launch-tests` round 19 = 1 run. The
+independent-UID runtime/socket checks need root → NOT_RUN.
+
+```text
+UID_RUNTIME_ACCESS=BLOCKED       (implemented: root-prepared namespace + drop to aegl-ai; execution needs root)
+UID_SOCKET_ACCESS=BLOCKED        (implemented: root-owned dir + root:aegl-broker 0660 socket; execution needs root)
+CREDENTIAL_DATA_ONLY_PARSE=PASS  (4/4; payload never executed)
+TRUSTED_TASK_AND_GUARD=BLOCKED   (root-owned registry + guard-required implemented; not executed)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show ee70e0452f98868b6220d98630acdf3e67562fe7:recovery/install-model-broker.sh | sudo bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit ee70e0452f98868b6220d98630acdf3e67562fe7 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+No sudo was executed; the browser automation and active chain state are unchanged.
+
+Commit: AEGL branch `plan/uid-launch` @ `ee70e04` (not merged).
