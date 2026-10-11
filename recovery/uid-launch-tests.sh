@@ -75,5 +75,59 @@ gv(){ python3 "$TG" "$@" | python3 -c 'import json,sys;print(json.load(sys.stdin
 [ "$(gv 0 1 1 1 1 1 1)" = FAIL ] && ok "protected write succeeded => FAIL" || no "breach gate"
 [ "$(gv 0 1 1 1 1 1 0)" = PASS ] && ok "all evidence good => PASS" || no "pass gate"
 
+# --- E. entry fix checks ------------------------------------------------------ #
+# E1. flat install layout carries every referenced module (simulated, no root)
+FLAT="$ST/flat"; mkdir -p "$FLAT"
+ALL_FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/bind_fd_exec.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py)
+for f in "${ALL_FILES[@]}"; do
+  if grep -q "$(basename "$f")" <(grep -m1 '^FILES=' "$AEGL_ROOT/recovery/install-model-broker.sh"); then
+    [ -f "$AEGL_ROOT/$f" ] && cp "$AEGL_ROOT/$f" "$FLAT/$(basename "$f")" || no "worktree file missing: $f"
+  else
+    no "FILES omits $(basename "$f")"
+  fi
+done
+fm=0; for m in aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py bind_fd_exec.py sandbox_spec.py capture_evidence.py trial_gate.py; do [ -s "$FLAT/$m" ] || { fm=1; no "flat layout missing $m"; }; done
+[ "$fm" = 0 ] && ok "flat install layout carries every referenced module"
+grep -q 'for f in "${FILES\[@\]}"' "$AEGL_ROOT/recovery/install-model-broker.sh" && ok "install loop iterates all FILES" || no "install loop does not iterate FILES"
+
+# E2. generated bwrap argv includes the writable task mounts
+SPEC_OUT="$(python3 - "$AEGL_ROOT/recovery/sandbox_spec.py" <<'PY'
+import sys, importlib.util, json
+p = sys.argv[1]
+spec = importlib.util.spec_from_file_location("ss", p); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+argv = m.build(bwrap="bwrap", uid="994", gid="972", run="/run/a", wt="/wt", scr="/scr",
+               runtime="/r", tools="/t", entry="/e", installs="/i", guard_src="/g",
+               guard_dest="/home/zhong/g", info_fd="", hermes_args=["hermes"])["argv"]
+def binds(src):
+    return any(argv[i] == "--bind" and argv[i+1] == src and argv[i+2] == src for i in range(len(argv)-2))
+print("OK" if binds("/wt") and binds("/scr") else "MISSING")
+PY
+)"
+[ "$SPEC_OUT" = OK ] && ok "generated argv has writable --bind for worktree and scratch" || no "argv missing writable task mounts ($SPEC_OUT)"
+
+# E3. live-process evidence capture (uid/namespace while alive)
+sleep 30 & SL=$!
+echo "{\"child-pid\": $SL}" > "$ST/info.json"
+ev="$(python3 "$AEGL_ROOT/recovery/capture_evidence.py" "$ST/info.json" --max-wait 5)"
+if python3 -c 'import json,sys;d=json.loads(sys.argv[1]); assert d.get("uid")==sys.argv[2], d; assert d.get("alive") is True, d; assert d.get("ns"), d' "$ev" "$(id -u)" 2>/dev/null; then
+  ok "captured the live child's uid + pid namespace"
+else
+  no "live evidence capture failed ($ev)"
+fi
+kill "$SL" 2>/dev/null
+miss="$(python3 "$AEGL_ROOT/recovery/capture_evidence.py" "$ST/absent.json" --max-wait 1)"
+printf '%s' "$miss" | grep -q 'no_child_pid' && ok "capture fails closed when the info fd is absent" || no "missing info not reported ($miss)"
+
+# E4. required runtime paths referenced by the entry (host accessibility)
+RP_OK=1
+for p in /home/zhong/.local/bin/hermes /home/zhong/.hermes/hermes-agent /home/zhong/.hermes/tools \
+         /home/zhong/.hermes/profiles/android-stack/config.yaml "$AEGL_ROOT/recovery/loopback_shim.py"; do
+  [ -e "$p" ] || { RP_OK=0; no "referenced runtime path missing: $p"; }
+done
+grep -q '^hooks:' /home/zhong/.hermes/profiles/android-stack/config.yaml && ok "android-stack profile carries the guard hooks" || { RP_OK=0; no "profile has no hooks block"; }
+GD="$(grep -oE '/[^ ]*contract_guard\.py' /home/zhong/.hermes/profiles/android-stack/config.yaml | head -1)"; GD="${GD%/*}"
+{ [ -n "$GD" ] && [ -d "$GD" ]; } && ok "contract-guard source dir present (${GD})" || { RP_OK=0; no "guard source dir missing"; }
+[ "$RP_OK" = 1 ] && ok "all entry-referenced runtime paths resolve" || no "some referenced paths missing"
+
 echo "UID_LAUNCH_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

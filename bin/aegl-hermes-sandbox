@@ -4,13 +4,11 @@
 #
 #   sudo aegl-hermes-sandbox --task <id> [--info-fd N] -- hermes ...
 #
-# /home/zhong is 0750 zhong:zhong, so the AI uid cannot traverse it. Two-phase mounting:
-# a root helper (recovery/bind_fd_exec.py) OPENS each declared source with a file
-# descriptor and execs bwrap with --ro-bind-fd, so the source is never re-resolved inside
-# the sandbox user namespace. Inside, /home/zhong is a traversable skeleton carrying only
-# the declared runtime + the task config; the real HOME/.hermes are not exposed. Host
-# HOME/project permissions are NOT changed. --info-fd is forwarded to bwrap so a caller
-# can obtain the actual child process for trusted uid/namespace evidence.
+# /home/zhong is 0750 zhong:zhong: the launcher runs as root, opens the declared sources
+# by fd (recovery/bind_fd_exec.py) and execs bwrap with --ro-bind-fd, so the source is
+# never re-resolved as the AI uid. Inside, /home/zhong is a traversable skeleton carrying
+# only the declared runtime, the android-stack profile, the guard source and the task
+# config/project dirs. Host HOME/project permissions are NOT changed.
 set -uo pipefail
 
 BWRAP="/usr/bin/bwrap"
@@ -19,9 +17,11 @@ TRUSTED_TASK_REGISTRY="${AEGL_MODEL_TASK_REGISTRY:-/var/lib/aegl-model/registry.
 CONFIG="${AEGL_MODEL_CONFIG:-/etc/aegl/model/config}"
 LIBDIR="${AEGL_MODEL_LIBDIR:-/usr/local/lib/aegl-model}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+pick(){ [ -f "$LIBDIR/$1" ] && printf '%s' "$LIBDIR/$1" || printf '%s' "$SELF_DIR/../recovery/$1"; }
 BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$SELF_DIR/aegl-model-broker"
-SHIM="$LIBDIR/loopback_shim.py";         [ -f "$SHIM" ] || SHIM="$SELF_DIR/../recovery/loopback_shim.py"
-FD_EXEC="$LIBDIR/bind_fd_exec.py";       [ -f "$FD_EXEC" ] || FD_EXEC="$SELF_DIR/../recovery/bind_fd_exec.py"
+SHIM="$(pick loopback_shim.py)"
+FD_EXEC="$(pick bind_fd_exec.py)"
+SPEC_PY="$(pick sandbox_spec.py)"
 
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
@@ -39,14 +39,26 @@ done
 case "$TASK" in ""|*[!A-Za-z0-9._-]*) die "restricted task_id required" ;; esac
 [ "${#TASK}" -le 64 ] || die "task_id too long"
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
-[ -x "$BWRAP" ] || die "sandbox backend absent"
-[ -f "$FD_EXEC" ] || die "bind_fd_exec.py not found"
+for b in "$BWRAP" "$FD_EXEC" "$SPEC_PY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
 # shellcheck disable=SC1090
 . "$CONFIG"
 for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
   [ -n "${!v:-}" ] || die "trusted config missing $v"
 done
 AI_UID="$(id -u "$AI_USER")"; AI_GID="$(id -g "$AI_USER")"; AI_GROUP="$(id -gn "$AI_USER")"
+
+# --- required runtime paths, checked BEFORE any host change ------------------- #
+[ -x "$HERMES_ENTRY" ] || die "Hermes entry not executable: $HERMES_ENTRY"
+[ -d "$HERMES_RUNTIME" ] || die "Hermes runtime missing: $HERMES_RUNTIME"
+[ -d "$HERMES_TOOLS" ] || die "Hermes Python toolchain missing: $HERMES_TOOLS"
+[ -f "$HERMES_PROFILE_CONFIG" ] || die "guard/profile config missing: $HERMES_PROFILE_CONFIG"
+grep -q '^hooks:' "$HERMES_PROFILE_CONFIG" || die "profile has no hooks block; refusing (no guard)"
+PYBIN="$(head -1 "$HERMES_RUNTIME/.hermes/bin/hermes" 2>/dev/null | sed 's/^#!//')"
+GUARD_SRC="$(grep -oE '/[^ ]*contract_guard\.py' "$HERMES_PROFILE_CONFIG" | head -1)"; GUARD_SRC="${GUARD_SRC%/*}"
+[ -n "$GUARD_SRC" ] && [ -d "$GUARD_SRC" ] || die "contract-guard source dir not found (from the hooks)"
+GUARD_DEST="$GUARD_SRC"
+[ -n "${HERMES_CONTRACT_PACKAGE:-}" ] || die "HERMES_CONTRACT_PACKAGE is required (guard config); refusing otherwise"
+[ -f "$HERMES_CONTRACT_PACKAGE/implementation-contract.json" ] || die "contract package incomplete: $HERMES_CONTRACT_PACKAGE"
 
 # --- trusted task registry (root-owned; NOT the AI-writable task.json) -------- #
 [ -f "$TRUSTED_TASK_REGISTRY" ] || die "trusted task registry not found: $TRUSTED_TASK_REGISTRY"
@@ -58,22 +70,21 @@ print(e.get("worktree", ""), e.get("scratch", ""), e.get("project", ""))
 PY
 )
 [ -n "$WT" ] && [ -n "$SCR_R" ] || die "task not in the trusted registry: $TASK"
-WT_R="$(realpath -e "$WT")" || die "worktree missing"
-SCR_R="$(realpath -e "$SCR_R")" || die "scratch missing"
+WT_R="$(realpath -e "$WT")" || die "worktree missing"; SCR_R="$(realpath -e "$SCR_R")" || die "scratch missing"
 for p in "$WT_R" "$SCR_R"; do
   case "$p" in /tmp/*|/var/tmp/*|/run/aegl-*/*|/var/lib/aegl-*/*) : ;; *) die "task path outside the allowed bases: $p" ;; esac
 done
 [ "$(stat -c '%U' "$WT_R")" = "$AI_USER" ] || die "worktree not owned by $AI_USER"
 
-# --- run dir (root-owned) + traversable /home/zhong skeleton ------------------ #
+# --- run dir + traversable /home/zhong skeleton ------------------------------- #
 RUN="/run/aegl-model/$TASK"; rm -rf "$RUN"
-mkdir -p "$RUN/broker" "$RUN/home" \
-         "$RUN/stage/home-zhong/.hermes" "$RUN/stage/home-zhong/.local/bin" "$RUN/stage/run-aegl"
+SK="$RUN/stage/home-zhong"
+mkdir -p "$RUN/broker" "$RUN/home" "$SK/.hermes/profiles/android-stack" "$SK/.local/bin" "$RUN/stage/run-aegl"
+mkdir -p "$SK$(dirname "${GUARD_DEST#/home/zhong}")"   # parent chain for the guard source
 chown root:"$AI_GROUP" "$RUN"; chmod 0755 "$RUN"
 chown root:"$AI_GROUP" "$RUN/broker"; chmod 0750 "$RUN/broker"
 chown "$AI_USER":"$AI_GROUP" "$RUN/home"; chmod 0750 "$RUN/home"
 chown -R root:root "$RUN/stage"; chmod -R a+rX,o-w "$RUN/stage"
-chmod 0755 "$RUN/stage/home-zhong/.hermes" "$RUN/stage/home-zhong/.local/bin" "$RUN/stage/run-aegl"
 SOCK="$RUN/broker/model.sock"; PORT=8877
 
 # --- trusted broker: credential read as DATA from its ORIGINAL location ------- #
@@ -86,10 +97,8 @@ for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || die "model broker did not start (see $RUN/broker.log)"
 chown root:"$AI_GROUP" "$SOCK"; chmod 0660 "$SOCK"
 
-# --- task HERMES_HOME config: model endpoint + the ORIGINAL hooks (guard) ----- #
-[ -f "$HERMES_PROFILE_CONFIG" ] || die "guard source config missing: $HERMES_PROFILE_CONFIG"
-grep -q '^hooks:' "$HERMES_PROFILE_CONFIG" || die "guard config has no hooks block; refusing (no guard)"
-python3 - "$HERMES_PROFILE_CONFIG" "$RUN/stage/home-zhong/.hermes/config.yaml" "$PORT" <<'PY' || die "config build failed"
+# --- task config + generated android-stack profile (hooks preserved) ---------- #
+gen_config(){ python3 - "$HERMES_PROFILE_CONFIG" "$1" "$PORT" <<'PY'
 import sys
 src, dst, port = sys.argv[1], sys.argv[2], sys.argv[3]
 keep, on = [], False
@@ -106,11 +115,14 @@ with open(dst, "w", encoding="utf-8") as fh:
              "  api_key: aegl-sandbox-dummy\n  default: deepseek/deepseek-v4.1-flash\n" % port)
     fh.write("\n".join(keep).rstrip() + "\n")
 PY
+}
+gen_config "$SK/.hermes/config.yaml" || die "config build failed"
+cp "$SK/.hermes/config.yaml" "$SK/.hermes/profiles/android-stack/config.yaml"
 : > "$RUN/stage/empty"; chmod 0644 "$RUN/stage/empty"
 chown -R root:"$AI_GROUP" "$RUN/stage"; chmod -R g+rX,o-rwx "$RUN/stage"
-chmod 0755 "$RUN/stage/home-zhong" "$RUN/stage/home-zhong/.hermes" "$RUN/stage/home-zhong/.local/bin" "$RUN/stage/run-aegl"
+chmod 0755 "$SK" "$SK/.hermes" "$SK/.hermes/profiles" "$SK/.hermes/profiles/android-stack" "$SK/.local/bin" "$RUN/stage/run-aegl" "$SK$(dirname "${GUARD_DEST#/home/zhong}")"
 
-# --- in-sandbox runner: start the shim, then exec the command ----------------- #
+# --- in-sandbox runner -------------------------------------------------------- #
 cat > "$RUN/sandbox-run.sh" <<EOF
 #!/bin/bash
 python3 '$SHIM' --listen 127.0.0.1:$PORT --unix '$SOCK' >/dev/null 2>&1 &
@@ -121,37 +133,13 @@ exit \$rc
 EOF
 chmod 0755 "$RUN/sandbox-run.sh"
 
-# --- two-phase bwrap: root opens /home/zhong sources by fd, then drops -------- #
+# --- two-phase bwrap spec + exec ---------------------------------------------- #
 say "AEGL_HERMES_SANDBOX task=$TASK ai_uid=$AI_UID sandbox=on (two-phase fd mounts)"
 SPEC="$RUN/spec.json"
-python3 - "$SPEC" "$BWRAP" "$AI_UID" "$AI_GID" "$RUN" "$WT_R" "$SCR_R" "$INFO_FD" \
-  "$HERMES_RUNTIME" "$HERMES_TOOLS" "$HERMES_ENTRY" "$HERMES_INSTALLS" "${HERMES_ARGS[@]}" <<'PY'
-import json, sys
-out, bwrap, uid, gid, run, wt, scr, info_fd = sys.argv[1:9]
-runtime, tools, entry, installs = sys.argv[9:13]
-hermes = sys.argv[13:]
-argv = [bwrap, "--unshare-all", "--uid", uid, "--gid", gid, "--dev", "/dev", "--proc", "/proc",
-        "--ro-bind", "/", "/",
-        "--ro-bind", run + "/stage/home-zhong", "/home/zhong",
-        {"bind_fd": "runtime", "dest": "/home/zhong/.hermes/hermes-agent"},
-        {"bind_fd": "tools", "dest": "/home/zhong/.hermes/tools"},
-        {"bind_fd": "entry", "dest": "/home/zhong/.local/bin/hermes"},
-        "--ro-bind", run + "/stage/run-aegl", "/run/aegl-run",
-        {"bind_fd": "installs", "dest": "/run/aegl-run/installs-ro"},
-        "--overlay-src", "/run/aegl-run/installs-ro", "--tmp-overlay", "/home/zhong/.hermes/installs",
-        "--ro-bind", run + "/stage/home-zhong/.hermes/config.yaml", "/home/zhong/.hermes/config.yaml",
-        "--tmpfs", "/home/zhong/.hermes/profiles", "--tmpfs", "/home/zhong/.hermes/sessions",
-        "--ro-bind", run + "/stage/empty", "/home/zhong/.hermes/.env",
-        "--bind", run + "/home", run + "/home",
-        "--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin",
-        "--setenv", "HOME", run + "/home", "--setenv", "HERMES_HOME", "/home/zhong/.hermes",
-        "--setenv", "TMPDIR", scr, "--setenv", "AEGL_AI_SANDBOX", "1"]
-if info_fd:
-    argv += ["--info-fd", info_fd]
-argv += ["--die-with-parent", "--chdir", wt, "bash", run + "/sandbox-run.sh"] + list(hermes)
-json.dump({"fds": {"runtime": runtime, "tools": tools, "entry": entry, "installs": installs},
-           "info_fd": info_fd, "argv": argv}, open(out, "w", encoding="utf-8"))
-PY
+python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
+  --wt "$WT_R" --scr "$SCR_R" --runtime "$HERMES_RUNTIME" --tools "$HERMES_TOOLS" \
+  --entry "$HERMES_ENTRY" --installs "$HERMES_INSTALLS" --guard-src "$GUARD_SRC" \
+  --guard-dest "$GUARD_DEST" ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 python3 "$FD_EXEC" < "$SPEC"
 rc=$?
 kill "$BPID" 2>/dev/null
