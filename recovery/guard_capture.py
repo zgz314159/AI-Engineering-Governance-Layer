@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """Trusted CONTROLLER-side capture of the real pre_tool_call guard verdict.
 
-The controller runs the GUARD ITSELF as a subprocess (typically as the unprivileged sandbox
-identity via setpriv), feeds it the hook payload on stdin, and takes the guard's RAW stdout
-and exit code. Nothing here trusts anything the AI could write:
+The controller runs the GUARD ITSELF as a subprocess under a FIXED unprivileged runner,
+feeds it the hook payload on stdin, and takes the guard's RAW stdout and exit code. It never
+trusts anything the AI could write, and root never imports or in-lines user-writable code.
 
-  * the verdict does not come from an AI-writable log, a same-UID socket notification, or a
-    client self-report — it is the guard process's own stdout + return code;
-  * root never imports or in-lines user-writable project code: the guard is executed as
-    data by a subprocess, and the caller supplies the restricted runner;
-  * the evidence directory is controller-held — if it (or its parent) is writable by the
-    sandbox identity, recording is REFUSED rather than silently trusted;
-  * on any failure to run the guard, the result is an explicit failure the caller MUST turn
-    into a BLOCK (fail closed) — never a silent skip.
+Fail-closed rules enforced here:
+  * NO runner (or an unparseable runner spec) => refuse to run at all. Never fall back to
+    running the guard with the broker's identity/credentials.
+  * the guard runs with a minimal environment allowlist — it does not inherit the broker's
+    credentials or its full environment.
+  * if the evidence directory is not controller-private (or recording fails) the caller gets
+    an explicit error and MUST block; it never returns an acceptable ALLOW.
 
 CLI:
-    guard_capture.py evaluate --guard PATH [--runner CMD ...] [--timeout N] \
-        [--evidence-dir DIR --task ID --tool-call-id C --operation OP --target TGT] < payload
+    guard_capture.py evaluate --guard PATH --runner ARG [--runner ARG ...] \
+        [--evidence-dir DIR --ai-uid N --ai-gid N --task ID --operation OP --target TGT] < payload
 """
 
 from __future__ import annotations
@@ -28,22 +27,44 @@ import subprocess
 import sys
 import time
 
-BLOCK_RC = 2
+# the guard needs the frozen contract path; nothing else is inherited
+ENV_ALLOWLIST = ("HERMES_CONTRACT_PACKAGE",)
+
+
+def tool_call_id(payload: dict) -> str:
+    """Read the real tool-call id from the Hermes hook payload (top level or inside ``extra``)."""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("tool_call_id", "call_id", "tool_use_id"):
+        if payload.get(key):
+            return str(payload[key])
+    extra = payload.get("extra")
+    if isinstance(extra, dict):
+        for key in ("tool_call_id", "call_id", "tool_use_id", "id"):
+            if extra.get(key):
+                return str(extra[key])
+    return ""
 
 
 def run_guard(guard: str, payload: dict, runner=(), timeout: float = 20.0) -> dict:
-    """Run the guard and return its RAW return code and stdout. Never raises."""
-    # a restricted runner (e.g. setpriv ... --) execs the interpreter + guard directly
+    """Run the guard under the fixed runner and return its RAW return code and stdout."""
+    if not runner:
+        return {"rc": None, "stdout": "", "verdict": None, "error": "no_runner_configured"}
+    env = {"PATH": "/usr/bin:/bin"}
+    for key in ENV_ALLOWLIST:
+        if key in os.environ:
+            env[key] = os.environ[key]
     cmd = [*runner, sys.executable, guard]
     try:
         proc = subprocess.run(cmd, input=json.dumps(payload).encode("utf-8"),
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout,
+                              env=env)
     except subprocess.TimeoutExpired:
-        return {"rc": None, "stdout": "", "error": "guard_timeout"}
+        return {"rc": None, "stdout": "", "verdict": None, "error": "guard_timeout"}
     except OSError as exc:
-        return {"rc": None, "stdout": "", "error": "guard_exec_failed:%s" % type(exc).__name__}
+        return {"rc": None, "stdout": "", "verdict": None,
+                "error": "guard_exec_failed:%s" % type(exc).__name__}
     out = proc.stdout.decode("utf-8", "replace")
-    verdict = None
     try:
         verdict = json.loads(out) if out.strip() else None
     except ValueError:
@@ -51,8 +72,19 @@ def run_guard(guard: str, payload: dict, runner=(), timeout: float = 20.0) -> di
     return {"rc": proc.returncode, "stdout": out, "verdict": verdict, "error": None}
 
 
-def evidence_dir_is_trusted(evidence_dir: str, ai_uid: int) -> bool:
-    """True only when the evidence dir and its parent chain are not writable by the AI uid."""
+def _unsafe(mode: int, uid: int, gid: int, ai_uid: int, ai_gid: int) -> bool:
+    """True when the AI identity could add/replace/remove entries in this directory."""
+    if uid == ai_uid:
+        return True                                   # owned by the AI
+    if (mode & 0o020) and gid == ai_gid:
+        return True                                   # group-writable by the AI's group
+    if mode & 0o002:                                  # other-writable
+        return not (mode & 0o1000)                    # only a sticky dir resists replacement
+    return False
+
+
+def evidence_dir_is_trusted(evidence_dir: str, ai_uid: int, ai_gid: int) -> bool:
+    """The evidence dir AND its whole ancestor chain must be safe from the AI identity."""
     path = os.path.abspath(evidence_dir)
     if not os.path.isdir(path):
         return False
@@ -62,11 +94,7 @@ def evidence_dir_is_trusted(evidence_dir: str, ai_uid: int) -> bool:
             st = os.stat(current)
         except OSError:
             return False
-        mode = st.st_mode
-        if st.st_uid == ai_uid:
-            return False
-        write_bits = 0o222
-        if mode & write_bits and (st.st_uid == ai_uid or st.st_gid == ai_uid):
+        if _unsafe(st.st_mode, st.st_uid, st.st_gid, ai_uid, ai_gid):
             return False
         parent = os.path.dirname(current)
         if parent == current:
@@ -74,13 +102,15 @@ def evidence_dir_is_trusted(evidence_dir: str, ai_uid: int) -> bool:
         current = parent
 
 
-def record(evidence_dir: str, ai_uid: int, entry: dict) -> str:
-    """Append one evidence record; REFUSES when the directory is not controller-held."""
-    if not evidence_dir_is_trusted(evidence_dir, ai_uid):
+def record(evidence_dir: str, ai_uid: int, ai_gid: int, entry: dict) -> str:
+    """Append one evidence record; REFUSES unless the directory is controller-private."""
+    if not evidence_dir_is_trusted(evidence_dir, ai_uid, ai_gid):
         return "refused_untrusted_dir"
     line = json.dumps(entry, ensure_ascii=False)
     try:
-        with open(os.path.join(evidence_dir, "guard-capture.jsonl"), "a", encoding="utf-8") as fh:
+        fd = os.open(os.path.join(evidence_dir, "guard-capture.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
         return "refused_unwritable"
@@ -95,8 +125,8 @@ def main(argv):
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--evidence-dir", default="")
     ap.add_argument("--ai-uid", type=int, default=-1)
+    ap.add_argument("--ai-gid", type=int, default=-1)
     ap.add_argument("--task", default="")
-    ap.add_argument("--tool-call-id", default="")
     ap.add_argument("--operation", default="")
     ap.add_argument("--target", default="")
     args = ap.parse_args(argv)
@@ -111,17 +141,20 @@ def main(argv):
 
     result = run_guard(args.guard, payload, runner=args.runner, timeout=args.timeout)
     result["task"] = args.task
-    result["tool_call_id"] = args.tool_call_id or str(payload.get("tool_call_id") or "")
+    result["tool_call_id"] = tool_call_id(payload)
     result["operation"] = args.operation or str(payload.get("tool_name") or "")
     result["target"] = args.target
     result["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     if args.evidence_dir:
-        ai_uid = args.ai_uid if args.ai_uid >= 0 else os.getuid()
-        result["evidence"] = record(args.evidence_dir, ai_uid, result)
+        status = record(args.evidence_dir, args.ai_uid, args.ai_gid, result)
+        result["evidence"] = status
+        if status != "appended":
+            # an unrecorded verdict is not acceptable evidence -> fail closed
+            result["error"] = "evidence_not_recorded:%s" % status
+            result["rc"] = None
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
-    # the CALLER decides the block; this exit only signals a capture-layer failure
     return 0 if result.get("error") is None else 3
 
 

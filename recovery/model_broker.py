@@ -121,23 +121,32 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
         payload = {}
     guard = os.environ.get("AEGL_GUARD_PATH") or ""
     try:
-        runner = json.loads(os.environ.get("AEGL_GUARD_RUNNER") or "[]")
+        runner = json.loads(os.environ.get("AEGL_GUARD_RUNNER") or "")
     except ValueError:
         runner = []
-    if guard:  # the guard is run by the CONTROLLER, as the restricted identity
+    if not guard or not isinstance(runner, list) or not runner:
+        # no verified guard copy or no fixed unprivileged runner -> FAIL CLOSED
+        result = {"rc": None, "stdout": "", "verdict": None,
+                  "error": "no_guard_configured" if not guard else "no_runner_configured"}
+    else:
         result = guard_capture.run_guard(guard, payload, runner=runner)
-    else:      # no guard configured -> fail closed, never silently allow
-        result = {"rc": None, "stdout": "", "verdict": None, "error": "no_guard_configured"}
     result["task"] = os.environ.get("AEGL_TASK", "")
-    result["tool_call_id"] = str(payload.get("tool_call_id") or "")
+    result["tool_call_id"] = guard_capture.tool_call_id(payload)   # top level OR extra
     result["operation"] = str(payload.get("tool_name") or "")
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    result["target"] = str(tool_input.get("path") or tool_input.get("command") or "")[:200]
     evidence = os.environ.get("AEGL_GUARD_EVIDENCE") or ""
     if evidence:
         try:
             ai_uid = int(os.environ.get("AEGL_GUARD_AI_UID") or "-1")
+            ai_gid = int(os.environ.get("AEGL_GUARD_AI_GID") or "-1")
         except ValueError:
-            ai_uid = -1
-        result["evidence"] = guard_capture.record(evidence, ai_uid, result)
+            ai_uid = ai_gid = -1
+        status = guard_capture.record(evidence, ai_uid, ai_gid, result)
+        result["evidence"] = status
+        if status != "appended":
+            result["error"] = "evidence_not_recorded:%s" % status
+            result["rc"] = None        # an unrecorded verdict must never allow the tool
     out = json.dumps(result, ensure_ascii=False).encode("utf-8")
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
 

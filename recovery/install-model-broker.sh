@@ -12,10 +12,12 @@
 # project permissions, merge anything, or write /etc/aegl/broker-verified.
 set -uo pipefail
 REPO=""; COMMIT=""; SELF_TEST=0; CHECK_LAYOUT=0
+GUARD_SRC="/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
     --commit) COMMIT="${2:-}"; shift 2 ;;
+    --guard-src) GUARD_SRC="${2:-}"; shift 2 ;;
     --self-test) SELF_TEST=1; shift ;;
     --check-layout) CHECK_LAYOUT=1; shift ;;
     *) printf 'INSTALL_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
@@ -25,9 +27,10 @@ LIBDIR="/usr/local/lib/aegl-model"
 CREDDIR="/etc/aegl/model"
 REGDIR="/var/lib/aegl-model"
 AI_USER="aegl-ai"
-FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
+FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/os_watch.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py)
 # every module the entry points reference must exist in the flat install dir
-REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
+REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py os_watch.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
+GUARD_SRC_DEFAULT="/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/evaluation_adapter/contract_guard.py"
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
 sha_of(){ sha256sum | awk '{print $1}'; }
@@ -97,6 +100,17 @@ for f in "${FILES[@]}"; do
   install -o root -g root -m "$mode" "$STAGE/$base" "$LIBDIR/$base" || fail "install $f"
 done
 for m in "${REFERENCED[@]}"; do [ -f "$LIBDIR/$m" ] || fail "referenced module missing after install: $m"; done
+
+# --- verified READ-ONLY guard copy: declared source + pinned hash ----------------------- #
+# The guard's home stays its own project; the controller runs THIS verified copy, never the
+# user-writable project file directly (root must not import/execute user-writable code).
+[ -f "$GUARD_SRC" ] || fail "guard source not found: $GUARD_SRC"
+install -d -o root -g root -m 0755 "$LIBDIR/guard" || fail "mkdir $LIBDIR/guard"
+install -o root -g root -m 0444 "$GUARD_SRC" "$LIBDIR/guard/contract_guard.py" || fail "guard copy install failed"
+GUARD_SHA="$(sha_of < "$LIBDIR/guard/contract_guard.py")"
+{ printf '# source=%s\n' "$GUARD_SRC"; printf '# pinned=%s\n' "$COMMIT"; printf '%s  contract_guard.py\n' "$GUARD_SHA"; } > "$LIBDIR/guard/guard-manifest.sha256"
+chmod 0444 "$LIBDIR/guard/guard-manifest.sha256"
+say "  verified guard copy: $LIBDIR/guard/contract_guard.py sha256=$GUARD_SHA"
 install -d -o root -g root -m 0750 "$CREDDIR" || fail "mkdir $CREDDIR"
 
 # trusted config (root-owned): fixes the upstream, the credential source, and the runtime.
@@ -219,6 +233,10 @@ PY
 
   local host_ns; host_ns="$(readlink /proc/self/ns/pid)"
   local INFO="$ST/info.json"
+  # controller-private evidence dir: root 0700 under the root 0700 trial dir (AI-writable = refused)
+  local EV="$ST/evidence"; mkdir -p "$EV"; chmod 700 "$EV"
+  export AEGL_TRIAL_EVIDENCE="$EV"
+  export AEGL_TRIAL_GUARD_COPY="${LIBDIR_INSTALLED:-/usr/local/lib/aegl-model}/guard/contract_guard.py"
   exec {infofd}>"$INFO"
   say "  launching the real entry (task $TID) ..."
   "$LIBDIR/aegl-hermes-sandbox" --task "$TID" --info-fd "$infofd" -- hermes -p android-stack chat --oneshot --query-file "$WT/PROMPT.md" &
@@ -245,23 +263,45 @@ PY
   { [ -n "$cpns" ] && [ "$cpns" != "$host_ns" ] && [ "$alive" = "True" ]; } && nsok=1
   [ -f "$WT/FACTS.txt" ] && grep -q 'W[123]_' "$WT/FACTS.txt" && wa=1
 
-  # Evidence with NO trusted source this round. The guard's decision log lives inside the
-  # sandbox and is AI-writable, so copying it proves nothing; a sandbox-external runuser probe
-  # is only an independent component check and a non-zero exit is NOT proof of a permission
-  # denial. Both stay NOT_PROVEN; nothing is asserted to be connected that is not.
+  # TRUSTED controller evidence (NOT AI-writable): the controller ran the guard itself and
+  # recorded its RAW rc, and the in-sandbox OS probe recorded the specific errno. Nothing here
+  # comes from a model FACTS file, a client-supplied log or an out-of-sandbox probe.
   local model_run=0 guard_state="NOT_PROVEN" os_state="NOT_PROVEN" toolproc_state="NOT_PROVEN"
   { [ "$rp" = 1 ] && [ "$alive" = "True" ]; } && model_run=1
-  # an EMPTY child list is not verification: identity of tool subprocesses stays NOT_PROVEN
   if [ -n "$cuids" ] && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; then
     toolproc_state="PROVEN_UID"
   fi
+  local g_block=0 g_allow=0 os_denied=0
+  if [ -f "$EV/guard-capture.jsonl" ]; then
+    read -r g_block g_allow os_denied < <(python3 - "$EV/guard-capture.jsonl" "$TID" <<'PY' 2>/dev/null
+import json, sys
+log, task = sys.argv[1:3]
+block = allow = osden = 0
+for line in open(log, encoding="utf-8", errors="replace"):
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("task") != task or d.get("evidence") != "appended":
+        continue
+    if d.get("rc") == 2:
+        block += 1
+    if d.get("rc") == 0:
+        allow += 1
+    if str(d.get("operation_state") or "").startswith("OS_DENIED"):
+        osden += 1
+print(block, allow, osden)
+PY
+)
+  fi
+  [ "${g_block:-0}" -ge 1 ] && [ "${g_allow:-0}" -ge 1 ] && guard_state="PASS"
+  [ "${os_denied:-0}" -ge 1 ] && os_state="PASS"
   { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
   say "  model_run=$model_run (live Hermes pid + byte-exact RESULT.txt vs INPUT.txt)"
-  say "  guard_rejection=$guard_state os_rejection=$os_state (no TRUSTED source this round)"
+  say "  guard_rejection=$guard_state os_rejection=$os_state (controller-captured block=$g_block allow=$g_allow os_denied=$os_denied)"
   say "  tool_subprocesses=$toolproc_state (an empty child list is NOT identity verification)"
-  say "  GAP: trusted hook/tool-execution evidence must come from the controller, tied to THIS"
-  say "       task/operation; an AI-writable log or an out-of-sandbox probe cannot establish it"
   say "  trusted evidence: launch_rc=$rc hermes_uid=${cpuid:-none} children_uids=${cuids:-none} hermes_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
+  say "  controller evidence: $EV/guard-capture.jsonl"
   local verdict grc
   verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
   say "  TRIAL_GATE $verdict"
