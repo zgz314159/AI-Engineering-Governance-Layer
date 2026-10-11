@@ -1570,18 +1570,32 @@ private-mount-prep → host drop → bwrap chain is preserved. No new broker or 
 FILES list is unchanged (no module added/removed), so no manifest change was needed; hashes are
 still derived from the pinned commit at install time.
 
-Focused check (`recovery/entry-state-tests.sh`, this round: **1 run**, first pass): **13/13** — real
-argv plus a verbatim-metadata / path-resolution fixture. The fixture is **not** aegl-ai host
-acceptance.
+Focused check (`recovery/entry-state-tests.sh`, this round: **2 runs** — the first pass found the
+`pm-runtime` gap by reading `hermes_cli/venv_sync.py`, the re-verify after the fix): **16/16**.
+
+Refinement after reading the four mechanism files: `pm-runtime/` is **mutable** (`.prepare.lock`,
+`selected.json`, `generations/`) — like `inputs/` and `bootstrap/`. Only the heavy venv
+(`environments/`) is reused read-only by sub-bind; `facts.json`, `declined-packages.json`,
+`inputs/`, `bootstrap/` and `pm-runtime/` are copied **verbatim** (`cp -a`, mtimes/perms preserved)
+into the writable view, so **every** lock/lease/selection path works rather than failing one step
+later. The fixture is **not** aegl-ai host acceptance.
 
 ```text
 HOST_UID_DROP=PASS (real output: uid=994 gid=972, Caps=0, NoNewPrivs=1, groups=[])
 HERMES_STARTUP=BLOCKED (install state permission — addressed this round; re-verify pending the next real run)
 MODEL_CALL=NOT_RUN
 AI_BOUNDARY=BLOCKED
-FOCUSED_CHECK=13/13 (1 run)
+FOCUSED_CHECK=16/16 (2 runs)
 REAL_AEGL_AI_HERMES=NOT_RUN
-TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 7da132d8c42d03141e4bcd0ca78901062c35737d:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 7da132d8c42d03141e4bcd0ca78901062c35737d --self-test
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 14dad10c9d7ba87a56f6b0973e774ed968b66e00:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 14dad10c9d7ba87a56f6b0973e774ed968b66e00 --self-test
 ```
 
-Commit: AEGL branch `plan/install-state` @ `7da132d` (not merged).
+Commit: AEGL branch `plan/install-state2` @ `14dad10` (implementation; not merged). Prior commits on
+`plan/install-state` (`7da132d`) are kept as history.
+
+## Round update 29 (original note)
+
+Round 28's chain worked up to the handoff — the real output was
+`DROP_HANDOFF uid=994 gid=972, all caps zero, nnp=1, groups=[]` — and then Hermes failed with
+`hermes: install state is not writable by this user (<HERMES_HOME>/installs/<key>/.recovery.lock)`.
+The read-only overlay could not be written (overlayfs keeps the lower dir's owner, zhong).
