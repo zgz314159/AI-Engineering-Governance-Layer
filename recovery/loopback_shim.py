@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """In-sandbox loopback shim: 127.0.0.1:PORT → a bound Unix socket.
 
-The sandbox has no network (`--unshare-all`), so a model client that only speaks
-`http://127.0.0.1:PORT/v1` is served by this shim, which forwards to the Unix socket the
-trusted model broker is bound to. It holds no credential and opens no external
-connection. stdlib only.
+This is the ONLY path by which a sandboxed Hermes reaches the model broker: the sandbox
+has no external network, so an http client pointed at ``http://127.0.0.1:PORT/v1`` is
+served here, and this forwards the byte stream to the Unix socket the trusted broker is
+bound to. It holds no credential and opens no external connection.
+
+It handles both directions, propagates EOF / half-close (so a client that reads until EOF
+terminates), and bounds idle time. stdlib only.
 
     loopback_shim.py --listen 127.0.0.1:8877 --unix /run/aegl-model/model.sock
 """
@@ -17,12 +20,14 @@ import socket
 import sys
 import threading
 
+IDLE_TIMEOUT = 30.0
 
-def _pump(src: socket.socket, dst: socket.socket) -> None:
-    """Forward one direction only: read from ``src``, write to ``dst``."""
+
+def _pump(src: socket.socket, dst: socket.socket, done: threading.Event) -> None:
+    """Forward src→dst until EOF/timeout, then half-close dst and signal ``done``."""
     try:
-        while True:
-            r, _, _ = select.select([src], [], [], 60)
+        while not done.is_set():
+            r, _, _ = select.select([src], [], [], IDLE_TIMEOUT)
             if not r:
                 break
             data = src.recv(65536)
@@ -31,6 +36,12 @@ def _pump(src: socket.socket, dst: socket.socket) -> None:
             dst.sendall(data)
     except OSError:
         pass
+    finally:
+        done.set()
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
 
 
 def _handle(client: socket.socket, unix_path: str) -> None:
@@ -38,13 +49,23 @@ def _handle(client: socket.socket, unix_path: str) -> None:
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         upstream.connect(unix_path)
     except OSError:
-        client.close()
+        try:
+            client.close()
+        except OSError:
+            pass
         return
-    t = threading.Thread(target=_pump, args=(upstream, client), daemon=True)
-    t.start()
-    _pump(client, upstream)
-    upstream.close()
-    client.close()
+    done = threading.Event()
+    thread = threading.Thread(target=_pump, args=(upstream, client, done), daemon=True)
+    thread.start()
+    try:
+        _pump(client, upstream, done)
+        thread.join(2.0)
+    finally:
+        for sock in (client, upstream):
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def main(argv):

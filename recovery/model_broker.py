@@ -28,14 +28,20 @@ DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_PREFIX = "Bearer "
 
 
-def _load_credential(path: str) -> str:
-    if not path or not os.path.isfile(path):
-        raise SystemExit("model broker: credential file required: %s" % path)
-    with open(path, "r", encoding="utf-8") as handle:
-        value = handle.read().strip()
-    if not value:
-        raise SystemExit("model broker: credential file is empty")
-    return value
+def _load_credential(env_name: str, path: str) -> str:
+    """Read the credential from the EXISTING env var, else an explicit file.
+
+    Never printed, never written to the trial directory. The trusted component reads it
+    at its original location only.
+    """
+    if env_name and os.environ.get(env_name, "").strip():
+        return os.environ[env_name].strip()
+    if path and os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            value = handle.read().strip()
+        if value:
+            return value
+    raise SystemExit("model broker: no credential (set %s or pass --credential-file)" % env_name)
 
 
 def _read_headers(conn: socket.socket) -> tuple:
@@ -76,7 +82,12 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         body = body[:need]
 
     url = urllib.parse.urlsplit(upstream)
-    target = (url.path.rstrip("/") + path) if url.path else path
+    base_path = url.path.rstrip("/")
+    # join without duplicating a shared prefix (avoid e.g. /v1/v1/...)
+    if base_path and (path == base_path or path.startswith(base_path + "/")):
+        target = path
+    else:
+        target = (base_path + path) if base_path else path
     if url.scheme == "https":
         ctx = ssl.create_default_context()
         up = http.client.HTTPSConnection(url.hostname, url.port or 443, context=ctx, timeout=120)
@@ -146,10 +157,11 @@ def main(argv):
     p = sub.add_parser("serve")
     p.add_argument("--socket", required=True)
     p.add_argument("--upstream", required=True)
-    p.add_argument("--credential-file", required=True)
+    p.add_argument("--credential-file", default="")
+    p.add_argument("--credential-env", default="COMMANDCODE_API_KEY")
     p.add_argument("--auth-header", default=DEFAULT_AUTH_HEADER)
     args = parser.parse_args(argv)
-    credential = _load_credential(args.credential_file)
+    credential = _load_credential(args.credential_env, args.credential_file)
     if args.auth_header.lower() == "authorization":
         credential = credential if credential.lower().startswith(("bearer ", "token ")) else DEFAULT_AUTH_PREFIX + credential
     return serve(args.socket, args.upstream, credential, args.auth_header)

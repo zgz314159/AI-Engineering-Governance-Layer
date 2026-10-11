@@ -15,11 +15,11 @@ case "${1:-}" in
   serve)
     : "${AEGL_MODEL_SOCKET:?AEGL_MODEL_SOCKET must be set}"
     : "${AEGL_MODEL_UPSTREAM:?AEGL_MODEL_UPSTREAM must be set}"
-    : "${AEGL_MODEL_CREDENTIAL_FILE:?AEGL_MODEL_CREDENTIAL_FILE must be set}"
     exec python3 "$BROKER_PY" serve \
       --socket "$AEGL_MODEL_SOCKET" \
       --upstream "$AEGL_MODEL_UPSTREAM" \
-      --credential-file "$AEGL_MODEL_CREDENTIAL_FILE" \
+      --credential-env "${AEGL_MODEL_CREDENTIAL_ENV:-COMMANDCODE_API_KEY}" \
+      --credential-file "${AEGL_MODEL_CREDENTIAL_FILE:-}" \
       ${AEGL_MODEL_AUTH_HEADER:+--auth-header "$AEGL_MODEL_AUTH_HEADER"} ;;
   *)
     sed -n '2,9p' "$0"; exit 2 ;;

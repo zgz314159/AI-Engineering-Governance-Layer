@@ -1,86 +1,144 @@
 #!/usr/bin/env bash
-# aegl-hermes-sandbox — run real Hermes (and its tool subprocesses) confined, connected
-# to the existing provider ONLY through the trusted model broker.
+# aegl-hermes-sandbox — run real Hermes (and its tool subprocesses) confined as the AI
+# identity, reaching the existing provider ONLY through the trusted model broker.
 #
-#   sudo aegl-hermes-sandbox --task <id> --upstream <https base> \
-#        --credential-file <root-only path> [--model <m>] -- <hermes args...>
+#   sudo aegl-hermes-sandbox --task <id> -- hermes ... 
 #
-# The launcher is the trusted component: it holds the credential, starts the model broker
-# OUTSIDE the sandbox, and runs Hermes as the AI identity inside the AEGL sandbox with no
-# egress other than the bound broker socket. Requires root (to become the AI identity).
+# Trusted configuration (root-owned, /etc/aegl/model/config) fixes the upstream, the
+# credential env-var name and its original source, and the pinned Hermes runtime/entry:
+#
+#   UPSTREAM=https://<commandcode provider base>/v1
+#   CREDENTIAL_ENV=COMMANDCODE_API_KEY
+#   CREDENTIAL_SOURCE=/home/zhong/.hermes/.env      # existing location; read in-process only
+#   HERMES_ENTRY=/home/zhong/.local/bin/hermes
+#   HERMES_RUNTIME=/home/zhong/.hermes/hermes-agent
+#   HERMES_INSTALLS=/home/zhong/.hermes/installs
+#   HERMES_PROFILE_CONFIG=/home/zhong/.hermes/profiles/android-stack/config.yaml
+#
+# The AI cannot choose the upstream, the credential, or a target path. Requires root.
 set -uo pipefail
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
-LIBDIR="${AEGL_MODEL_LIBDIR:-/usr/local/lib/aegl-model}"
-BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$SELF_DIR/aegl-model-broker"
-SHIM="$LIBDIR/loopback_shim.py";         [ -f "$SHIM" ] || SHIM="$AEGL_ROOT/recovery/loopback_shim.py"
+
 BWRAP="/usr/bin/bwrap"
 AI_USER="${AEGL_AI_USER:-aegl-ai}"
 TASKS_ROOT="${AEGL_TASKS_ROOT:-${AEGL_STATE_HOME:-${XDG_STATE_HOME:-/home/zhong/.local/state}/aegl}/tasks}"
+CONFIG="${AEGL_MODEL_CONFIG:-/etc/aegl/model/config}"
+LIBDIR="${AEGL_MODEL_LIBDIR:-/usr/local/lib/aegl-model}"
+BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/aegl-model-broker"
+SHIM="$LIBDIR/loopback_shim.py";         [ -f "$SHIM" ] || SHIM="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/recovery/loopback_shim.py"
 
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
+task_id_ok(){ case "$1" in *[!A-Za-z0-9._-]*|"") return 1 ;; esac; [ "${#1}" -le 64 ]; }
 
-TASK=""; UPSTREAM=""; CRED=""; MODEL=""; HERMES_ARGS=()
+TASK=""; HERMES_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) TASK="${2:-}"; shift 2 ;;
-    --upstream) UPSTREAM="${2:-}"; shift 2 ;;
-    --credential-file) CRED="${2:-}"; shift 2 ;;
-    --model) MODEL="${2:-}"; shift 2 ;;
     --) shift; HERMES_ARGS=("$@"); break ;;
     *) die "unknown option: $1" ;;
   esac
 done
 [ "$(id -u)" = 0 ] || die "must run as root (to run Hermes as $AI_USER)"
-[ -n "$TASK" ] && [ -n "$UPSTREAM" ] && [ -n "$CRED" ] || die "usage: aegl-hermes-sandbox --task <id> --upstream <url> --credential-file <path> [--model m] -- <hermes args>"
-[ -f "$CRED" ] || die "credential file not found: $CRED"
-[ "${#HERMES_ARGS[@]}" -gt 0 ] || die "no Hermes command given after --"
+task_id_ok "$TASK" || die "restricted task_id required ([A-Za-z0-9._-]{1,64})"
+[ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
 [ -x "$BWRAP" ] || die "sandbox backend absent ($BWRAP)"
+# shellcheck disable=SC1090
+. "$CONFIG"
+for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
+  [ -n "${!v:-}" ] || die "trusted config missing $v"
+done
 
-TD="$TASKS_ROOT/$TASK"
-[ -f "$TD/task.json" ] || die "no such task: $TASK"
+# --- task resolution against the TRUSTED registry (no caller paths) ---------- #
+ROOT_R="$(realpath -e "$TASKS_ROOT")" || die "tasks root missing"
+TD="$ROOT_R/$TASK"
+[ -d "$TD" ] || die "no such task: $TASK"
+TD_R="$(realpath -e "$TD")" || die "task dir unreadable"
+case "$TD_R" in "$ROOT_R"/?*) : ;; *) die "task path escapes the tasks root" ;; esac
+[ -f "$TD_R/task.json" ] || die "no task.json"
 field(){ python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2"; }
-WT="$(field "$TD/task.json" worktree)"; SCRATCH="$(field "$TD/task.json" scratch)"
-[ -d "$WT" ] || die "task worktree missing: $WT"
+WT="$(field "$TD_R/task.json" worktree)"; SCRATCH="$(field "$TD_R/task.json" scratch)"
+WT_R="$(realpath -e "$WT")" || die "worktree missing"
+SCR_R="$(realpath -e "$SCRATCH")" || die "scratch missing"
+for p in "$WT_R" "$SCR_R"; do
+  case "$p" in "$ROOT_R"/?*) : ;; *) die "task path escapes the tasks root: $p" ;; esac
+done
+# ownership: the AI identity must own nothing outside its workspace; the worktree must be
+# owned by the AI identity (no cross-owner mount)
+[ "$(stat -c '%U' "$WT_R")" = "$AI_USER" ] || die "worktree not owned by $AI_USER"
+[ -L "$WT" ] && die "worktree is a symlink"
 
-# per-run runtime dir (broker socket + task home), owned by the AI identity
-RUN="$TD/sandbox-run"; rm -rf "$RUN"; mkdir -p "$RUN/broker" "$RUN/home"
-chown -R "$AI_USER":"$(id -gn "$AI_USER")" "$RUN"
-SOCK="$RUN/broker/model.sock"
-PORT=8877
+# --- runtime: root-owned run dir, NOT writable by the AI --------------------- #
+RUN="/run/aegl-model/$TASK"; rm -rf "$RUN"; mkdir -p "$RUN/broker" "$RUN/home"
+chown root:"$(id -gn "$AI_USER")" "$RUN"; chmod 0750 "$RUN"
+SOCK="$RUN/broker/model.sock"; PORT=8877
+# only the socket dir + a task home are writable by the AI
+chown "$AI_USER":"$(id -gn "$AI_USER")" "$RUN/broker" "$RUN/home"; chmod 0750 "$RUN/broker" "$RUN/home"
 
-# 1. the trusted model broker (outside the sandbox): holds the credential + egress
-AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" AEGL_MODEL_CREDENTIAL_FILE="$CRED" \
+# --- trusted broker: credential read from its ORIGINAL location, in-process -- #
+if [ -f "$CREDENTIAL_SOURCE" ]; then set -a; . "$CREDENTIAL_SOURCE"; set +a; fi
+[ -n "${!CREDENTIAL_ENV:-}" ] || die "credential env $CREDENTIAL_ENV not available from $CREDENTIAL_SOURCE"
+AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" AEGL_MODEL_CREDENTIAL_ENV="$CREDENTIAL_ENV" \
   "$BROKER_BIN" serve >"$RUN/broker.log" 2>&1 &
 BPID=$!
-for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
+for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || { kill "$BPID" 2>/dev/null; die "model broker did not start (see $RUN/broker.log)"; }
-
-# 2. task-scoped Hermes home: points ONLY at the in-sandbox shim (dummy key)
-cat > "$RUN/home/config.yaml" <<EOF
-model:
-  provider: custom
-  base_url: http://127.0.0.1:$PORT/v1
-  api_key: aegl-sandbox-dummy
-  default: ${MODEL:-deepseek/deepseek-v4.1-flash}
-EOF
-[ -f "$AEGL_ROOT/.hermes.md" ] && cp "$AEGL_ROOT/.hermes.md" "$RUN/home/SOUL.md" || true
-chown -R "$AI_USER":"$(id -gn "$AI_USER")" "$RUN"
-
-MASK=(); for d in .ssh .aws .gnupg .config .commandcode .hermes .local/share/keyrings .docker .kube .password-store .mozilla; do [ -e "/home/$AI_USER/$d" ] && MASK+=( --tmpfs "/home/$AI_USER/$d" ); done
-for d in .ssh .aws .gnupg .config .commandcode .hermes .local/share/keyrings .docker .kube .password-store .mozilla; do [ -e "/home/zhong/$d" ] && MASK+=( --tmpfs "/home/zhong/$d" ); done
-
-say "AEGL_HERMES_SANDBOX task=$TASK user=$AI_USER worktree=$WT"
 trap 'kill "$BPID" 2>/dev/null' EXIT
+
+# --- task HERMES_HOME: model endpoint + the ORIGINAL hooks (contract guard) -- #
+python3 - "$HERMES_PROFILE_CONFIG" "$RUN/home/config.yaml" "$PORT" <<'PY'
+import sys
+src, dst, port = sys.argv[1], sys.argv[2], sys.argv[3]
+hooks = ""
+try:
+    text = open(src, encoding="utf-8").read().splitlines()
+    keep, on = [], False
+    for line in text:
+        if line.startswith("hooks:"):
+            on = True; keep.append(line); continue
+        if on:
+            if line and not line[0].isspace():
+                on = False
+            else:
+                keep.append(line)
+    hooks = "\n".join(keep).rstrip() + "\n"
+except OSError:
+    hooks = ""
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.write("model:\n  provider: custom\n  base_url: http://127.0.0.1:%s/v1\n"
+             "  api_key: aegl-sandbox-dummy\n  default: deepseek/deepseek-v4.1-flash\n" % port)
+    if hooks:
+        fh.write(hooks)
+PY
+chown -R "$AI_USER":"$(id -gn "$AI_USER")" "$RUN/home"
+
+# --- sandbox: no external network; pinned runtime read-only; secrets masked ---- #
+MASK=()
+for base in "/home/$AI_USER" "/home/zhong"; do
+  for d in .ssh .aws .gnupg .config .commandcode .hermes .local/share/keyrings .docker .kube .password-store .mozilla; do
+    [ -e "$base/$d" ] && MASK+=( --tmpfs "$base/$d" )
+  done
+done
+: > "$RUN/empty"
+# the runtime home is rebound read-only; mask its secrets and bind the task config over it
+[ -e "$HERMES_HOME_REAL/.env" ] && MASK+=( --ro-bind "$RUN/empty" "$HERMES_HOME_REAL/.env" )
+[ -d "$HERMES_HOME_REAL/profiles" ] && MASK+=( --tmpfs "$HERMES_HOME_REAL/profiles" )
+[ -d "$HERMES_HOME_REAL/sessions" ] && MASK+=( --tmpfs "$HERMES_HOME_REAL/sessions" )
+BIND_RUNTIME=( --ro-bind "$HERMES_RUNTIME" "$HERMES_RUNTIME" --ro-bind "$HERMES_TOOLS" "$HERMES_TOOLS" --ro-bind "$HERMES_ENTRY" "$HERMES_ENTRY" )
+# installs must be writable to the runtime but ephemeral (host untouched)
+BIND_RUNTIME+=( --overlay-src "$HERMES_INSTALLS" --tmp-overlay "$HERMES_INSTALLS" )
+BIND_RUNTIME+=( --ro-bind "$RUN/home/config.yaml" "$HERMES_HOME_REAL/config.yaml" )
+
+say "AEGL_HERMES_SANDBOX task=$TASK user=$AI_USER worktree=$WT_R upstream_configured=yes"
 runuser -u "$AI_USER" -- "$BWRAP" --unshare-all --dev /dev --proc /proc \
-  --ro-bind / / --bind "$WT" "$WT" --bind "$SCRATCH" "$SCRATCH" \
+  --ro-bind / / \
+  "${MASK[@]}" "${BIND_RUNTIME[@]}" \
+  --bind "$WT_R" "$WT_R" --bind "$SCR_R" "$SCR_R" \
   --bind "$RUN/home" "$RUN/home" --bind "$RUN/broker" "$RUN/broker" \
-  "${MASK[@]}" \
-  --clearenv --setenv PATH "/usr/local/bin:/usr/bin:/bin" --setenv HOME "$RUN/home" \
-  --setenv HERMES_HOME "$RUN/home" --setenv TMPDIR "$SCRATCH" --setenv AEGL_AI_SANDBOX 1 \
-  --die-with-parent --chdir "$WT" \
-  bash -lc "python3 '$SHIM' --listen 127.0.0.1:$PORT --unix '$SOCK' >/dev/null 2>&1 & shim=\$!; sleep 0.5; \"\$@\"; rc=\$?; kill \$shim 2>/dev/null; exit \$rc" _ "${HERMES_ARGS[@]}"
+  --clearenv --setenv PATH "/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin" \
+  --setenv HOME "$RUN/home" --setenv HERMES_HOME "$HERMES_HOME_REAL" --setenv TMPDIR "$SCR_R" \
+  --setenv AEGL_AI_SANDBOX 1 --setenv HERMES_CONTRACT_PACKAGE "${HERMES_CONTRACT_PACKAGE:-}" \
+  --die-with-parent --chdir "$WT_R" \
+  bash -lc "python3 '$SHIM' --listen 127.0.0.1:$PORT --unix '$SOCK' >/dev/null 2>&1 & shim=\$!; sleep 0.6; \"\$@\"; rc=\$?; kill \$shim 2>/dev/null; exit \$rc" _ "${HERMES_ARGS[@]}"
 rc=$?
 kill "$BPID" 2>/dev/null
 exit "$rc"
