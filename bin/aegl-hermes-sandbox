@@ -26,6 +26,7 @@ SHIM="$(pick loopback_shim.py)"
 EXEC_SPEC="$(pick exec_spec.py)"
 SPEC_PY="$(pick sandbox_spec.py)"
 PREPARE="$(pick prepare_targets.py)"
+DROP_VERIFY="$(pick drop_verify.py)"
 SETPRIV="/usr/bin/setpriv"
 
 say(){ printf '%s\n' "$*"; }
@@ -44,7 +45,7 @@ done
 case "$TASK" in ""|*[!A-Za-z0-9._-]*) die "restricted task_id required" ;; esac
 [ "${#TASK}" -le 64 ] || die "task_id too long"
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
-for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
+for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
 # shellcheck disable=SC1090
 . "$CONFIG"
 for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
@@ -161,6 +162,7 @@ python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN"
   --wt "$WT_R" --scr "$SCR_R" --runtime "$HERMES_RUNTIME" --tools "$HERMES_TOOLS" \
   --entry "$HERMES_ENTRY" --installs "$HERMES_INSTALLS" --guard-src "$GUARD_SRC" \
   --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" --setpriv "$SETPRIV" \
+  --drop-verify "$DROP_VERIFY" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
 # create EVERY mount target under the read-only skeleton, derived from the ACTUAL argv
 python3 "$PREPARE" "$SPEC" "$SK" || die "mount-target preparation failed"

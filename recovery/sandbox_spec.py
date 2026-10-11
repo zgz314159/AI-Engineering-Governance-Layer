@@ -30,12 +30,16 @@ import sys
 
 
 def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, guard_src,
-          guard_dest, contract_package, setpriv="/usr/bin/setpriv", info_fd="",
-          hermes_args) -> dict:
+          guard_dest, contract_package, setpriv="/usr/bin/setpriv", drop_verify="drop_verify.py",
+          info_fd="", hermes_args) -> dict:
     argv = [
         bwrap,
         # isolation WITHOUT a user namespace: the host ids are preserved
         "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup",
+        # the ONLY capabilities the fixed trusted drop program may use — never --cap-add ALL,
+        # never let the model keep running as root (the binary itself is NOT setuid/setcap)
+        "--cap-drop", "ALL",
+        "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID", "--cap-add", "CAP_SETPCAP",
         # 1. the root filesystem FIRST, then the isolated /proc + /dev and the overlays —
         #    a later `--ro-bind / /` would shadow an earlier /proc or /dev
         "--ro-bind", "/", "/",
@@ -74,10 +78,13 @@ def build(*, bwrap, uid, gid, run, wt, scr, runtime, tools, entry, installs, gua
         "--setenv", "HERMES_CONTRACT_PACKAGE", contract_package,
         "--die-with-parent", "--chdir", wt,
     ]
-    # the FIRST in-sandbox process is the fixed trusted drop entry, then the runner
+    # the FIRST in-sandbox process is the fixed trusted drop entry; it switches uid/gid,
+    # clears supplementary groups AND the bounding/inheritable/ambient capability sets, then
+    # verifies the ACTUAL kernel state (uid/gid, all Caps=0, NoNewPrivs=1) before the runner.
     argv += [
         setpriv, "--reuid", str(uid), "--regid", str(gid), "--clear-groups",
-        "--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all",
+        "--no-new-privs", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all",
+        "--", "python3", drop_verify, "--uid", str(uid), "--gid", str(gid),
         "--", "bash", run + "/sandbox-run.sh",
     ] + list(hermes_args)
     return {"argv": argv, "info_fd": info_fd}
@@ -89,6 +96,7 @@ def main(argv):
                  "installs", "guard-src", "guard-dest", "contract-package"):
         ap.add_argument("--" + name, required=True)
     ap.add_argument("--setpriv", default="/usr/bin/setpriv")
+    ap.add_argument("--drop-verify", default="drop_verify.py")
     ap.add_argument("--info-fd", default="")
     ap.add_argument("hermes", nargs=argparse.REMAINDER)
     args = ap.parse_args(argv)
@@ -96,8 +104,8 @@ def main(argv):
     spec = build(bwrap=args.bwrap, uid=args.uid, gid=args.gid, run=args.run, wt=args.wt, scr=args.scr,
                  runtime=args.runtime, tools=args.tools, entry=args.entry, installs=args.installs,
                  guard_src=args.guard_src, guard_dest=args.guard_dest,
-                 contract_package=args.contract_package, setpriv=args.setpriv, info_fd=args.info_fd,
-                 hermes_args=hermes)
+                 contract_package=args.contract_package, setpriv=args.setpriv,
+                 drop_verify=args.drop_verify, info_fd=args.info_fd, hermes_args=hermes)
     json.dump(spec, sys.stdout)
     return 0
 
