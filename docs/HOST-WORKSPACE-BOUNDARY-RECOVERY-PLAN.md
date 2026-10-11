@@ -1544,3 +1544,44 @@ AI_BOUNDARY=BLOCKED
 ```
 
 Commit: AEGL branch `plan/launch-order` @ `8d30851` (not merged).
+
+## Round update 29: task-level writable install state (+ writable run state)
+
+Round 28's chain worked up to the handoff — the real output was
+`DROP_HANDOFF uid=994 gid=972, all caps zero, nnp=1, groups=[]` — and then Hermes failed with
+`hermes: install state is not writable by this user (<HERMES_HOME>/installs/<key>/.recovery.lock)`.
+The read-only overlay could not be written (overlayfs keeps the lower dir's owner, zhong).
+
+- **Install state**: the launcher computes the real install key
+  (`sha256(resolved runtime)[:16]`), requires the already-verified generation
+  `<HERMES_HOME>/installs/<key>` to exist (it refuses to fabricate one), and builds a **task-level
+  writable view at the SAME path** Hermes expects — so locks, `.install.lock` and the generation's
+  `.leases` work. The heavy read-only trees are reused by **sub-bind** (`environments`/venv,
+  `bootstrap`, `pm-runtime`, `inputs`); nothing is copied and the venv is not re-downloaded. The
+  selection metadata (`facts.json`, plus `declined-packages.json`) is copied **verbatim**, so the
+  recorded venv path still resolves inside the state dir — no forged facts/stamp/`current`.
+- **Run state**: sessions/logs under the home and under the android-stack profile (`sessions`,
+  `logs`, `runtime`, `terminal-sessions`) are task-level dirs owned by aegl-ai, replacing the
+  read-only bind and the unwritable tmpfs.
+
+Boundaries kept: the host `~/.hermes` is neither chowned nor chmodded; the model never runs as
+root/zhong; AppArmor untouched, no added capabilities, no direct egress, no credential exposure; the
+private-mount-prep → host drop → bwrap chain is preserved. No new broker or monitor. The install
+FILES list is unchanged (no module added/removed), so no manifest change was needed; hashes are
+still derived from the pinned commit at install time.
+
+Focused check (`recovery/entry-state-tests.sh`, this round: **1 run**, first pass): **13/13** — real
+argv plus a verbatim-metadata / path-resolution fixture. The fixture is **not** aegl-ai host
+acceptance.
+
+```text
+HOST_UID_DROP=PASS (real output: uid=994 gid=972, Caps=0, NoNewPrivs=1, groups=[])
+HERMES_STARTUP=BLOCKED (install state permission — addressed this round; re-verify pending the next real run)
+MODEL_CALL=NOT_RUN
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=13/13 (1 run)
+REAL_AEGL_AI_HERMES=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 7da132d8c42d03141e4bcd0ca78901062c35737d:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 7da132d8c42d03141e4bcd0ca78901062c35737d --self-test
+```
+
+Commit: AEGL branch `plan/install-state` @ `7da132d` (not merged).
