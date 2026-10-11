@@ -1426,3 +1426,37 @@ sudo pkill -f 'aegl-hermes-sandbox --task trial'; sleep 1; sudo rm -rf /run/aegl
 ```
 
 Commit: AEGL branch `plan/entry-mount` @ `e3bb55d` (not merged).
+
+## Round update 26: read-only skeleton mount targets
+
+The launch error this round was a **missing mount target**: bwrap requires every
+bind/tmpfs/overlay DESTINATION to exist with a type matching its SOURCE, and the read-only
+`/home/zhong` skeleton carried only some of them.
+
+- `recovery/prepare_targets.py` derives the target list from the **ACTUAL generated argv** (every dest
+  under `/home/zhong`) and creates only what is missing inside `$RUN/stage/home-zhong`: dirs for
+  dir/tmpfs/tmp-overlay sources (`.hermes/hermes-agent`, `.hermes/tools`, `.hermes/installs`,
+  `.hermes/sessions`, the GUARD_DEST full path incl. the last level) and files for file sources
+  (`.local/bin/hermes`, `.hermes/.env`). It never touches the real `/home/zhong` or a project, never
+  overwrites existing content (config.yaml, profiles kept), and flags a missing source instead of
+  guessing. The launcher runs it after the spec build and re-applies the skeleton's ownership/modes;
+  the skeleton and runtime sources stay read-only, the guard, controlled networking and credential
+  isolation are unchanged.
+- Process sampling: the known false-match caveat still stands — a not-yet-proven isolation item stays
+  **NOT_PROVEN**; this round added no monitoring system.
+
+Focused check (`recovery/entry-skeleton-tests.sh`, this round: **2 runs** — 2 initial failures in my own
+harness (the stage empty-file was not created; an unreliable `-newer` check), then the re-verify):
+**13/13**. It really executes the preparation and inspects the filesystem, including an argv-only mount
+dest. Not re-run: the 18-check entry-mount suite, mount-drop, uid-launch-tests, system recovery,
+browser automation, full suites. Run-count record: round 25 = 2, round 26 = 2.
+
+```text
+MOUNT_TARGET_PREPARATION=PASS (argv-driven; dirs + files for every dest under /home/zhong)
+FOCUSED_CHECK=13/13 (2 runs this round)
+REAL_HERMES_SANDBOX=NOT_RUN
+TRIAL_COMMAND=git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 68edace2d558b39761a2e2836348d2c6d3d88fb0:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 68edace2d558b39761a2e2836348d2c6d3d88fb0 --self-test
+AI_BOUNDARY=BLOCKED
+```
+
+Commit: AEGL branch `plan/skeleton-targets` @ `68edace` (not merged).
