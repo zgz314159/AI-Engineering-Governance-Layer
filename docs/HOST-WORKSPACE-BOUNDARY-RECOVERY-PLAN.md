@@ -1744,6 +1744,55 @@ TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Govern
 
 Commit: AEGL branch `plan/acceptance` @ `801c2dc` (implementation; not merged).
 
+## Round update 34: acceptance corrected — untrusted evidence RETRACTED
+
+`REAL_MODEL_TASK=PASS` is kept (42 s, 11 tool calls, `RESULT.txt`, `launch_rc=0`). The acceptance
+evidence is corrected and **`ACCEPTANCE_EVIDENCE=NOT_VERIFIED`**: a hook present in the config is
+**not** proof that it was registered and executed in this run.
+
+Corrected:
+1. `capture_evidence` identifies the **installed launcher** for real — this host runs
+   `<tools>/python3 -I -c '<startup code importing hermes-agent>'`, not `python hermes`. It reads the
+   **raw NUL-separated argv** plus the **actual** `/proc/<pid>/exe`, matches a python interpreter
+   whose argv carries `-c <code mentioning hermes>` (or an entry named `hermes`), and cannot match a
+   shell wrapper or `sh -c '<text mentioning hermes>'`. An **empty child list is no longer counted as
+   verified tool-subprocess identity** — it is reported as its own NOT_PROVEN state.
+2. RESULT vs INPUT is now `cmp -s` (**byte level**); no whitespace stripping, no token grep.
+
+Retracted:
+3. The guard's decision log is written **inside the sandbox and is AI-writable**, so copying it
+   cannot prove a real hook interception. The guard-state bind, the **root-side `stack_paths` import**
+   (root must not import a user-writable project file; root's HOME/XDG differ from the sandbox's, so
+   a path computed as root is invalid for the sandbox), the log parser and the handoff are removed.
+   `guard_state`/`os_state` are again **NOT_PROVEN** and the installer prints the precise gap rather
+   than a fixture-driven PASS.
+4. The sandbox-external `runuser` probe is **not** OS evidence — an independent component check at
+   best, and a non-zero exit is not proof of a permission denial.
+
+**Precise remaining gap (not completable in this round):** the guard/tool-execution evidence must come
+from the **trusted controller**, tied to this specific task and operation — capturing the actual
+`pre_tool_call` hook invocation and its return, and the tool execution result, through a channel the
+AI cannot edit (e.g. the controller running the hook itself, or a controller-side capture of the hook
+process). The XDG/HOME divergence between root and the sandbox must be resolved by the controller
+setting the task-level state root explicitly and supplying the guard's read-only declared deps. Until
+then: authorized write = the only provable item; guard interception and OS denial stay NOT_PROVEN.
+
+No test suite was re-run (the 8-item gate had already run twice); only syntax checks, so these
+corrections are **NOT RE-VERIFIED**.
+
+```text
+HOST_UID_DROP=PASS
+REAL_MODEL_TASK=PASS (kept: 42s, 11 tool calls, RESULT.txt, launch_rc=0)
+MODEL_TASK_EXECUTED=PASS
+SYSTEM_RECOVERED=PASS (original record kept)
+HISTORY_CLEAN=PASS (original record kept)
+ACCEPTANCE_EVIDENCE=NOT_VERIFIED
+AI_BOUNDARY=BLOCKED
+FOCUSED_CHECK=NOT RE-RUN (corrections unverified; prior 8/8)
+```
+
+Commit: AEGL branch `plan/acceptance-fix` @ `9f1ab94` (implementation; not merged).
+
 ## Round update 29 (original note)
 
 Round 28's chain worked up to the handoff — the real output was
