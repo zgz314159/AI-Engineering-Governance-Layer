@@ -1874,6 +1874,54 @@ AI_BOUNDARY=BLOCKED
 
 Commit: AEGL branch `plan/capture-fix` @ `977103b` (implementation; not merged).
 
+## Round update 38: guard pin, strace OS capture, request correlation — all wired
+
+Wired the three missing pieces (implementation `93da79a`; local check only, **no host test**):
+
+I. **Guard provenance pinned.** `recovery/guard-lock.json` declares the guard's owning project,
+   the pinned Stack commit `63484e730176810efbeb79ba0fce71a2eced391e`, the path and the expected
+   SHA-256 `19f6be63…`. The installer extracts the file **from that commit**, verifies that hash, and
+   only then installs it (0444 + manifest with project/commit/path/hash). Hashing an arbitrary current
+   worktree file is no longer accepted, and the AEGL commit is never presented as the guard's version.
+   *(The pinned hash was verified locally against the Stack repo and matches exactly.)*
+
+II. **strace OS capture wired.** The launcher runs the whole `unshare → drop → bwrap → Hermes` branch
+   **under strace** (`-f -e trace=openat,open,creat`) with the credential broker **outside** the traced
+   branch; only file open/create results and errnos are captured — no network, buffers, credentials or
+   environment. `recovery/trace_capture.py` parses the log into the controller-private evidence dir
+   (same `_recorded` marker): allowed ⇒ `WRITE_OK` only from a **real successful open-for-write**;
+   protected ⇒ `OS_DENIED:<errno>` only from a **real `-1 EACCES/EROFS/EPERM`**; the forbidden probe's
+   only syscall-level signal is an actual open of the forbidden target (`FORBIDDEN_EXECUTED`) — its
+   absence merely corroborates the guard's own BLOCK. The installer parses after the task and trace
+   finish, and the gate now requires **all three** (allowed write + guard block/allow + OS denial),
+   failing closed otherwise. If the host policy refuses tracing, the branch simply is not traced and
+   the OS probe stays NOT_PROVEN — the policy is never disabled.
+
+III. **Real request correlation.** The broker stores the tool requests the **upstream model actually
+   returned** (`REQUEST_INDEX`, from the response body — plain JSON or SSE deltas) and uses it when
+   answering `pre_tool_call`: `request_matched` requires the hook's `tool_call_id` to exist there, and
+   `request_args_match` compares the hook's `tool_input` keys with the recorded arguments. The gate now
+   requires `request_matched == True` and rejects records whose arguments disagree, so a non-empty
+   client-supplied id is no longer sufficient. *Limitation:* SSE argument fragments are reassembled
+   best-effort; when they cannot be, args matching is skipped (null) and only the id match is required.
+
+Local check (`trace_capture.py` on real strace-format lines): allowed ⇒ `WRITE_OK`, protected ⇒
+`OS_DENIED:EACCES`, forbidden ⇒ `FORBIDDEN_EXECUTED`, all with `_recorded`. This is **not** host
+acceptance; the fixed three-probe acceptance has not been run.
+
+```text
+REAL_MODEL_TASK=PASS (kept)
+GUARD_COPY_PROVENANCE=PINNED (Stack commit + hash verified locally)
+GUARD_RETURN_SOURCE=controller subprocess (pinned verified copy as aegl-ai)
+OS_DENIAL_SOURCE=strace of the real sandbox tool branch (controller-parsed errno)
+REQUEST_CORRELATION=broker REQUEST_INDEX (real model tool requests)
+ACCEPTANCE_EVIDENCE=NOT_VERIFIED (wired, not host-tested)
+AI_BOUNDARY=BLOCKED
+TRIAL_COMMAND=set -o pipefail; git -C /home/zhong/Projects/AI-Engineering-Governance-Layer show 93da79aac26be20326bb380eac956836e88d1b51:recovery/install-model-broker.sh | sudo timeout --signal=TERM --kill-after=10s 300 bash -s -- --repo /home/zhong/Projects/AI-Engineering-Governance-Layer --commit 93da79aac26be20326bb380eac956836e88d1b51 --self-test; echo "trial_exit=$?"
+```
+
+Commit: AEGL branch `plan/guard-lock` @ `93da79a` (implementation; not merged).
+
 ## Round update 36: controller guard interface WIRED (guard path); OS capture still unwired
 
 **Guard return — wired** (implementation `dd29577`, not host-tested):
