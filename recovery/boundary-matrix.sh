@@ -32,10 +32,13 @@ wt()    { python3 -c "import json;print(json.load(open('$AEGL_TASKS_ROOT/$1/task
 # denied <id> <probe-cmd>: probe exits 0 iff DENIED -> pass
 denied() { bash "$TASK" controller probe "$1" "$2" >/dev/null 2>&1 && ok "$3" || no "$3"; }
 
-# ---- positive: legit change verifies and promotes, canonical stays clean ----
+# ---- positive: legit change verifies; promotion is DEFAULT-DENY without a verified broker ----
+# (updated: a valid controller token alone no longer promotes; see recovery/boundary-tests.sh T6/T7)
 id=$(start pos); printf 'world\n' >> "$(wt "$id")/src/app.txt"
-bash "$TASK" task verify "$id" >/dev/null 2>&1 && bash "$TASK" task promote "$id" >/dev/null 2>&1 \
-  && grep -q world "$TARGET/src/app.txt" && ok "positive: promote applied" || no "positive: promote applied"
+bash "$TASK" task verify "$id" >/dev/null 2>&1 && ok "positive: candidate verifies" || no "positive: candidate verify"
+bash "$TASK" task promote "$id" >/dev/null 2>&1 && no "positive: default-deny promote" || ok "positive: default-deny promote (no verified broker)"
+grep -q world "$TARGET/src/app.txt" && no "positive: canonical unchanged" || ok "positive: canonical unchanged"
+bash "$TASK" task discard "$id" >/dev/null 2>&1
 
 # ---- N1 canonical write denied (fails if the write succeeds) ----
 id=$(start n1)

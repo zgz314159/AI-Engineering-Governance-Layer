@@ -88,18 +88,39 @@ printf 'candidate\n' >> "$(python3 -c "import json;print(json.load(open('$AEGL_T
 bash "$TASK" task verify "$ID" >/dev/null 2>&1 && ok "T6 candidate verified" || no "T6 candidate verify failed"
 bash "$TASK" task promote "$ID" >/dev/null 2>&1 && no "T6 no-token promote rejected" || ok "T6 no-token promote rejected"
 AEGL_CONTROLLER_TOKEN=wrong bash "$TASK" task promote "$ID" >/dev/null 2>&1 && no "T6 wrong-token promote rejected" || ok "T6 wrong-token promote rejected"
-trusted_task promote "$ID" >/dev/null 2>&1 && grep -q candidate "$TARGET/app.txt" \
-  && ok "T6 authenticated promote accepted" || no "T6 authenticated promote failed"
+# Promotion is default-deny: a valid controller token alone must NOT promote.
+trusted_task promote "$ID" >/dev/null 2>&1 && no "T6 token-only promote rejected (default-deny)" || ok "T6 token-only promote rejected (default-deny)"
+grep -q candidate "$TARGET/app.txt" && no "T6 canonical unchanged by rejected promote" || ok "T6 canonical unchanged by rejected promote"
 ID2="$(bash "$TASK" task start "$TARGET" t6-discard 2>&1 | sed -n 's/^TASK_STARTED id=//p')"
 bash "$TASK" task discard "$ID2" >/dev/null 2>&1 && no "T6 no-token discard rejected" || ok "T6 no-token discard rejected"
 trusted_task discard "$ID2" >/dev/null 2>&1 && ok "T6 authenticated discard accepted" || no "T6 authenticated discard accepted"
-# ---- T7: independent operator identity is required and fails closed ----
-bash "$TASK" identity status >/dev/null 2>&1 && no "T7 absent broker rejected" || ok "T7 absent broker rejected"
+
+# ---- T7: promotion cannot be authorized by env, nor by a socket path/owner ----
+out="$(bash "$TASK" identity status 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && ! echo "$out" | grep -q 'BROKER=VERIFIED'; } \
+  && ok "T7 no candidate socket not authorized" || no "T7 no candidate socket not authorized ($out)"
 SOCK="$T/sameuid.sock"
 python3 -c "import socket,sys;s=socket.socket(socket.AF_UNIX);s.bind(sys.argv[1])" "$SOCK" 2>/dev/null
-AEGL_BROKER_SOCKET="$SOCK" bash "$TASK" identity status >/dev/null 2>&1 && no "T7 same-uid broker rejected" || ok "T7 same-uid broker rejected"
-ID3="$(bash "$TASK" task start "$TARGET" t7-ident 2>&1 | sed -n 's/^TASK_STARTED id=//p')"
-AEGL_REQUIRE_INDEPENDENT_IDENTITY=1 trusted_task discard "$ID3" >/dev/null 2>&1 && no "T7 require-identity fails closed" || ok "T7 require-identity fails closed"
+out="$(AEGL_BROKER_SOCKET="$SOCK" bash "$TASK" identity status 2>&1)"; rc=$?
+{ [ "$rc" -ne 0 ] && echo "$out" | grep -q 'CANDIDATE_SOCKET' && ! echo "$out" | grep -q 'BROKER=VERIFIED'; } \
+  && ok "T7 same-uid candidate is CANDIDATE only, not AVAILABLE" || no "T7 same-uid candidate ($out)"
+# an arbitrary OTHER-uid socket path must not authorize (owner alone is not a broker)
+OTHER=""
+for c in /run/dbus/system_bus_socket /run/systemd/journal/socket /run/systemd/coredump /run/user/1000/bus; do
+  [ -S "$c" ] && [ "$(stat -c '%u' "$c" 2>/dev/null)" != "$(id -u)" ] && { OTHER="$c"; break; }
+done
+if [ -n "$OTHER" ]; then
+  out="$(AEGL_BROKER_SOCKET="$OTHER" bash "$TASK" identity status 2>&1)"; rc=$?
+  { [ "$rc" -ne 0 ] && echo "$out" | grep -q 'CANDIDATE_SOCKET' && ! echo "$out" | grep -q 'BROKER=VERIFIED'; } \
+    && ok "T7 other-uid socket path not authorized (candidate only)" || no "T7 other-uid socket path ($out)"
+else
+  echo "N/A  T7 other-uid socket (none available on host)"
+fi
+# counterexample: valid controller token, NO broker configured -> promote must be rejected
+ID3="$(bash "$TASK" task start "$TARGET" t7-nobroker 2>&1 | sed -n 's/^TASK_STARTED id=//p')"
+printf 'x\n' >> "$(python3 -c "import json;print(json.load(open('$AEGL_TASKS_ROOT/$ID3/task.json'))['worktree'])")/app.txt"
+trusted_task verify "$ID3" >/dev/null 2>&1
+trusted_task promote "$ID3" >/dev/null 2>&1 && no "T7 token without broker promote rejected" || ok "T7 token without broker promote rejected"
 trusted_task discard "$ID3" >/dev/null 2>&1
 
 rm -rf "$T" "$AEGL_STATE_HOME"

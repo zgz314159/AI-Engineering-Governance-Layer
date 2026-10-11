@@ -423,6 +423,30 @@ probe was performed. Open checkboxes above remain unchecked.
   per-project via the trusted path; (b) drop Cursor from the global target set; (c) leave
   Cursor `NOT_DONE`.
 
+### Round update 2: promotion gate is default-deny (no env bypass, no socket-owner trust)
+
+Fixed on the isolated branch (no Stage 1/2 or unrelated matrix re-run):
+
+- `task promote` now **always** requires a broker that completes the `AEGL-BROKER/1`
+  PING/PONG challenge handshake **and** is owned by a different uid. The previous
+  `AEGL_REQUIRE_INDEPENDENT_IDENTITY` opt-in was removed: omitting an environment
+  variable can no longer re-enable promotion, and a socket *path* or *owner* alone
+  never authorizes.
+- `identity status` now distinguishes `BROKER=NOT_AVAILABLE`, `CANDIDATE_SOCKET`
+  (found, untrusted), `BROKER=REJECTED`, and `BROKER=VERIFIED`; a mere candidate is
+  never reported as available.
+- `task discard` remains gated by the controller token only, so the controller can
+  always remove task state.
+- Targeted counterexamples added and passing (affected self-check **27/27**): valid
+  controller token with no broker env → promote rejected; valid token + no broker →
+  promote rejected; same-uid socket → candidate only, rejected; arbitrary **other-uid**
+  socket path (a real host socket) → candidate only, rejected.
+- The historical positive promotion case is superseded: `recovery/boundary-matrix.sh`
+  now asserts default-deny (adjusted without re-running the matrix; its earlier 18/18
+  was recorded before this gate change and no longer describes promotion).
+- Remaining blocker: no verified independent broker exists on this host. Next command:
+  `AEGL_BROKER_SOCKET=<broker.sock> bin/aegl-task identity status`.
+
 `AI_BOUNDARY=BLOCKED` remains the only honest overall status. Unblock conditions
 include an operator/AI identity boundary stronger than a same-UID token, a
 controlled cloud network/credential broker if cloud models are required, and a

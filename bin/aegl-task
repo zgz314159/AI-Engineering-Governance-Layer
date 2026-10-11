@@ -243,35 +243,60 @@ sys.exit(0 if hmac.compare_digest(a,b) else 1)' "$tf" "$AEGL_CONTROLLER_TOKEN" \
 }
 
 # --------------------------------------------------------------------------- #
-# Independent operator identity (fail closed).
+# Independent operator broker (default-deny; no environment bypass).
 #
-# A same-UID token is NOT an identity boundary. An independent identity requires a
-# broker socket owned by a DIFFERENT uid (or an equivalent kernel-enforced boundary).
-# Set AEGL_BROKER_SOCKET to that socket. `identity status` fails closed when the
-# broker is absent or same-UID. Set AEGL_REQUIRE_INDEPENDENT_IDENTITY=1 to make
-# promotion/discard refuse unless the independent identity is present.
+# A same-UID token is NOT an identity boundary, and neither a socket *path* nor a
+# socket's *owner* proves a broker is authorized. Promotion is refused unless a real
+# broker at AEGL_BROKER_SOCKET answers a challenge handshake and is owned by a
+# different uid. Omitting or setting any environment variable cannot re-enable it.
 # --------------------------------------------------------------------------- #
-identity_status() {
-  local sock="${AEGL_BROKER_SOCKET:-}"
-  if [ -z "$sock" ]; then
-    say "INDEPENDENT_IDENTITY=NOT_AVAILABLE (no AEGL_BROKER_SOCKET configured)"
-    say "  condition: a broker socket owned by a different uid (or an equivalent kernel-enforced boundary)"
-    return 1
-  fi
-  [ -S "$sock" ] || { say "INDEPENDENT_IDENTITY=NOT_AVAILABLE ($sock is not a socket)"; return 1; }
-  local owner; owner="$(stat -c '%u' "$sock" 2>/dev/null)"
-  [ -n "$owner" ] || { say "INDEPENDENT_IDENTITY=NOT_AVAILABLE (cannot stat $sock)"; return 1; }
-  if [ "$owner" = "$(id -u)" ]; then
-    say "INDEPENDENT_IDENTITY=NOT_AVAILABLE ($sock is owned by our own uid $owner; a same-uid broker is not independent)"
-    return 1
-  fi
-  say "INDEPENDENT_IDENTITY=AVAILABLE (broker $sock owned by uid $owner)"
-  return 0
+BROKER_PROTOCOL="AEGL-BROKER/1"
+
+# verify_broker <sock> -> 0 only if a broker completes the challenge handshake
+verify_broker() {
+  local sock="$1" nonce
+  nonce="$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$nonce" ] || nonce="nonce$$"
+  python3 - "$sock" "$nonce" "$BROKER_PROTOCOL" <<'PY'
+import socket,sys
+sock,nonce,proto=sys.argv[1],sys.argv[2],sys.argv[3]
+expect=("%s PONG %s"%(proto,nonce)).encode()
+try:
+    s=socket.socket(socket.AF_UNIX); s.settimeout(2.0); s.connect(sock)
+    s.sendall(("%s PING %s\n"%(proto,nonce)).encode())
+    s.shutdown(socket.SHUT_WR)
+    data=b""
+    while len(data) < 4096:
+        chunk=s.recv(4096)
+        if not chunk: break
+        data += chunk
+        if b"\n" in data: break
+except Exception:
+    sys.exit(1)
+sys.exit(0 if data.strip()==expect else 1)
+PY
 }
-require_identity() {
-  [ "${AEGL_REQUIRE_INDEPENDENT_IDENTITY:-0}" = 1 ] || return 0
-  identity_status >&2 || die "independent operator identity required (AEGL_REQUIRE_INDEPENDENT_IDENTITY=1) but unavailable"
-  return 0
+
+# identity_probe -> prints a classification; returns 0 only for VERIFIED broker
+identity_probe() {
+  local sock="${AEGL_BROKER_SOCKET:-}"
+  [ -n "$sock" ] || { say "BROKER=NOT_AVAILABLE (no candidate socket configured)"; return 1; }
+  [ -S "$sock" ] || { say "BROKER=NOT_AVAILABLE (not a socket: $sock)"; return 1; }
+  local owner; owner="$(stat -c '%u' "$sock" 2>/dev/null)"
+  say "CANDIDATE_SOCKET ($sock owner_uid=${owner:-unknown})"
+  if [ "$owner" = "$(id -u)" ]; then
+    say "BROKER=REJECTED (candidate owned by our own uid; a same-uid socket is never independent)"; return 1
+  fi
+  if verify_broker "$sock"; then
+    say "BROKER=VERIFIED (candidate completed the $BROKER_PROTOCOL handshake)"; return 0
+  fi
+  say "BROKER=REJECTED (candidate did not complete the $BROKER_PROTOCOL handshake; owner alone does not authorize)"; return 1
+}
+identity_status() { identity_probe; }
+
+# promotion requires a verified broker; there is no opt-out environment variable
+require_broker() {
+  identity_probe >&2 || die "promotion requires a VERIFIED independent broker (socket path/owner is not authorization; no env bypass)"
 }
 
 # trusted-controller primitive: run an arbitrary command in the sandbox for a task.
@@ -324,7 +349,7 @@ task_promote() {
   local id="${1:?task promote <id>}" td wt proj branch
   controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
-  require_identity
+  require_broker   # default-deny: a verified independent broker is mandatory
   branch="$(task_field "$td/task.json" branch)"
   [ "$(cat "$td/verify.status" 2>/dev/null)" = "PASS" ] || die "task verify has not PASSed"
   [ -f "$td/verify.manifest" ] || die "no verify manifest (re-run task verify)"
@@ -351,7 +376,6 @@ task_discard() {
   local id="${1:?task discard <id>}" td wt proj branch
   controller_auth || die "task discard authentication failed"
   _verify_paths "$id"
-  require_identity
   branch="$(task_field "$td/task.json" branch)"
   git -C "$proj" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
   git -C "$proj" branch -D "$branch" >/dev/null 2>&1 || true
