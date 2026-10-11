@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted. A reality check of the **original** Hermes automation loop — Round update 6 — confirms the Hermes/Command-Code/DeepSeek hop works with the existing credential and closes the ChatGPT transport hop as the blocking link).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -554,3 +554,73 @@ Minimal necessary change: either a provider credential for a BYOK endpoint we co
 `baseURL` plus a local loopback-to-Unix broker can carry the call with the credential
 outside the sandbox), or client support for routing its own provider through `HTTPS_PROXY`.
 Until then `AI_BOUNDARY=BLOCKED`.
+
+## Round update 6: original Hermes automation loop — reality check (this session)
+
+The original automation chain is
+`ChatGPT control conversation → Campaign Supervisor → Bridge → Hermes upstream → Command Code provider → DeepSeek → deterministic verification → HERMES_RESULT_V1 → ChatGPT`,
+and its execution entry is `orchestration/hermes/bridge/contract_executor.py` →
+`hermes -p android-stack chat --oneshot --query-file <EXECUTOR-PROMPT.md>`. This round
+re-checked that chain against the facts in Rounds 4-5. No Stage 1/2 run was repeated and
+no canonical project source, bridge state, campaign state or control conversation was
+touched; the one closed-loop attempt used an isolated external `HERMES_BRIDGE_STATE_DIR`.
+
+Corrections to the earlier records:
+
+- **Scope of the prior CLI-trial facts (Rounds 4-5).** Those trials exercised the
+  **Command Code CLI** (`command-code -p … -m deepseek/deepseek-v4.1-flash`) **inside the
+  AEGL sandbox**, and reported `Not authenticated`. That trial never invoked
+  `hermes … chat --oneshot` and therefore **did not verify the original Hermes provider
+  chain**; the two are different routes. Keeping the CLI facts as-is; they say nothing
+  about whether Hermes can call Command Code.
+- **Inference withdrawn.** The earlier statement that "the original system must add a
+  DeepSeek API (BYOK) key to continue" is **not supported**. A by-hand provider key is only
+  relevant to the *sandbox-isolation* experiment (a controlled egress/credential broker);
+  the original Hermes route uses the existing Command Code credential and needs no new key.
+
+Evidence collected (this session):
+
+- **Original Hermes provider chain — PASS (real model call).**
+  `hermes -p android-stack chat --oneshot --query-file <smoke>` returned
+  `HERMES_COMMANDCODE_OK` in ~18s using the existing `COMMANDCODE_API_KEY` in
+  `~/.hermes/profiles/android-stack/.env`; profile config is `provider: commandcode`,
+  model `deepseek/deepseek-v4.1-flash`. No new DeepSeek/BYOK key was added and no
+  credential value was printed, copied or written to any report.
+- **Pinned runtime unchanged.** `~/.hermes/hermes-agent` HEAD `af90026aa…` =
+  `HERMES-LOCK.json` pin; `hermes --version` = `v0.21.5+6977.gaf90026 (2026.9.24)`.
+- **ChatGPT transport hop — BLOCKED (first failed hop).** The real Bridge entry
+  (`bridge_cli.py round`) fails closed at step 3 READ:
+  `decision: READ_FAILED, error: AdapterError, message: "BU_CDP_URL must equal http://127.0.0.1:9333"`.
+  No Chrome/CDP endpoint on `127.0.0.1:9333` and no Browser-Harness daemon are running;
+  `chatgpt_adapter` requires a pre-existing daemon (`BH_REQUIRE_EXISTING_DAEMON=1`) and
+  fails closed when the browser env is not established.
+- **New test session — BLOCKED.** `chatgpt_adapter.CONTROL_URL` is hard-bound to the
+  pre-existing control conversation (`/c/6ac4d058-…`). This round is forbidden to operate
+  that session, and a **new** test conversation cannot be addressed without a live-source
+  change to the control-URL/transport seam.
+
+Result of the one real closed-loop attempt (isolated external state; real entry; no mocks):
+
+```text
+ORIGINAL_AUTOMATION_RESULT
+  chatgpt_task_received: BLOCKED
+  hermes_commandcode_deepseek_executed: NOT_RUN
+  task_acceptance: NOT_RUN
+  chatgpt_result_delivered: NOT_RUN
+  first_failed_hop: chatgpt_task_received — Bridge READ failed: browser transport unavailable (no CDP 127.0.0.1:9333 / no Browser-Harness daemon; adapter pinned to the off-limits control conversation)
+  canonical_project_changes: 0
+  temporary_artifacts_remaining: 0
+  plan_commit: plan/original-automation-loop-check (this commit)
+ORIGINAL_AUTOMATION=BLOCKED
+AI_BOUNDARY=BLOCKED
+```
+
+`SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS` stand unchanged. Communication-loop
+success is not isolation success: `AI_BOUNDARY` is filled from actual evidence and remains
+`BLOCKED` (the model process is not confined and no independent promotion/egress broker
+exists). The Hermes→Command Code→DeepSeek hop is proven to need **no** new credential.
+
+Minimal necessary change for the original loop: bring up the Browser-Harness-owned Chrome
+on `127.0.0.1:9333` with the dedicated ChatGPT profile logged in, and point the bridge at a
+**new** test conversation (a configured control-URL/transport seam — never the off-limits
+session). The Hermes provider hop requires no change.
