@@ -2660,7 +2660,7 @@ GUARD: source_root expands; KeepLab benchmark ALLOW; Stack lock ALLOW
 |---|---|---|
 | KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
 | Stack | plan/keeplab-appprojects-path | 397d7817f44cb4c6578634a17bd3797a18fc0b6a |
-| AEGL | plan/keeplab-appprojects-migrate | (this Round 48 commit; see git rev-parse after commit) |
+| AEGL | plan/keeplab-appprojects-migrate | ad00c4b9bea6f08bf139f1238fa979c9b6234434 |
 
 ### Unified exec pack (operator trusted terminal; fixed SHAs)
 
@@ -2669,7 +2669,7 @@ After this Round 48 commit lands, set AEGL_TIP to that full SHA. Stack/KeepLab S
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-AEGL_TIP=REPLACE_WITH_ROUND48_AEGL_FULL_SHA
+AEGL_TIP=ad00c4b9bea6f08bf139f1238fa979c9b6234434
 STACK_TIP=397d7817f44cb4c6578634a17bd3797a18fc0b6a
 KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
 
