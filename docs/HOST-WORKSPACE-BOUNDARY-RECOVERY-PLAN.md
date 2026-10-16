@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` — Round update 40; promote broker already installed and independent-UID accepted — Round 16 / Round update 41; this branch's formal candidate is **not yet** root-registered/recorded or promoted. Cursor global-rules decision and canonical Stage 3 promotion of the candidate remain open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` — Round update 40; promote broker already installed and independent-UID accepted — Round 16 / Round update 41; this branch's formal candidate is **not yet** root-registered/recorded or promoted; `feat/beads-adapter` commits are already inside the tip (no re-merge); formal checkout must restore pinned `gradle-actions` dist then close onto `main` after promote (Round 42). Cursor global-rules decision remains open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -2097,7 +2097,7 @@ Do **not** expand socket mode, do **not** add `zhong` to `aegl-broker`, do **not
 | Commits after `1aecf24` (this branch’s named fix set) | `1d2a40e`, `1838f28`, `00a9241` (3) |
 | Files touched after `1aecf24` | `bin/aegl-hermes-sandbox`, `docs/HOST-WORKSPACE-BOUNDARY-RECOVERY-PLAN.md`, `recovery/capture_evidence.py`, `recovery/install-model-broker.sh`, `recovery/trial_gate.py`, `recovery/entry-mount-tests.sh`, `recovery/uid-launch-tests.sh`, `recovery/capture-hook-class-tests.sh`, `recovery/capture-hook-class-fix2-tests.sh` |
 | Full tip vs `main` | entire Stage 3 hermes/broker stack (~95 paths); promote of the **branch tip** includes that lineage, not only the 9-file delta |
-| Formal checkout (do not overwrite) | `feat/beads-adapter` @ `a01eb01…` with dirty submodule `upstream/gradle-actions` — promote via **external** task worktree / broker apply only |
+| Formal checkout (close after promote) | Currently `feat/beads-adapter` @ `a01eb01…`; submodule pin `50e97c2` (v6.1.0) with **uncommitted** 10-file `dist/` deletions — restore from that pin via trusted ops, then after tip→`main` promote switch formal tree to `main` clean (Round 42). |
 
 ### What is still missing (itemized; not “provide a broker”)
 
@@ -2114,5 +2114,119 @@ CURRENT_USER_SOCKET_ACCESS=EACCES (zhong not in aegl-broker; expected)
 CANDIDATE_TIP=00a9241cf8dfc8712bb9e2567d7c77259e8440d3
 CANDIDATE_BASELINE=6f495c45b67a0217034be2510068b2bc56c85607
 FORMAL_REGISTER_RECORD_PROMOTE=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
+## Round update 42: beads already in tip; gradle-actions restore + close onto main
+
+No promote/register/record executed. Corrects Round 41’s “leave formal dirty alone” framing:
+process the dirt, then close the formal workspace onto `main` after the tip is promoted.
+
+### 1. `feat/beads-adapter` vs promotion tip — no re-merge
+
+```text
+feat/beads-adapter tip = a01eb01200d60364b8df78c30dcde23228242377
+plan/capture-hook-classfix tip (pre-this-note) = 778f472944baecc255de8c4b6e0631e02f424464
+merge-base --is-ancestor feat/beads-adapter plan/capture-hook-classfix → YES
+rev-list plan/capture-hook-classfix..feat/beads-adapter → 0 commits
+```
+
+All six `main..feat/beads-adapter` commits are already ancestors of the promotion tip
+(`e316a04` … `a01eb01`). **Do not re-merge `feat/beads-adapter` into the candidate.**
+
+### 2. `upstream/gradle-actions` dirt — restore pin, exclude from candidate
+
+| Fact | Value |
+|---|---|
+| Submodule gitlink (beads / tip / main) | `50e97c2cd7a37755bbfafc9c5b7cafaece252f6e` (v6.1.0) — unchanged |
+| Working-tree dirt | 10 **tracked** `dist/**` deletions (not a commit; not in tip) |
+| Referenced by | `setup-gradle` / `dependency-submission` / `wrapper-validation` `action.yml` `main`/`post` |
+| Restore source | **same fixed pin** `50e97c2…` only — no latest download, no regenerate, no backup |
+| In promotion candidate? | **No** — deletions must never be recorded/promoted |
+
+Trusted restore (formal tree; not Cursor direct write) uses operator/root git restore from that
+pin inside `upstream/gradle-actions`, then confirms parent `git status` has no submodule dirt.
+
+### 3–4. End state: `main` + clean formal workspace
+
+After tip is promoted onto `main`, the formal AEGL checkout must **`git switch main`** (or
+equivalent) and be clean. No `reset --hard`, `git clean`, `stash`, or backup to hide leftovers.
+Pre-switch gate: beads commits on `main`, gradle-actions dist restored, `git status --porcelain`
+empty (aside from any explicitly authorized exception — none expected).
+
+### Unified pending command package (await operator authorization)
+
+Substitute `TIP` with the tip SHA after this Round 42 docs commit lands on
+`plan/capture-hook-classfix`. `AEGL` = `/home/zhong/Projects/AI-Engineering-Governance-Layer`.
+`TASK_BIN` = path to `bin/aegl-task` from an **external** worktree at `TIP` (not the dirty formal
+checkout used as the edit surface).
+
+```bash
+# === A. Preflight (read-only) ===
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=<FULL_SHA_AFTER_ROUND42_COMMIT>
+PIN=50e97c2cd7a37755bbfafc9c5b7cafaece252f6e
+test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
+git -C "$AEGL" merge-base --is-ancestor feat/beads-adapter "$TIP"
+test "$(git -C "$AEGL" rev-list --count "$TIP"..feat/beads-adapter)" = 0
+test "$(git -C "$AEGL" ls-tree "$TIP" upstream/gradle-actions | awk '{print $3}')" = "$PIN"
+
+# === B. Trusted restore of pinned gradle-actions dist (formal tree; authorized op) ===
+# Impact: recreates 10 deleted tracked files from PIN only; no network; no new commit.
+sudo -u zhong git -C "$AEGL/upstream/gradle-actions" restore --source="$PIN" -- \
+  dist/dependency-submission/main/index.js \
+  dist/dependency-submission/main/index.js.map \
+  dist/dependency-submission/post/index.js \
+  dist/dependency-submission/post/index.js.map \
+  dist/setup-gradle/main/index.js \
+  dist/setup-gradle/main/index.js.map \
+  dist/setup-gradle/post/index.js \
+  dist/setup-gradle/post/index.js.map \
+  dist/wrapper-validation/main/index.js \
+  dist/wrapper-validation/main/index.js.map
+test -z "$(git -C "$AEGL/upstream/gradle-actions" status --porcelain)"
+test -z "$(git -C "$AEGL" status --porcelain)"
+
+# === C. External candidate worktree + broker register/record/promote → main ===
+# Impact: registry write under /var/lib/aegl-promote; merge promoted object into AEGL main.
+EXT=$(mktemp -d /var/tmp/aegl-promote-cand-XXXXXX)
+git -C "$AEGL" worktree add -f "$EXT/wt" "$TIP"
+# Build TASK_BIN from tip (isolation tree), register/record as root, promote as aegl-ai
+# (exact task id / controller token files supplied by operator at run time)
+export AEGL_BROKER_SOCKET=/run/aegl-promote/broker.sock
+# sudo AEGL_BROKER_SOCKET=... "$TASK_BIN" task start AI-Engineering-Governance-Layer <name>  # or register existing EXT/wt
+# sudo AEGL_BROKER_SOCKET=... "$TASK_BIN" task register <id>
+# sudo AEGL_BROKER_SOCKET=... "$TASK_BIN" task record <id>
+# sudo -u aegl-ai env AEGL_BROKER_SOCKET=... AEGL_CONTROLLER_TOKEN=... AEGL_CONTROLLER_TOKEN_FILE=... \
+#   "$TASK_BIN" task promote <id>
+test "$(git -C "$AEGL" rev-parse main)" = "$TIP"   # or merge-base --is-ancestor "$TIP" main after promote shape
+
+# === D. Close formal workspace onto main (no hard reset / clean / stash) ===
+# Impact: moves formal checkout branch pointer to main; refuses if still dirty.
+cd "$AEGL"
+test -z "$(git status --porcelain)"
+git merge-base --is-ancestor feat/beads-adapter main
+git merge-base --is-ancestor "$TIP" main || test "$(git rev-parse main)" = "$TIP"
+git switch main
+test "$(git rev-parse --abbrev-ref HEAD)" = main
+test -z "$(git status --porcelain)"
+git -C upstream/gradle-actions rev-parse HEAD | grep -qx "$PIN"
+test -f upstream/gradle-actions/dist/setup-gradle/main/index.js
+
+# === E. Cleanup external promote worktree only ===
+git -C "$AEGL" worktree remove --force "$EXT/wt" || true
+rm -rf "$EXT"
+```
+
+Optional (separate auth): write `/etc/aegl/broker-verified`; run host-identity `switch` for
+bulk project ownership — **not** required for A–E above.
+
+```text
+BEADS_IN_TIP=YES (0 commits missing; no re-merge)
+GRADLE_ACTIONS_PIN=50e97c2cd7a37755bbfafc9c5b7cafaece252f6e
+GRADLE_ACTIONS_DIST_DIRT=10 tracked deletions (restore-from-pin; not in candidate)
+FORMAL_CLOSE_TARGET=main (clean)
+PROMOTE_EXECUTED=NO (awaiting operator auth of A–E)
 AI_BOUNDARY=BLOCKED
 ```
