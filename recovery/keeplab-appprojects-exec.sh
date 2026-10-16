@@ -110,52 +110,220 @@ require_hex40() {
   [ "${#val}" -eq 40 ] || stop bad_sha "$name must be full 40-hex (got ${#val})"
 }
 
-# Sync formal index+worktree to approved tip without reset --hard / clean / stash.
+# BEGIN_FORMAL_SYNC
+# Formal sync: pre-CAS baseline + post-CAS restore without reset --hard / clean / stash.
 # Branch name already being main/master is NOT treated as source deployed.
-sync_formal_to_tip() {
-  local proj="$1" tip="$2" branch="$3"
-  say "SYNC_FORMAL project=$proj tip=$tip branch=$branch"
-  runuser -u "$OP_USER" -- env \
-    PROJ="$proj" TIP="$tip" BRANCH="$branch" \
-    bash -c '
-    set -euo pipefail
-    cd "$PROJ"
-    porcelain="$(git status --porcelain | grep -vE "^.. references/" || true)"
-    if [ -n "$porcelain" ]; then
-      printf "STOP_AT=formal_dirty_preserved\n" >&2
-      printf "EXEC_ERROR: formal tree has modifications; preserving and refusing sync\n" >&2
-      printf "%s\n" "$porcelain" >&2
+# Known gitlink (mode 160000) porcelain is tolerated only when index OID matches the
+# given tree-ish exactly — never by ignoring the whole references/ directory.
+
+_formal_as_op() {
+  if [ "$(id -u)" = 0 ]; then
+    runuser -u "$OP_USER" -- "$@"
+  else
+    "$@"
+  fi
+}
+
+# Shared body run as operator (self-contained; no parent-shell function deps).
+_formal_op_script() {
+  cat <<'EOS'
+set -euo pipefail
+cd "$PROJ"
+
+unchanged_gitlink() {
+  local path="$1" treeish="$2" meta mode oid head_oid
+  meta="$(git ls-files -s -- "$path" 2>/dev/null || true)"
+  meta="$(printf '%s\n' "$meta" | awk 'NR==1{print; exit}')"
+  [ -n "$meta" ] || return 1
+  mode="$(printf '%s' "$meta" | awk '{print $1}')"
+  oid="$(printf '%s' "$meta" | awk '{print $2}')"
+  [ "$mode" = "160000" ] || return 1
+  head_oid="$(git rev-parse "$treeish:$path" 2>/dev/null)" || return 1
+  [ "$oid" = "$head_oid" ]
+}
+
+real_dirty() {
+  local treeish="$1" line path
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    unchanged_gitlink "$path" "$treeish" && continue
+    printf '%s\n' "$line"
+  done < <(git status --porcelain || true)
+}
+
+pick_sample() {
+  # Fully consume ls-tree (no SIGPIPE under pipefail); prefer a non-gitlink blob.
+  git ls-tree -r --name-only HEAD | awk '
+    {
+      names[++n] = $0
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        cmd = "git ls-files -s -- " names[i]
+        if ((cmd | getline meta) > 0) {
+          close(cmd)
+          split(meta, a, " ")
+          if (a[1] != "160000") { print names[i]; exit }
+        } else close(cmd)
+      }
+      if (n >= 1) print names[1]
+    }
+  '
+}
+
+MODE="${FORMAL_MODE:?}"
+case "$MODE" in
+pre_cas)
+  cur="$(git rev-parse --abbrev-ref HEAD)"
+  ref_oid="$(git rev-parse "refs/heads/$BRANCH")"
+  head_oid="$(git rev-parse HEAD)"
+  printf "FORMAL_BASELINE_BRANCH=%s\n" "$cur"
+  printf "FORMAL_BASELINE_REF=%s\n" "$ref_oid"
+  printf "FORMAL_BASELINE_HEAD=%s\n" "$head_oid"
+  printf "FORMAL_BASELINE_PORCELAIN_BEGIN\n"
+  git status --porcelain || true
+  printf "FORMAL_BASELINE_PORCELAIN_END\n"
+  real="$(real_dirty HEAD || true)"
+  if [ -n "${real:-}" ]; then
+    printf "STOP_AT=formal_dirty_preserved\n" >&2
+    printf "EXEC_ERROR: real user modifications present; refusing CAS (preserving worktree)\n" >&2
+    printf "%s\n" "$real" >&2
+    exit 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    unchanged_gitlink "$path" HEAD \
+      || { printf "STOP_AT=formal_gitlink_drift\n" >&2; exit 1; }
+    idx="$(git ls-files -s -- "$path" | awk '{print $2}')"
+    printf "FORMAL_GITLINK_OK path=%s index=%s\n" "$path" "$idx"
+  done < <(git status --porcelain || true)
+  printf "FORMAL_PRE_CAS_OK=1\n"
+  ;;
+sync)
+  cur="$(git rev-parse --abbrev-ref HEAD)"
+  if [ "$cur" != "$BRANCH" ]; then
+    git switch "$BRANCH"
+  fi
+  test "$(git rev-parse "refs/heads/$BRANCH")" = "$TIP"
+  test "$(git rev-parse HEAD)" = "$TIP"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    if unchanged_gitlink "$path" HEAD; then
+      printf "SYNC_GITLINK_UNCHANGED path=%s\n" "$path"
+      continue
+    fi
+    meta="$(git ls-files -s -- "$path" 2>/dev/null || true)"
+    meta="$(printf '%s\n' "$meta" | awk 'NR==1{print; exit}')"
+    mode="$(printf '%s' "$meta" | awk '{print $1}')"
+    idx_oid="$(printf '%s' "$meta" | awk '{print $2}')"
+    new_blob="$(git rev-parse "HEAD:$path" 2>/dev/null || echo MISSING)"
+    old_blob="MISSING"
+    if [ -n "${BASELINE_OID:-}" ]; then
+      old_blob="$(git rev-parse "$BASELINE_OID:$path" 2>/dev/null || echo MISSING)"
+    fi
+    if [ "$mode" = "160000" ]; then
+      # Gitlink lag after CAS: index still at baseline OID is expected; other OID = user change.
+      if [ "$idx_oid" = "$new_blob" ] || [ "$idx_oid" = "$old_blob" ]; then
+        printf "SYNC_EXPECTED_GITLINK_LAG path=%s\n" "$path"
+        continue
+      fi
+      printf "STOP_AT=formal_gitlink_changed\n" >&2
+      printf "EXEC_ERROR: gitlink index changed for %s; preserving\n" "$path" >&2
       exit 1
     fi
-    cur="$(git rev-parse --abbrev-ref HEAD)"
-    if [ "$cur" != "$BRANCH" ]; then
-      git switch "$BRANCH"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      wt_blob="$(git hash-object -t blob -- "$path" 2>/dev/null || echo MISSING)"
+    else
+      wt_blob="MISSING"
     fi
-    test "$(git rev-parse "refs/heads/$BRANCH")" = "$TIP"
-    # Ref may already equal TIP while index/worktree lag (external update-ref).
-    git restore --source=HEAD --staged --worktree -- .
-    test "$(git rev-parse HEAD)" = "$TIP"
-    test "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH"
-    leftover="$(git status --porcelain | grep -vE "^.. references/" || true)"
-    test -z "$leftover"
-    sample="$(git ls-tree -r --name-only HEAD | head -1)"
-    test -n "$sample"
+    if [ "$wt_blob" = "$old_blob" ] || [ "$wt_blob" = "$new_blob" ]; then
+      printf "SYNC_EXPECTED_LAG path=%s\n" "$path"
+      continue
+    fi
+    printf "STOP_AT=formal_dirty_preserved\n" >&2
+    printf "EXEC_ERROR: new user modification on %s (not baseline lag); preserving\n" "$path" >&2
+    printf "%s\n" "$line" >&2
+    exit 1
+  done < <(git status --porcelain || true)
+
+  git restore --source=HEAD --staged --worktree -- .
+  test "$(git rev-parse HEAD)" = "$TIP"
+  test "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH"
+
+  real="$(real_dirty HEAD || true)"
+  if [ -n "${real:-}" ]; then
+    printf "STOP_AT=formal_sync_leftover\n" >&2
+    printf "EXEC_ERROR: leftover dirty after restore\n" >&2
+    printf "%s\n" "$real" >&2
+    exit 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    unchanged_gitlink "$path" HEAD
+  done < <(git status --porcelain || true)
+
+  sample="$(pick_sample)"
+  test -n "$sample"
+  if [ "$(git ls-files -s -- "$sample" | awk '{print $1}')" != "160000" ]; then
     want="$(git rev-parse "HEAD:$sample")"
     got="$(git hash-object -t blob -- "$sample")"
     test "$want" = "$got"
-    printf "SYNC_FORMAL_OK sample=%s\n" "$sample"
-  ' || stop formal_sync_failed "formal sync failed for $proj @$tip"
+  fi
+  printf "SYNC_FORMAL_OK sample=%s\n" "$sample"
+  ;;
+*)
+  printf "STOP_AT=formal_bad_mode\n" >&2
+  exit 2
+  ;;
+esac
+EOS
 }
+
+formal_pre_cas_check() {
+  local proj="$1" branch="$2" out rc=0
+  say "FORMAL_PRE_CAS project=$proj branch=$branch"
+  set +e
+  out="$(_formal_op_script | _formal_as_op env PROJ="$proj" BRANCH="$branch" FORMAL_MODE=pre_cas bash -s)"
+  rc=$?
+  set -e
+  [ "$rc" = 0 ] || stop formal_pre_cas_failed "pre-CAS formal check failed for $proj"
+  printf '%s\n' "$out"
+  FORMAL_BASELINE_OID="$(printf '%s\n' "$out" | awk -F= '/^FORMAL_BASELINE_REF=/{print $2}' | tail -1)"
+  [ -n "$FORMAL_BASELINE_OID" ] || stop formal_baseline_missing "no FORMAL_BASELINE_REF"
+}
+
+# Args: proj tip branch [baseline_oid]
+sync_formal_to_tip() {
+  local proj="$1" tip="$2" branch="$3" baseline_oid="${4:-}" rc=0
+  say "SYNC_FORMAL project=$proj tip=$tip branch=$branch baseline=${baseline_oid:-none}"
+  set +e
+  _formal_op_script | _formal_as_op env \
+    PROJ="$proj" TIP="$tip" BRANCH="$branch" BASELINE_OID="$baseline_oid" FORMAL_MODE=sync \
+    bash -s
+  rc=$?
+  set -e
+  [ "$rc" = 0 ] || stop formal_sync_failed "formal sync failed for $proj @$tip"
+}
+# END_FORMAL_SYNC
 
 # Promote tip onto exact target_ref using proven cross-UID candidate + broker gates.
 promote_tip() {
   local proj="$1" tip="$2" target_ref="$3" task_id="$4"
   local branch_name="${target_ref#refs/heads/}"
-  local tip_now
+  local tip_now baseline_oid
   tip_now="$(git -C "$proj" rev-parse "$target_ref")"
+  # Pre-CAS: record formal baseline; refuse and preserve real user edits before ref moves.
+  FORMAL_BASELINE_OID=""
+  formal_pre_cas_check "$proj" "$branch_name"
+  baseline_oid="$FORMAL_BASELINE_OID"
   if [ "$tip_now" = "$tip" ]; then
     say "PROMOTE_SKIP ref already=$tip — still verifying formal deploy"
-    sync_formal_to_tip "$proj" "$tip" "$branch_name"
+    sync_formal_to_tip "$proj" "$tip" "$branch_name" "$baseline_oid"
     return 0
   fi
   git -C "$proj" merge-base --is-ancestor "$tip_now" "$tip" 2>/dev/null \
@@ -219,7 +387,7 @@ promote_tip() {
     || stop promote_ref_mismatch "$target_ref != $tip after promote"
 
   cleanup_all
-  sync_formal_to_tip "$proj" "$tip" "$branch_name"
+  sync_formal_to_tip "$proj" "$tip" "$branch_name" "$baseline_oid"
   say "PROMOTE_OK $proj $target_ref=$tip"
 }
 
@@ -300,7 +468,7 @@ preflight_all() {
   say "AEGL_HEAD_BRANCH=$(git -C "$AEGL" rev-parse --abbrev-ref HEAD)"
   say "AEGL_PORCELAIN_BYTES=$(git -C "$AEGL" status --porcelain | wc -c)"
   say "STACK_HEAD_BRANCH=$(git -C "$STACK" rev-parse --abbrev-ref HEAD)"
-  say "STACK_PORCELAIN_BYTES=$(git -C "$STACK" status --porcelain | grep -vE '^.. references/' | wc -c)"
+  say "STACK_PORCELAIN_BYTES=$(git -C "$STACK" status --porcelain | wc -c)"
   say "KEEPLAB_HEAD_BRANCH=$(git -C "$kl_repo" rev-parse --abbrev-ref HEAD)"
   say "KEEPLAB_PORCELAIN_BYTES=$(git -C "$kl_repo" status --porcelain | wc -c)"
 

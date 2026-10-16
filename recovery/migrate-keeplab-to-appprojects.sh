@@ -75,6 +75,15 @@ resolve_tasks_root() {
 say "KEEPLAB_MIGRATE begin phase=$PHASE src=$SRC dst=$DST dry_run=$DRY_RUN sync_broker=$SYNC_BROKER"
 say "OPERATOR_USER=$OPERATOR_USER OPERATOR_HOME=$OPERATOR_HOME"
 
+# Project-code checks (doctor / imports) always as operator — never root.
+as_operator() {
+  if [ "$(id -u)" = 0 ]; then
+    runuser -u "$OPERATOR_USER" -- "$@"
+  else
+    "$@"
+  fi
+}
+
 # --------------------------------------------------------------------------- #
 # precheck helpers
 # --------------------------------------------------------------------------- #
@@ -196,13 +205,11 @@ check_active_keeplab_entries() {
   else
     say "HERMES_PROFILE=absent ($hermes_cfg)"
   fi
-  # Formal recovery/task entries after patches must resolve KeepLab (pre-move: Projects).
+  # Formal recovery doctor as operator (HOME/XDG); never root importing recovery entry.
   if [ -x "$AEGL/bin/aegl-recovery" ]; then
     local kr
-    kr="$(PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
-      bash -c 'source /dev/null; SELF='"$AEGL/bin/aegl-recovery"'; true' 2>/dev/null || true)"
-    # Doctor one-liner: print keeplab= from doctor
-    kr="$(PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
+    kr="$(as_operator env PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
+      HOME="$OPERATOR_HOME" \
       "$AEGL/bin/aegl-recovery" doctor 2>/dev/null | grep '^keeplab=' || true)"
     say "AEGL_RECOVERY_KEEPLAB=${kr:-unresolved}"
   fi
@@ -343,14 +350,16 @@ phase_post() {
     fi
     if [ -x "$AEGL/bin/aegl-recovery" ]; then
       local kr
-      kr="$(PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
+      kr="$(as_operator env PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
+        HOME="$OPERATOR_HOME" \
         "$AEGL/bin/aegl-recovery" doctor 2>/dev/null | grep '^keeplab=' || true)"
       say "RECOVERY_KEEPLAB=$kr"
       printf '%s\n' "$kr" | grep -q "keeplab=$DST" \
         || stop post_recovery_keeplab_mismatch "aegl-recovery doctor keeplab != $DST ($kr)"
     fi
     local guard="$STACK/orchestration/hermes/evaluation_adapter/contract_guard.py"
-    python3 - "$guard" "$DST" "$APP_PARENT" "$PROJECTS_ROOT" <<'PY' \
+    as_operator env PROJECTS_ROOT="$PROJECTS_ROOT" AEGL_BUSINESS_ROOT="$APP_PARENT" \
+      python3 - "$guard" "$DST" "$APP_PARENT" "$PROJECTS_ROOT" <<'PY' \
       || stop post_guard_source_root "contract_guard source_root/package check failed"
 import importlib.util, os, sys
 guard_path, keeplab, business, projects = sys.argv[1:5]

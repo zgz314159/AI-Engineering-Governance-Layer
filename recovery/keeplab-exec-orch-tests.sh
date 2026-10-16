@@ -94,42 +94,109 @@ DEC2="$(printf '%s' "$OUT2" | python3 -c 'import json,sys;print(json.load(sys.st
 
 kill "$BPID" 2>/dev/null; wait "$BPID" 2>/dev/null; unset BPID
 
-# --- 3) checked-out target branch: ref update + restore sync ---------------- #
+# --- 3) real sync_formal_to_tip after update-ref on checked-out branch ------- #
+# Extract production formal-sync helpers (BEGIN/END markers) — no simplified copy.
+OP_USER="$(id -un)"
+export OP_USER
+say(){ printf '%s\n' "$*"; }
+# Match production stop semantics inside sourced helpers (exit the subshell/process).
+stop(){ printf 'STOP_AT=%s\n' "$1" >&2; shift; printf 'EXEC_ERROR: %s\n' "$*" >&2; exit 1; }
+# shellcheck disable=SC1090
+eval "$(python3 - "$EXEC" <<'PY'
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+a = t.index("# BEGIN_FORMAL_SYNC")
+b = t.index("# END_FORMAL_SYNC")
+print(t[a:b + len("# END_FORMAL_SYNC")])
+PY
+)"
+
 REPO="$ST/formal"; mkdir -p "$REPO"
 git -C "$REPO" init -q
 ( cd "$REPO" && echo v1 > f.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm v1 )
 git -C "$REPO" branch -M main
 V1="$(git -C "$REPO" rev-parse HEAD)"
-# second commit on side, then update-ref main (simulate broker CAS) while checked out on main
 git -C "$REPO" checkout -q -b cand
 ( cd "$REPO" && echo v2 > f.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm v2 )
 V2="$(git -C "$REPO" rev-parse HEAD)"
 git -C "$REPO" checkout -q main
-# worktree still v1 content; move main ref like broker update-ref
-git -C "$REPO" update-ref refs/heads/main "$V2"
-# HEAD now points at V2 via main, but file may still be v1 until restore
-test "$(git -C "$REPO" rev-parse HEAD)" = "$V2"
-# sync without reset --hard
-(
-  cd "$REPO"
-  porcelain="$(git status --porcelain || true)"
-  # after update-ref, status is typically dirty-looking vs index
-  git restore --source=HEAD --staged --worktree -- .
-  test "$(git rev-parse HEAD)" = "$V2"
-  test -z "$(git status --porcelain)"
-  test "$(cat f.txt)" = "v2"
-  want="$(git rev-parse HEAD:f.txt)"
-  got="$(git hash-object -t blob -- f.txt)"
-  test "$want" = "$got"
-) && ok "checked-out branch sync restores files to tip" || no "formal sync after update-ref"
+test "$(cat "$REPO/f.txt")" = "v1"
 
-# dirty preserve: refuse sync when modified
-echo dirt >> "$REPO/f.txt"
-(
-  cd "$REPO"
-  porcelain="$(git status --porcelain | grep -vE '^.. references/' || true)"
-  test -n "$porcelain"
-) && ok "dirty formal tree detected for preserve" || no "dirty detect"
+FORMAL_BASELINE_OID=""
+if formal_pre_cas_check "$REPO" main && [ "$FORMAL_BASELINE_OID" = "$V1" ]; then
+  ok "pre-CAS baseline recorded"
+else
+  no "pre-CAS baseline"
+fi
+
+git -C "$REPO" update-ref refs/heads/main "$V2"
+test "$(git -C "$REPO" rev-parse HEAD)" = "$V2"
+test "$(cat "$REPO/f.txt")" = "v1"
+
+if sync_formal_to_tip "$REPO" "$V2" main "$V1" \
+  && [ "$(cat "$REPO/f.txt")" = "v2" ] \
+  && [ "$(git -C "$REPO" rev-parse HEAD)" = "$V2" ] \
+  && [ -z "$(git -C "$REPO" status --porcelain)" ] \
+  && [ "$(git -C "$REPO" rev-parse HEAD:f.txt)" = "$(git -C "$REPO" hash-object -t blob -- f.txt)" ]; then
+  ok "sync_formal_to_tip restores ref/index/file after update-ref"
+else
+  no "sync_formal_to_tip after update-ref"
+fi
+
+# Real user edit must not be overwritten: pre-CAS refuses before ref update.
+REPO2="$ST/formal2"; mkdir -p "$REPO2"
+git -C "$REPO2" init -q
+( cd "$REPO2" && echo a > f.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm a )
+git -C "$REPO2" branch -M main
+echo userdirt >> "$REPO2/f.txt"
+BEFORE="$(cat "$REPO2/f.txt")"
+if ( formal_pre_cas_check "$REPO2" main >/dev/null 2>&1 ); then
+  no "pre-CAS should refuse real user dirty"
+else
+  [ "$(cat "$REPO2/f.txt")" = "$BEFORE" ] \
+    && ok "real user dirty preserved (pre-CAS refuse)" \
+    || no "user dirty overwritten"
+fi
+
+# Post-CAS new user edit: sync refuses and preserves
+REPO3="$ST/formal3"; mkdir -p "$REPO3"
+git -C "$REPO3" init -q
+( cd "$REPO3" && echo a > f.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm a )
+git -C "$REPO3" branch -M main
+B1="$(git -C "$REPO3" rev-parse HEAD)"
+git -C "$REPO3" checkout -q -b c
+( cd "$REPO3" && echo b > f.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm b )
+B2="$(git -C "$REPO3" rev-parse HEAD)"
+git -C "$REPO3" checkout -q main
+( formal_pre_cas_check "$REPO3" main >/dev/null )
+git -C "$REPO3" update-ref refs/heads/main "$B2"
+echo sneak >> "$REPO3/f.txt"
+SNEAK="$(cat "$REPO3/f.txt")"
+if ( sync_formal_to_tip "$REPO3" "$B2" main "$B1" >/dev/null 2>&1 ); then
+  no "sync should refuse new user edit after CAS"
+else
+  [ "$(cat "$REPO3/f.txt")" = "$SNEAK" ] \
+    && ok "post-CAS user edit preserved (sync refuse)" \
+    || no "post-CAS user edit lost"
+fi
+
+# Static: no blanket references/ ignore; no ls-tree|head sample
+if grep -nE 'grep -vE.*references/' "$EXEC" | grep -vqE '^\s*#'; then
+  no "exec still blanket-ignores references/"
+else
+  ok "no blanket references/ ignore"
+fi
+grep -qE 'ls-tree.*\|[[:space:]]*head' "$EXEC" \
+  && no "exec still uses ls-tree|head (SIGPIPE risk)" \
+  || ok "ls-tree sample fully consumes input"
+MIG="$AEGL_ROOT/recovery/migrate-keeplab-to-appprojects.sh"
+if grep -q 'as_operator()' "$MIG" \
+  && awk '/as_operator env/{f=1} f && /aegl-recovery/{c++; f=0} END{exit !(c>=2)}' "$MIG"; then
+  ok "migrate doctor runs via as_operator"
+else
+  no "migrate doctor not as_operator"
+fi
 
 echo "KEEPLAB_ORCH_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
