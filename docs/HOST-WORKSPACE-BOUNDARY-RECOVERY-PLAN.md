@@ -2350,7 +2350,7 @@ DEPLOY_E_RESUME_TESTS passed=7 failed=0
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=ROUND45_TIP_SHA
+TIP=6bd578d20a7214ff733ca97a24fbd51dad147636
 test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
 test "$(git -C "$AEGL" rev-parse refs/heads/main)" = 6f495c45b67a0217034be2510068b2bc56c85607
 # Trusted terminal: load installed program (restart). If D already installed this tip's
@@ -2365,7 +2365,7 @@ git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
 ```text
 RESUME_FROM_E=READY
 MAIN_BASELINE=6f495c45b67a0217034be2510068b2bc56c85607
-TIP=ROUND45_TIP_SHA
+TIP=6bd578d20a7214ff733ca97a24fbd51dad147636
 LIVE_PROMOTE=OPERATOR_RESUME
 AI_BOUNDARY=BLOCKED
 ```
