@@ -99,18 +99,27 @@ while [ "$cur" != "/" ]; do
 done
 
 GIT="$PROJ/.git"
-setfacl -m "u:${BROKER_USER}:r-x" "$GIT" || fail "setfacl .git"
+# Non-recursive rwx on .git directory only: create/remove HEAD.lock when the
+# target branch is the current checkout. Do NOT -R write the whole .git tree.
+setfacl -m "u:${BROKER_USER}:rwx" "$GIT" || fail "setfacl .git dir (HEAD.lock)"
 if [ -d "$GIT/objects" ]; then
   setfacl -R -m "u:${BROKER_USER}:r-X" "$GIT/objects" || fail "setfacl objects"
 fi
-for f in HEAD config packed-refs; do
+for f in config packed-refs; do
   [ -e "$GIT/$f" ] || continue
   setfacl -m "u:${BROKER_USER}:r--" "$GIT/$f" || fail "setfacl $f"
 done
-mkdir -p "$GIT/refs/heads" "$GIT/logs/refs/heads" || fail "mkdir refs"
+# HEAD + HEAD reflog: checked-out update-ref locks HEAD and appends logs/HEAD.
+setfacl -m "u:${BROKER_USER}:rw-" "$GIT/HEAD" || fail "setfacl HEAD"
+mkdir -p "$GIT/logs" "$GIT/refs/heads" "$GIT/logs/refs/heads" || fail "mkdir refs/logs"
+if [ ! -e "$GIT/logs/HEAD" ]; then
+  touch "$GIT/logs/HEAD" || fail "touch logs/HEAD"
+  chown --reference="$GIT" "$GIT/logs/HEAD" 2>/dev/null || true
+fi
+setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs" || fail "setfacl logs"
+setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/HEAD" || fail "setfacl logs/HEAD"
 setfacl -m "u:${BROKER_USER}:r-x" "$GIT/refs" || fail "setfacl refs"
 setfacl -m "u:${BROKER_USER}:rwx" "$GIT/refs/heads" || fail "setfacl refs/heads"
-setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs" 2>/dev/null || true
 setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs/refs" 2>/dev/null || true
 setfacl -m "u:${BROKER_USER}:rwx" "$GIT/logs/refs/heads" || fail "setfacl logs/refs/heads"
 if [ -e "$GIT/refs/heads/$BRANCH_NAME" ]; then
@@ -128,9 +137,25 @@ TIP_OID="$(runuser -u "$BROKER_USER" -- git \
   -C "$PROJ" rev-parse --verify "$TARGET_REF" 2>/dev/null)" \
   || fail "aegl-promote cannot rev-parse $TARGET_REF (traverse/read ACL or safe.directory incomplete)"
 [ "${#TIP_OID}" -eq 40 ] || fail "unexpected tip oid"
+
+# Prove HEAD.lock + HEAD reflog (not merely rev-parse).
+if ! runuser -u "$BROKER_USER" -- bash -c "
+  set -e
+  touch '$GIT/HEAD.lock'
+  rm -f '$GIT/HEAD.lock'
+  test -w '$GIT/logs/HEAD'
+  printf '' >> '$GIT/logs/HEAD'
+"; then
+  fail "aegl-promote cannot create HEAD.lock or append logs/HEAD"
+fi
 if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
   rm -f "$PROJ/.aegl-acl-probe"
   fail "aegl-promote can write project worktree — ACL too broad"
 fi
+# Recursive write must remain absent on objects (spot-check: cannot create under objects).
+if runuser -u "$BROKER_USER" -- touch "$GIT/objects/.aegl-acl-probe" 2>/dev/null; then
+  rm -f "$GIT/objects/.aegl-acl-probe"
+  fail "aegl-promote can write .git/objects — ACL too broad"
+fi
 
-say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER"
+say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=ok head_reflog=ok"

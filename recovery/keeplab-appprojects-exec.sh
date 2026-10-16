@@ -417,6 +417,7 @@ run_final_post_as_operator() {
 print_plan() {
   say "PLANNED_STEPS<<"
   say "  0 preflight: three SHAs, target refs, ancestors, project state"
+  say "  0b throwaway ACL CAS (HEAD.lock + logs/HEAD) as aegl-promote — before any formal mutate"
   say "  1 promote AEGL $COMMIT -> refs/heads/main + sync formal"
   say "  2 install-broker --business-root $BUSINESS_ROOT from $COMMIT"
   say "  3 promote Stack $STACK_COMMIT -> refs/heads/master + sync formal (live guard)"
@@ -445,6 +446,7 @@ preflight_all() {
   for f in recovery/keeplab-appprojects-exec.sh recovery/keeplab-appprojects-postcheck.sh \
            recovery/migrate-keeplab-to-appprojects.sh \
            recovery/install-broker.sh recovery/install-promote-target-acl.sh \
+           recovery/keeplab-promote-acl-cas-test.sh \
            recovery/promotion_broker.py recovery/promotion_core.py bin/aegl-promote-broker \
            bin/aegl-task bin/aegl-recovery; do
     git -C "$AEGL" cat-file -e "$COMMIT:$f" 2>/dev/null || stop tip_missing_path "AEGL tip missing $f"
@@ -553,6 +555,13 @@ id "$AI_USER" >/dev/null 2>&1 || stop missing_user "$AI_USER"
 preflight_all
 [ -d "$KEEPLAB_SRC" ] || stop src_missing "SRC missing (if already moved: --resume-after-move): $KEEPLAB_SRC"
 [ -e "$KEEPLAB_DST" ] && stop dst_exists "DST already exists: $KEEPLAB_DST"
+
+# Before any formal promote: throwaway cross-UID CAS proves HEAD.lock + logs/HEAD ACL
+# from this tip's installer (no dependency on promoting a new broker first).
+say "== 0b. promote ACL CAS preflight (throwaway; HEAD.lock + logs/HEAD) =="
+git -C "$AEGL" show "$COMMIT:recovery/keeplab-promote-acl-cas-test.sh" \
+  | bash -s -- --repo "$AEGL" --commit "$COMMIT" \
+  || stop promote_acl_cas_preflight_failed "ACL CAS preflight failed"
 
 say "== 1. AEGL tip → refs/heads/main =="
 promote_tip "$AEGL" "$COMMIT" "refs/heads/main" "keeplab-aegl-$COMMIT"
