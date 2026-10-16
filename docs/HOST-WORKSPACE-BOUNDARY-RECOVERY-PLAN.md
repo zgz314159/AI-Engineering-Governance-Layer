@@ -1,6 +1,22 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` — Round update 40; promote broker already installed and independent-UID accepted — Round 16 / Round update 41; this branch's formal candidate is **not yet** root-registered/recorded or promoted; `feat/beads-adapter` commits are already inside the tip (no re-merge); formal checkout must restore pinned `gradle-actions` dist then close onto `main` after promote (Round 42). Cursor global-rules decision remains open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` — effective summary (Round 46): real Hermes sandbox trial `1838f28` `TRIAL_GATE=PASS`/`TRIAL_EXIT_CODE=0`; independent-UID promote broker installed and accepted (Round 16); Stage 3 full-stack trusted promote of `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68` → `main` with formal workspace closed clean (`STACK_RESULT=OK`, `STACK_EXIT_CODE=0`); remote push not executed. Remaining blockers: (A) host same-UID editors can still write formal project trees; (B) Cursor has no global RuleSync target (project-level decision pending). Do **not** treat “broker missing” or “stack not on main” as current blockers.
+
+
+## Current effective summary (Round 46)
+
+| Outcome | State | Evidence |
+|---|---|---|
+| System recovery | **PASS** (kept) | Stage 1 final clean-copy verification |
+| History cleanup | **PASS** (kept) | Stage 2 recorded result |
+| Real Hermes sandbox + trusted capture | **PASS** | `1838f285ebe79e5fe092223eaee2b87008f302a7`, `TRIAL_GATE=PASS`, `TRIAL_EXIT_CODE=0` |
+| Independent-UID promote broker | **Installed + accepted** | Round 16 self-test; unit `aegl-promote-broker` active |
+| Stage 3 full-stack trusted promote | **PASS** | tip `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68` fast-forwarded to `main`; `BROKER_*_RC=0`, `decision=APPLIED` |
+| Formal AEGL on `main` clean | **PASS** | `HEAD=main` @ tip; empty porcelain; gradle-actions pin `50e97c2…` |
+| Remote push | **Not executed** | No `git push` / PR in this program |
+| Overall `AI_BOUNDARY` | **BLOCKED** | Host same-UID write surface + Cursor RuleSync scope still open |
+
+Checkboxes below and historical round notes retain prior FAIL/fix/run-count records.
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -264,7 +280,7 @@ the projects. This is long-term enforcement, not a prerequisite for recovery.
 
 ## 3.2 OS-enforced sandbox
 
-- [ ] Use a pinned, checksum-verified Linux sandbox backend based on Bubblewrap or an equivalently reviewed implementation and apply it to the entire AI process tree. (The pinned backend and offline `aegl-ai` entry work for launched processes, but the current DeepSeek process is outside that entry; real-agent confinement is not accepted.)
+- [x] Use a pinned, checksum-verified Linux sandbox backend based on Bubblewrap or an equivalently reviewed implementation and apply it to the entire AI process tree. (Host trial @ `1838f28`: `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` with Hermes under `aegl-ai` + trusted capture. This does **not** constrain same-UID host editors such as Cursor/Command Code — see Round 46 remaining item A.)
 - [x] Allow writes only to the task worktree, task scratch, and declared per-task caches; deny canonical Projects, unrelated home/config/credential paths, other repositories, Docker socket, and unsafe host daemons. (`--ro-bind / /` + re-bind of the three writable roots; verified by N1/N2/N9.)
 - [x] Use per-task Gradle homes and prevent a pre-existing daemon from escaping the boundary; put Android device actions behind a trusted AEGL runner. (Per-task `GRADLE_USER_HOME` in the workspace; device actions remain behind the existing trusted device-lock runner.)
 - [x] Fail closed when sandbox setup, path canonicalization, mount policy, or network policy cannot be established. (Verified by N7: a missing backend aborts before any command runs.)
@@ -274,7 +290,7 @@ the projects. This is long-term enforcement, not a prerequisite for recovery.
 - [x] Keep executable enforcement only in AEGL; projects may contain one thin declarative manifest when auto-detection is insufficient. (`bin/aegl-task` owns enforcement; projects carry only thin `mise.toml`.)
 - [x] Capture the task baseline and classify every changed, deleted, renamed, ignored, and untracked path before promotion. (`git status --porcelain` in the worktree vs the recorded base commit.)
 - [x] Reject generated artifacts, secrets, binaries, APKs, logs, screenshots, caches, unexpected large files, path escapes, and project-owned source that exists only outside the candidate clean copy. (Verified by N3 symlink/escape, N4/N4b generated+secret, N5 body loss.)
-- [ ] Require project tests, layout audit, clean-copy reconstruction, and a reviewable source diff; only the trusted controller may apply the approved diff. (Classification and content pin exist, but a same-UID token is not a kernel-enforced trusted-controller identity; final promotion acceptance remains open.)
+- [x] Require project tests, layout audit, clean-copy reconstruction, and a reviewable source diff; only the trusted controller may apply the approved diff. (Stage 3 tip promoted via independent-UID broker: root `register`/`record`, `aegl-ai` `promote`, `mode=fast_forward` onto `refs/heads/main` @ `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68`. Same-UID `AEGL_CONTROLLER_TOKEN` remains defense-in-depth only and is not the kernel identity boundary.)
 - [ ] Extend the existing RuleSync v25 source for installed agents without introducing Ruler. Rules and hooks are defense in depth; the OS sandbox and promotion gate remain authoritative. (Global Claude/Codex rules were created from a separate generic policy using RuleSync v25; Cursor global rules are unsupported by the pinned adapter, so all-target acceptance remains open.)
 
 ## 3.4 Fixed final matrix
@@ -349,7 +365,7 @@ Per-item evidence (affected gates run once, after the fixes):
 The earlier PASS claim is withdrawn; `SYSTEM_RECOVERED=PASS` and `HISTORY_CLEAN=PASS`
 stand. Stage 1/2 were not re-run.
 
-## Current Stage 3 progress (isolated branch; not merged)
+## Current Stage 3 progress (on `main` @ `c56425ca…` after Round 46 promote)
 
 The `ai-boundary-stage3` branch contains follow-up code introduced at `f840afe`;
 the earlier temporary worktree was removed. This section updates the implementation
@@ -2368,5 +2384,118 @@ MAIN_BASELINE=6f495c45b67a0217034be2510068b2bc56c85607
 TIP=6bd578d20a7214ff733ca97a24fbd51dad147636
 LIVE_PROMOTE=OPERATOR_RESUME
 AI_BOUNDARY=BLOCKED
+```
+
+## Round update 46: closeout record + remaining blockers (permissions / Cursor)
+
+Read-only confirmation of formal AEGL (no redeploy, no trial re-run, no push):
+
+| Check | Result |
+|---|---|
+| Branch / HEAD | `main` = `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68` |
+| Porcelain | empty |
+| Tip on HEAD | yes (promoted tip) |
+| Trial ancestor | `1838f28…` is ancestor of HEAD |
+| gradle-actions | pin `50e97c2cd7a37755bbfafc9c5b7cafaece252f6e`; dist present |
+| Broker unit | `aegl-promote-broker` **active**; `/etc/aegl/broker-verified` **absent** |
+| Operator socket | `zhong` cannot open `/run/aegl-promote/broker.sock` (expected; not in `aegl-broker`) |
+
+Operator-reported promote outcome (trusted terminal; not re-executed here):
+`BROKER_REGISTER_RC=0`, `BROKER_RECORD_RC=0`, `BROKER_PROMOTE_RC=0`,
+`decision=APPLIED` `mode=fast_forward`, `STACK_RESULT=OK`, `STACK_EXIT_CODE=0`.
+
+`--resume-from-E` is **retired** for this tip: `main` already advanced past baseline
+`6f495c45…`. Future work uses normal trusted promote from a new isolation branch.
+
+### Remaining item A — formal project write surface (host same-UID)
+
+Shallow read-only inventory (project root + `.git` + key refs; no recursive audit, no write probe):
+
+| Tree | owner:group | mode | ACL notes |
+|---|---|---|---|
+| Google Stack root / `.git` | `zhong:zhong` | `775` | no extra user ACL |
+| KeepLab root / `.git` | `zhong:zhong` | `775` | no extra user ACL |
+| AEGL root | `zhong:zhong` | `775` | `u:aegl-promote:--x` (traverse) |
+| AEGL `.git` | `zhong:zhong` | `775` | `u:aegl-promote:r-x`; `refs/heads` `u:aegl-promote:rwx`; `refs/heads/main` owned `aegl-promote:aegl-broker` `644` |
+
+**Distinction:** Hermes launched as `aegl-ai` under the sandbox/broker path is already
+identity-separated. Cursor / Command Code running as `zhong` share the tree owner UID and
+can still edit formal projects and Git metadata directly — OS sandbox on Hermes does not
+stop that path.
+
+**Reuse (do not invent a parallel stack):** `recovery/host-identity-bootstrap.sh`
+`plan|prepare|switch|verify` + existing `aegl-promote` / `aegl-ai` identities. The designed
+`switch` chowns project bodies to broker-owned + human group read, tightens `.git`, and
+optionally `chattr +i` on the Projects parent. It **refuses** until
+`/etc/aegl/broker-verified` exists and listed generated `node_modules` trees are removed
+(scheme (a) in `HOST-IDENTITY-BOOTSTRAP.md`).
+
+**Why chmod-u-ro as owner is insufficient:** owner `zhong` can `chmod`/`chown` back; that is
+not a forced isolation boundary.
+
+**Impact if `switch` is later approved:** daily edits as `zhong` need group write or an
+explicit grant; `git` metadata writes go through broker-owned `.git` (human may lose direct
+ref updates); builds that write into the formal tree break unless redirected to task/XDG
+roots; broker promote path already has AEGL `.git` ACLs for FF of `main`.
+
+**This round:** no permission change. Options for the operator (choose explicitly later):
+
+1. **Recommended:** complete `broker-verified` marker after review → remove the two listed
+   generated dep trees → root-owned copy of pinned `host-identity-bootstrap.sh` →
+   `prepare` then `switch` then `verify` (exact SHA command only after the closeout tip that
+   carries any script fix is chosen for promote).
+2. Defer `switch`; keep Hermes/`aegl-ai` as the only AI path; accept that Cursor-as-`zhong`
+   remains a trusted-operator channel.
+3. Narrower than full `switch`: extend promote-style ACLs only (not chosen here — would
+   still leave `zhong` as owner with full control).
+
+Missing before option 1 can run (already documented; not invented here):
+`/etc/aegl/broker-verified` absent; generated deps may still be present (operator removes
+per scheme (a)); root FS must support `chattr +i` on Projects parent.
+
+### Remaining item B — Cursor RuleSync (project-level only)
+
+Pinned RuleSync: `versions.json` → `v25.0.0`.
+`bin/aegl-task` `rulesync_global_support`: `claudecode`/`codexcli` = yes; **`cursor` = no**
+(project-scope only). No Cursor global interface exists in this pin — do not keep probing for one.
+
+Existing conflicting / present agent files (do **not** overwrite this round):
+
+| Path | Note |
+|---|---|
+| `/home/zhong/Projects/KeepLab-Relay/AGENTS.md` | Present (prior clobber restored from Git) |
+| `/home/zhong/Projects/AI-Engineering-Governance-Layer/fixture/AGENTS.md` | Fixture only |
+| `/home/zhong/Projects/AI-Engineering-Governance-Layer/fixture/CLAUDE.md` | Fixture only |
+
+Google Stack: no top-level `AGENTS.md` / `CLAUDE.md` / `.cursorrules` within depth 2.
+
+**Thin project-level proposal (not deployed):** for each formal project that should carry
+Cursor project rules, add a **new** path only where absent (e.g. `.cursor/rules/aegl-boundary.mdc`
+or project `AGENTS.md` if missing), sourced from `governance/global-agent-policy.md` via
+pinned RuleSync generate-into-isolated-dir then copy of **new** files only. Require explicit
+user scope confirmation: which of {Google Stack, KeepLab, AEGL} receive the thin file.
+KeepLab already has `AGENTS.md` → **conflict**; any KeepLab change needs a separate merge
+decision, not silent overwrite. Rules are defense in depth — **not** an OS isolation substitute.
+Do not introduce Ruler. Do not redefine “global complete” to mean project files.
+
+**This round:** no rule deploy.
+
+### Next operator actions (finite)
+
+1. Decide remaining item A option (1 / 2 / 3 above).
+2. Decide Cursor project-rule scope (which projects; KeepLab conflict handling).
+3. When ready to land this closeout note on `main`, promote isolation branch
+   `plan/boundary-closeout-46` through the normal trusted broker flow (new task — **not**
+   `--resume-from-E`).
+4. Optional later: `git push` of `main` (explicit; not part of AI_BOUNDARY gates).
+
+```text
+PROMOTE_STACK=PASS tip=c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68
+FORMAL_MAIN=PASS clean
+TRIAL_SANDBOX=PASS 1838f28
+BROKER=INSTALLED_ACTIVE marker=absent
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+BLOCKERS=host_same_uid_write_surface,cursor_project_rules_scope
 ```
 
