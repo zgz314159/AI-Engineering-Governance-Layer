@@ -130,6 +130,17 @@ _formal_op_script() {
 set -euo pipefail
 cd "$PROJ"
 
+# Strict blob OID at treeish:path, or exactly MISSING (never raw rev-parse text).
+blob_at() {
+  local treeish="$1" path="$2" out=""
+  out="$(git rev-parse --verify "$treeish:$path" 2>/dev/null)" || out=""
+  if [ -n "$out" ]; then
+    printf '%s' "$out"
+  else
+    printf 'MISSING'
+  fi
+}
+
 unchanged_gitlink() {
   local path="$1" treeish="$2" meta mode oid head_oid
   meta="$(git ls-files -s -- "$path" 2>/dev/null || true)"
@@ -138,7 +149,8 @@ unchanged_gitlink() {
   mode="$(printf '%s' "$meta" | awk '{print $1}')"
   oid="$(printf '%s' "$meta" | awk '{print $2}')"
   [ "$mode" = "160000" ] || return 1
-  head_oid="$(git rev-parse "$treeish:$path" 2>/dev/null)" || return 1
+  head_oid="$(blob_at "$treeish" "$path")"
+  [ "$head_oid" != "MISSING" ] || return 1
   [ "$oid" = "$head_oid" ]
 }
 
@@ -220,10 +232,10 @@ sync)
     meta="$(printf '%s\n' "$meta" | awk 'NR==1{print; exit}')"
     mode="$(printf '%s' "$meta" | awk '{print $1}')"
     idx_oid="$(printf '%s' "$meta" | awk '{print $2}')"
-    new_blob="$(git rev-parse "HEAD:$path" 2>/dev/null || echo MISSING)"
+    new_blob="$(blob_at HEAD "$path")"
     old_blob="MISSING"
     if [ -n "${BASELINE_OID:-}" ]; then
-      old_blob="$(git rev-parse "$BASELINE_OID:$path" 2>/dev/null || echo MISSING)"
+      old_blob="$(blob_at "$BASELINE_OID" "$path")"
     fi
     if [ "$mode" = "160000" ]; then
       # Gitlink lag after CAS: index still at baseline OID is expected; other OID = user change.
