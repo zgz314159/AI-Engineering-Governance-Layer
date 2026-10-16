@@ -2802,14 +2802,14 @@ GUARD_BEHAVIOR_OK (Projects KeepLab ALLOW; custom source_root OUT_OF_SCOPE)
 |---|---|---|
 | KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
 | Stack | plan/keeplab-appprojects-path | 064fd9ea04171cc2e0aaecd7db0ffe936a209894 |
-| AEGL | plan/keeplab-appprojects-migrate | e2a5ae007f66c4d818520ad1e59da68bed0ad6c0 |
+| AEGL | plan/keeplab-appprojects-migrate | f5060a7d579c64f6d25d3b9f2921e8a0a7b39c93 |
 
 ### Unified exec pack
 
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-AEGL_TIP=e2a5ae007f66c4d818520ad1e59da68bed0ad6c0
+AEGL_TIP=f5060a7d579c64f6d25d3b9f2921e8a0a7b39c93
 STACK_TIP=064fd9ea04171cc2e0aaecd7db0ffe936a209894
 KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
 
