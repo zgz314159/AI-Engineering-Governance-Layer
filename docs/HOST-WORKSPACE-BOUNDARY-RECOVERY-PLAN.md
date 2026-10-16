@@ -2262,7 +2262,7 @@ PROMOTE_STACK_TESTS passed=9 failed=0
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=02e4129c20d3518f110ca037c5c246cb71ef44a2
+TIP=6bd77468364305a90a65d6f4eee47fd9b1e1243f
 test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
 git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh"   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
@@ -2283,7 +2283,7 @@ PROMOTE_STACK_TESTS=PASS (9/9 first run)
 BROKER_TESTS=PASS (18/18)
 LIVE_PROMOTE=NOT_THIS_ROUND
 IMPL=0c50259293ba43721848dfd647e0f42c1b813d2e
-TIP=02e4129c20d3518f110ca037c5c246cb71ef44a2
+TIP=6bd77468364305a90a65d6f4eee47fd9b1e1243f
 AI_BOUNDARY=BLOCKED
 ```
 
