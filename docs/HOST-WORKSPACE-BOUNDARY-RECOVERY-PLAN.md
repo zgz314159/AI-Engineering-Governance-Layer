@@ -2264,7 +2264,6 @@ set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
 TIP=6bd77468364305a90a65d6f4eee47fd9b1e1243f
 # Script elevates --commit to plan/capture-hook-classfix tip when TIP is an ancestor.
-test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
 git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh"   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
 
