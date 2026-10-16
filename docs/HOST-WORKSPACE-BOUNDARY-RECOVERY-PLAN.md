@@ -2740,14 +2740,14 @@ KEEPLAB_PATH_TESTS passed=10 failed=0
 |---|---|---|
 | KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
 | Stack | plan/keeplab-appprojects-path | 397d7817f44cb4c6578634a17bd3797a18fc0b6a |
-| AEGL | plan/keeplab-appprojects-migrate | (Round 49 tip after commit) |
+| AEGL | plan/keeplab-appprojects-migrate | 21888a3f8e7e6017f44960c9538f6ffaab0ee124 |
 
 ### Unified exec pack
 
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-AEGL_TIP=REPLACE_WITH_ROUND49_AEGL_FULL_SHA
+AEGL_TIP=21888a3f8e7e6017f44960c9538f6ffaab0ee124
 STACK_TIP=397d7817f44cb4c6578634a17bd3797a18fc0b6a
 KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
 
