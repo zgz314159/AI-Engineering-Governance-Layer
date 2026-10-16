@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` with real hook receipts, OS denial, and process-identity evidence — Round update 40; trusted-controller broker identity, Cursor global rules, and canonical Stage 3 promotion remain open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` — Round update 40; promote broker already installed and independent-UID accepted — Round 16 / Round update 41; this branch's formal candidate is **not yet** root-registered/recorded or promoted. Cursor global-rules decision and canonical Stage 3 promotion of the candidate remain open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -389,8 +389,12 @@ record without claiming final acceptance or changing the Stage 1/2 results.
   `aegl-hermes-sandbox` as aegl-ai uid=994, private pid ns, Command Code/DeepSeek via the
   trusted broker; `TRIAL_GATE=PASS`, `TRIAL_EXIT_CODE=0`. Desktop/out-of-entry agents remain
   unconfined and do not count.)
-- [ ] Enforce trusted promotion with an independent operator identity or broker;
+- [x] Enforce trusted promotion with an independent operator identity or broker;
   a same-UID token is insufficient.
+  (Installed and independent-UID accepted — Round 16: `aegl-promote-broker.service`
+  active, user `aegl-promote`, socket `/run/aegl-promote/broker.sock`,
+  recorders=root, requesters=`aegl-ai`. Remaining work is candidate
+  register/record/promote for a specific tip — not broker rebuild.)
 - [ ] Resolve Cursor's lack of global rules support without overwriting any
   existing project instruction file, or explicitly narrow the all-agent target.
 - [ ] Accept and promote the isolated Stage 3 implementation into the canonical
@@ -2058,5 +2062,57 @@ TRIAL_COMMIT=1838f285ebe79e5fe092223eaee2b87008f302a7
 TRIAL_EXIT_CODE=0
 ```
 
-Still open before `AI_BOUNDARY=PASS`: independent trusted-controller broker identity, Cursor
-global-rules decision, and canonical promotion of the isolated Stage 3 implementation.
+Still open before `AI_BOUNDARY=PASS` (broker itself is already installed — Round 16):
+Cursor global-rules decision, and **formal register/record/promote** of the isolated
+Stage 3 candidate through the existing promote broker (see Round update 41).
+
+## Round update 41: reuse installed promote broker — formal candidate prep (no promote)
+
+Corrects the outdated “provide / build a broker” next-step. **No broker rebuild, no
+independent-UID re-acceptance, no promote executed** in this round.
+
+### Read-only wiring check (current operator uid=1000 `zhong`)
+
+| Fact | Result |
+|---|---|
+| `systemctl is-active aegl-promote-broker` | **active** |
+| Unit socket | `AEGL_BROKER_SOCKET=/run/aegl-promote/broker.sock` |
+| Service user / group | `aegl-promote` / `aegl-broker` |
+| Runtime dir mode | `/run/aegl-promote` **2770** `aegl-promote:aegl-broker` |
+| Allowlists (unit) | recorders=`root`; requesters=`aegl-ai` |
+| `/etc/aegl/broker-verified` | **absent** (Round 16 already recorded: not written) |
+| Connect as `zhong` (uid 1000) | **EACCES** — not in `aegl-broker`; **permission limit**, not “broker missing” |
+| `aegl-task` entry (this branch) | `identity status` / `task register|record|promote` use `AEGL_BROKER_SOCKET` + `AEGL-BROKER/1` PING/PONG; promote also needs controller token |
+
+Do **not** expand socket mode, do **not** add `zhong` to `aegl-broker`, do **not** create users.
+
+### Precise promotion candidate — `plan/capture-hook-classfix`
+
+| Item | Value |
+|---|---|
+| Target formal branch | `main` |
+| Baseline (merge-base with `main`) | `6f495c45b67a0217034be2510068b2bc56c85607` |
+| Candidate tip (full SHA) | `00a9241cf8dfc8712bb9e2567d7c77259e8440d3` |
+| Prior isolation baseline kept | `1aecf242182efbebcd3fa8ba4bb6eb12fb03c9cb` (`plan/request-correl`) |
+| Commits after `1aecf24` (this branch’s named fix set) | `1d2a40e`, `1838f28`, `00a9241` (3) |
+| Files touched after `1aecf24` | `bin/aegl-hermes-sandbox`, `docs/HOST-WORKSPACE-BOUNDARY-RECOVERY-PLAN.md`, `recovery/capture_evidence.py`, `recovery/install-model-broker.sh`, `recovery/trial_gate.py`, `recovery/entry-mount-tests.sh`, `recovery/uid-launch-tests.sh`, `recovery/capture-hook-class-tests.sh`, `recovery/capture-hook-class-fix2-tests.sh` |
+| Full tip vs `main` | entire Stage 3 hermes/broker stack (~95 paths); promote of the **branch tip** includes that lineage, not only the 9-file delta |
+| Formal checkout (do not overwrite) | `feat/beads-adapter` @ `a01eb01…` with dirty submodule `upstream/gradle-actions` — promote via **external** task worktree / broker apply only |
+
+### What is still missing (itemized; not “provide a broker”)
+
+1. **Root recorder — `register` then `record`** for a task whose worktree is the candidate tip (or an external worktree at `00a9241…`). Peer uid must be **root** (`AEGL_BROKER_ALLOW_RECORDERS=root`).
+2. **Requester promote** as **`aegl-ai`** (only allowed requester) with `AEGL_BROKER_SOCKET=/run/aegl-promote/broker.sock`, after a VERIFIED handshake, plus `AEGL_CONTROLLER_TOKEN` / token file for `task promote` auth on the aegl-task entry.
+3. **Optional marker** `/etc/aegl/broker-verified` — still absent; Round 16 left it as a later manual root write after acceptance (not required to prove the service exists).
+4. **`switch` / project permission migration** — still not run (Round 16); only needed if the operator chooses host project ownership migration; **not** required merely to exercise broker register/record/promote of an external candidate.
+5. **Cursor global-rules decision** — unchanged open item (unrelated to this broker).
+
+```text
+PROMOTE_BROKER=INSTALLED_ACTIVE (Round 16; reconfirmed Round 41 read-only)
+INDEPENDENT_UID_ACCEPTANCE=PASS (Round 16; not re-run)
+CURRENT_USER_SOCKET_ACCESS=EACCES (zhong not in aegl-broker; expected)
+CANDIDATE_TIP=00a9241cf8dfc8712bb9e2567d7c77259e8440d3
+CANDIDATE_BASELINE=6f495c45b67a0217034be2510068b2bc56c85607
+FORMAL_REGISTER_RECORD_PROMOTE=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
