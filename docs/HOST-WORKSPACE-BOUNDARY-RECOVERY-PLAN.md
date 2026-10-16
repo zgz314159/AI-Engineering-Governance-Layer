@@ -2774,3 +2774,65 @@ PUSH=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 50: formal sync timing + operator doctor + guard boundary
+
+Authorized preparation only — **no sudo, no directory move, no switch, no push**.
+
+### Fixes
+
+| Item | Behavior |
+|---|---|
+| Pre-CAS | Record branch/ref/HEAD + porcelain; refuse real user dirty before update-ref; gitlinks only when index OID matches HEAD |
+| Post-CAS | Classify baseline lag vs new edits; restore approved tip; no blanket `references/` ignore; no `ls-tree\|head` SIGPIPE |
+| Orch tests | Source real `sync_formal_to_tip` / `formal_pre_cas_check`; throwaway repo + real update-ref |
+| Migrate doctor | `as_operator` for precheck/post `aegl-recovery doctor` (and guard import) |
+| Guard | KeepLab business mapping only when `path_resolution` declares AEGL_BUSINESS_ROOT+KeepLab-Relay; custom `source_root` stays closed |
+
+### Checks
+
+```text
+KEEPLAB_ORCH_TESTS passed=13 failed=0 (re-verify)
+CustomSourceRootBoundaryTests OK
+GUARD_BEHAVIOR_OK (Projects KeepLab ALLOW; custom source_root OUT_OF_SCOPE)
+```
+
+### Isolation tips
+
+| Repo | Branch | Full SHA |
+|---|---|---|
+| KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
+| Stack | plan/keeplab-appprojects-path | 064fd9ea04171cc2e0aaecd7db0ffe936a209894 |
+| AEGL | plan/keeplab-appprojects-migrate | e2a5ae007f66c4d818520ad1e59da68bed0ad6c0 |
+
+### Unified exec pack
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+AEGL_TIP=e2a5ae007f66c4d818520ad1e59da68bed0ad6c0
+STACK_TIP=064fd9ea04171cc2e0aaecd7db0ffe936a209894
+KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
+
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP" --dry-run
+
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP"
+
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP" --resume-after-move
+```
+
+```text
+KEEPLAB_MIGRATE=SYNC_TIMING_FIXED_NOT_EXECUTED
+FORMAL_SYNC=pre_cas_baseline+post_cas_lag_class
+MIGRATE_DOCTOR=as_operator
+GUARD_BOUNDARY=source_root_primary
+SWITCH=NOT_THIS_ROUND
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
