@@ -2314,7 +2314,7 @@ refuses if `--commit` ≠ `plan/capture-hook-classfix` (no elevation).
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=ROUND44_BRANCH_TIP
+TIP=11a42224956f3d664b901be762818a9f6d4471af
 git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
@@ -2324,7 +2324,7 @@ DEPLOY_GLUE=EXACT_COMMIT_CROSS_UID
 DEPLOY_GLUE_TESTS=PASS (7/7)
 LIVE_PROMOTE=NOT_THIS_ROUND
 IMPL=e58818b901b0651ec992fa9f28579712afe29674
-TIP=ROUND44_BRANCH_TIP
+TIP=11a42224956f3d664b901be762818a9f6d4471af
 AI_BOUNDARY=BLOCKED
 ```
 
