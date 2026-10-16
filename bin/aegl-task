@@ -335,7 +335,9 @@ task_register() {
   local id="${1:?task register <id>}" td wt proj branch base req
   _verify_paths "$id"
   branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
-  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5]}))' "$id" "$proj" "$base" "$wt" "$branch")"
+  # target_ref is bound server-side to the live OID of refs/heads/main; the client
+  # never supplies a mutable branch name as the apply target.
+  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5],"target_ref":"refs/heads/main"}))' "$id" "$proj" "$base" "$wt" "$branch")"
   broker_call "$req"
 }
 

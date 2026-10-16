@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """AEGL central promotion gate + apply — the ONE implementation.
 
-The gate freezes the candidate into a **broker-controlled Git object** and classifies
-*that object*, not the mutable worktree:
+Full-stack promote freezes the **candidate tip commit** (full OID + tree OID) and
+classifies that frozen tree — never a mutable branch name, never a worktree re-read
+at apply time:
 
-* :func:`candidate_tree` builds a tree from the trusted baseline ``base`` by hashing the
-  worktree files with ``git hash-object --no-filters`` and staging them with
-  ``git update-index --cacheinfo`` — no ``git add``, so **no untrusted clean filters
-  run**, and hooks/monitors are disabled on every git call. The tree binds file contents,
-  symlink targets and Git file modes.
-* :func:`classify_tree` classifies the **frozen tree** (``base``→``tree``): generated/
-  secret paths, oversized blobs, symlink/path escapes and deletions; ignored-file presence
-  is checked on the worktree but the promoted content is the object.
-* :func:`materialize_commit` turns the tree into a commit with a fixed identity/date;
-  :func:`apply_object` merges that exact commit — never a branch name, never a worktree
-  re-read.
+* :func:`freeze_candidate_commit` requires a clean worktree and returns
+  ``(commit_oid, tree_oid)`` for ``HEAD``.
+* :func:`classify_tree` classifies the frozen tree (``base``→``tree``): generated/
+  secret paths, oversized blobs, symlink/path escapes and deletions; ignored-file
+  presence is still checked on the worktree.
+* :func:`apply_to_ref` fast-forwards a bound ``refs/heads/*`` to the approved commit
+  via compare-and-swap ``update-ref`` when the registered target OID is unchanged and
+  is an ancestor of the candidate — so ``main`` contains the candidate's history.
 
-A failed check, a swapped candidate or an inconsistent object leaves the target unchanged.
+:func:`candidate_tree` / :func:`materialize_commit` remain for filter-free tree
+inspection and legacy helpers; they are not the full-stack promote path.
+
+A failed check, a changed target tip or a non-fast-forward leaves the target unchanged.
 Candidate code is never executed here.
 
 CLI: ``manifest`` · ``changes`` · ``tree`` · ``validate``.
@@ -226,6 +227,7 @@ def classify_tree(proj: str, base: str, tree: str, wt: str | None = None) -> lis
 
 
 def materialize_commit(proj: str, tree: str, base: str, tid: str) -> str:
+    """Legacy helper: synthetic commit-tree snapshot (not used for full-stack promote)."""
     out = _git(proj, *FIXED_IDENT, "commit-tree", tree, "-p", base, "-m",
                "aegl-task(%s): approved candidate" % tid)
     if out.returncode != 0:
@@ -238,33 +240,82 @@ def object_tree(proj: str, commit: str):
     return out.stdout.strip() if out.returncode == 0 else None
 
 
-def _filter_off(proj: str) -> list:
-    """``-c`` args that neutralize every repo-configured git filter.
+def ref_oid(proj: str, ref: str):
+    out = _git(proj, "rev-parse", "--verify", "--quiet", ref)
+    return out.stdout.strip() if out.returncode == 0 else None
 
-    A candidate cannot smuggle an untrusted exec entry point through a clean/smudge/
-    process filter (e.g. during the apply merge's checkout): each configured filter is
-    cleared for the command.
+
+def is_ancestor(proj: str, maybe_ancestor: str, commit: str) -> bool:
+    return _git(proj, "merge-base", "--is-ancestor", maybe_ancestor, commit).returncode == 0
+
+
+def freeze_candidate_commit(wt: str) -> tuple:
+    """Freeze the candidate tip: full commit OID + tree OID.
+
+    Requires a clean worktree whose HEAD commit is the candidate. Dirty or
+    uncommitted content is rejected — promotion applies that exact commit's
+    history, never a commit-tree snapshot of a mutable tree.
     """
-    names = set()
-    for line in _git(proj, "config", "--get-regexp", r"^filter\.").stdout.splitlines():
-        key = line.split(None, 1)[0] if line.strip() else ""
-        parts = key.split(".")
-        if len(parts) >= 2 and parts[0] == "filter" and parts[1]:
-            names.add(parts[1])
-    args = []
-    for name in sorted(names):
-        args += ["-c", "filter.%s.clean=" % name, "-c", "filter.%s.smudge=" % name,
-                 "-c", "filter.%s.process=" % name]
-    return args
+    head = _git(wt, "rev-parse", "--verify", "--quiet", "HEAD")
+    if head.returncode != 0 or len(head.stdout.strip()) != 40:
+        raise RuntimeError("candidate_head_missing")
+    commit = head.stdout.strip()
+    porcelain = _git(wt, "status", "--porcelain").stdout
+    if porcelain.strip():
+        raise RuntimeError("worktree_dirty")
+    tree = object_tree(wt, commit)
+    if not tree or len(tree) != 40:
+        raise RuntimeError("candidate_tree_missing")
+    return commit, tree
+
+
+def apply_to_ref(proj: str, commit: str, target_ref: str, expected_oid: str, tid: str) -> dict:
+    """Fast-forward ``target_ref`` to the approved commit when history allows.
+
+    Uses compare-and-swap ``update-ref`` so a changed tip is refused. Does not
+    checkout, switch branches, or merge into whatever HEAD the formal tree has.
+    After a successful apply, ``commit`` is reachable from ``target_ref``.
+    """
+    if _git(proj, "cat-file", "-e", "%s^{commit}" % commit).returncode != 0:
+        return {"decision": "FAILED", "reason": "object_missing"}
+    if not isinstance(target_ref, str) or not target_ref.startswith("refs/heads/"):
+        return {"decision": "FAILED", "reason": "invalid_target_ref"}
+    if not isinstance(expected_oid, str) or len(expected_oid) != 40:
+        return {"decision": "FAILED", "reason": "invalid_expected_oid"}
+    current = ref_oid(proj, target_ref)
+    if current is None:
+        return {"decision": "FAILED", "reason": "target_ref_missing"}
+    if current != expected_oid:
+        return {"decision": "REJECTED", "reason": "target_changed",
+                "expected": expected_oid, "actual": current}
+    if current == commit:
+        return {"decision": "APPLIED", "task_id": tid, "project": proj,
+                "commit": commit, "target_ref": target_ref, "mode": "already"}
+    if not is_ancestor(proj, current, commit):
+        return {"decision": "FAILED", "reason": "not_fast_forward",
+                "target": current, "commit": commit}
+    # CAS: fail if target moved between the check above and the write.
+    upd = _git(proj, "update-ref", target_ref, commit, expected_oid)
+    if upd.returncode != 0:
+        again = ref_oid(proj, target_ref)
+        if again and again != expected_oid:
+            return {"decision": "REJECTED", "reason": "target_changed",
+                    "expected": expected_oid, "actual": again}
+        return {"decision": "FAILED", "reason": "update_ref",
+                "detail": (upd.stderr or upd.stdout or "").strip()}
+    new_tip = ref_oid(proj, target_ref)
+    if new_tip != commit:
+        return {"decision": "FAILED", "reason": "post_apply_mismatch",
+                "expected": commit, "actual": new_tip}
+    if not is_ancestor(proj, commit, new_tip) and new_tip != commit:
+        return {"decision": "FAILED", "reason": "history_not_preserved"}
+    return {"decision": "APPLIED", "task_id": tid, "project": proj,
+            "commit": commit, "target_ref": target_ref, "mode": "fast_forward"}
 
 
 def apply_object(proj: str, commit: str, tid: str) -> dict:
-    if _git(proj, "cat-file", "-e", "%s^{commit}" % commit).returncode != 0:
-        return {"decision": "FAILED", "reason": "object_missing"}
-    if _git(proj, *FIXED_IDENT, *_filter_off(proj), "merge", "--no-ff", "--no-verify",
-            "-m", "aegl-promote: %s" % tid, commit).returncode != 0:
-        return {"decision": "FAILED", "reason": "git_merge"}
-    return {"decision": "APPLIED", "task_id": tid, "project": proj, "commit": commit}
+    """Backward-compat shim — full-stack promote must call :func:`apply_to_ref`."""
+    return {"decision": "FAILED", "reason": "apply_object_requires_target_bind"}
 
 
 def main(argv):

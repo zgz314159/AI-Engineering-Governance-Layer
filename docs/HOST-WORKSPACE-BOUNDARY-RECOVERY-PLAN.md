@@ -2230,3 +2230,56 @@ FORMAL_CLOSE_TARGET=main (clean)
 PROMOTE_EXECUTED=NO (awaiting operator auth of A–E)
 AI_BOUNDARY=BLOCKED
 ```
+
+## Round update 43: target-bound history-preserving promote + ACL deploy + stack pack
+
+Implements the authorized full-stack promote path. **No sudo, no formal-tree mutate,
+no live promote/push in this round** — only code + out-of-tree tests + this note.
+
+### Code (this tip)
+
+| Piece | Behavior |
+|---|---|
+| `register` | Binds `target_ref=refs/heads/main` + live `target_oid` |
+| `record` | Freezes clean worktree **HEAD commit OID + tree OID**; classifies that tree; requires `base` and `target_oid` ancestors of the candidate (no `commit-tree` snapshot) |
+| `promote` | Re-checks `target_oid`; CAS `update-ref` fast-forward only — never checkout/merge into `feat/beads-adapter` |
+| `install-promote-target-acl.sh` | Minimal ACL for `aegl-promote`: traverse `--x`, read `.git`/objects/refs, write `refs/heads` + reflog — **AEGL only**, no AI expansion, no bulk chown |
+| `promote-to-main-stack.sh` | Root one-shot from `git show TIP:… \| bash -s` (fixed SHA, not worktree) |
+| Tests | `broker-tests.sh` 18/18; `promote-stack-tests.sh` 9/9 (first run) |
+
+### Out-of-tree validation (first run; no re-verify needed)
+
+```text
+BROKER_TESTS passed=18 failed=0
+PROMOTE_STACK_TESTS passed=9 failed=0
+  main → candidate tip; side branch + dirty file untouched
+  target_changed → REJECTED
+  chmod a-w refs/heads → FAILED update_ref (explicit)
+```
+
+### Unified command pack (operator; authorized scope already granted)
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=ROUND43_TIP_SHA
+test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
+git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
+  | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
+```
+
+That script performs A–F: preflight → confirm exactly the 10 gradle-actions
+deletions (abort on any other dirt) → restore from
+`50e97c2cd7a37755bbfafc9c5b7cafaece252f6e` → install broker + ACL from the same
+TIP → external worktree `task_id=capture-hook-classfix-promote` register/record
+(root) / promote (`aegl-ai`, controller token minted+injected into the promote
+env only, never printed) → formal `git switch main` clean.
+
+```text
+PROMOTE_IMPL=TARGET_BIND_FF
+PROMOTE_STACK_TESTS=PASS (9/9 first run)
+BROKER_TESTS=PASS (18/18)
+LIVE_PROMOTE=NOT_THIS_ROUND
+TIP=ROUND43_TIP_SHA
+AI_BOUNDARY=BLOCKED
+```

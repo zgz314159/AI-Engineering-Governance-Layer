@@ -10,13 +10,14 @@ roles are separated in production:
 * **requesters** (the AI identity) may only ``validate`` / ``promote`` a task that a
   recorder already registered and approved.
 
-``record`` builds a broker-controlled, deterministic Git object for the candidate
-(:func:`promotion_core.candidate_tree` → :func:`materialize_commit`) binding file
-contents, symlink targets and Git file modes, and stores ``{baseline, approved tree,
-approved commit}`` in the broker-owned registry. ``promote`` applies **exactly that
-object** — it never re-reads the AI-writable worktree and never uses a mutable branch
-name. A failed check, a swapped candidate or an inconsistent object leaves the target
-unchanged. Candidate code is never executed here.
+``register`` binds ``target_ref`` (``refs/heads/main``) and the current target OID.
+``record`` freezes the candidate tip's full commit OID + tree OID (clean worktree),
+runs content classification on that tree, and requires ``base`` to be an ancestor of
+the candidate so history is preservable. ``promote`` re-checks the target OID and
+fast-forwards the bound ref to **exactly that commit** — never a worktree re-read,
+never a mutable branch name, never a commit-tree snapshot. A failed check, a changed
+target tip or a non-fast-forward leaves the target unchanged. Candidate code is never
+executed here.
 
 Ops: register · record · validate · promote · status. Modes: serve · client.
 """
@@ -30,7 +31,6 @@ import re
 import socket
 import struct
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import promotion_core  # noqa: E402
@@ -124,6 +124,9 @@ def _authorized_project(project: str) -> str:
     return proj
 
 
+TARGET_REF_ALLOWED = frozenset({"refs/heads/main"})
+
+
 def _op_register(request: dict, registry: dict) -> dict:
     task_id = request.get("task_id")
     if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
@@ -140,11 +143,23 @@ def _op_register(request: dict, registry: dict) -> dict:
         return {"decision": "REJECTED", "reason": "worktree_missing"}
     if not isinstance(request.get("branch"), str) or not request.get("branch"):
         return {"decision": "REJECTED", "reason": "missing_branch"}
+    target_ref = request.get("target_ref")
+    if not isinstance(target_ref, str) or target_ref not in TARGET_REF_ALLOWED:
+        return {"decision": "REJECTED", "reason": "invalid_target_ref"}
+    target_oid = promotion_core.ref_oid(proj, target_ref)
+    if not target_oid or len(target_oid) != 40:
+        return {"decision": "REJECTED", "reason": "target_ref_missing"}
+    # base must be an ancestor of (or equal to) the bound target tip so classification
+    # and fast-forward share one history line.
+    if not promotion_core.is_ancestor(proj, base, target_oid) and base != target_oid:
+        return {"decision": "REJECTED", "reason": "base_not_on_target_history"}
     registry[task_id] = {
         "project": proj, "base": base, "worktree": os.path.realpath(worktree),
-        "branch": request["branch"], "approved_tree": None, "approved_commit": None,
+        "branch": request["branch"], "target_ref": target_ref, "target_oid": target_oid,
+        "approved_tree": None, "approved_commit": None,
     }
-    return {"decision": "REGISTERED", "task_id": task_id}
+    return {"decision": "REGISTERED", "task_id": task_id,
+            "target_ref": target_ref, "target_oid": target_oid}
 
 
 def _op_record(request: dict, registry: dict) -> dict:
@@ -155,25 +170,25 @@ def _op_record(request: dict, registry: dict) -> dict:
     if request.get("verify_result") != "PASS":
         return {"decision": "REJECTED", "reason": "verify_not_passed"}
     wt, base, proj = entry["worktree"], entry["base"], entry["project"]
-    # Freeze the candidate into a tree (no filters/hooks), then classify the OBJECT.
-    tmpdir = tempfile.mkdtemp(prefix="aegl-record-")
     try:
-        try:
-            tree = promotion_core.candidate_tree(wt, base, tmpdir=tmpdir)
-        except RuntimeError as exc:
-            return {"decision": "REJECTED", "reason": "candidate_object_failed: %s" % exc}
-        rejected = promotion_core.classify_tree(proj, base, tree, wt)
-        if rejected:
-            reasons = sorted({r["reject"] for r in rejected})
-            return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
-        try:
-            commit = promotion_core.materialize_commit(proj, tree, base, task_id)
-        except RuntimeError as exc:
-            return {"decision": "REJECTED", "reason": "candidate_commit_failed: %s" % exc}
-    finally:
-        import shutil
-
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        commit, tree = promotion_core.freeze_candidate_commit(wt)
+    except RuntimeError as exc:
+        return {"decision": "REJECTED", "reason": "candidate_freeze_failed: %s" % exc}
+    # Ensure the frozen tip is available in the project object store (same repo /
+    # shared objects via worktree).
+    if promotion_core._git(proj, "cat-file", "-e", "%s^{commit}" % commit).returncode != 0:
+        return {"decision": "REJECTED", "reason": "candidate_commit_not_in_project"}
+    actual_tree = promotion_core.object_tree(proj, commit)
+    if actual_tree != tree:
+        return {"decision": "REJECTED", "reason": "object_inconsistent"}
+    if not promotion_core.is_ancestor(proj, base, commit) and base != commit:
+        return {"decision": "REJECTED", "reason": "base_not_ancestor_of_candidate"}
+    if not promotion_core.is_ancestor(proj, entry["target_oid"], commit) and entry["target_oid"] != commit:
+        return {"decision": "REJECTED", "reason": "target_not_ancestor_of_candidate"}
+    rejected = promotion_core.classify_tree(proj, base, tree, wt)
+    if rejected:
+        reasons = sorted({r["reject"] for r in rejected})
+        return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}
     entry["approved_tree"] = tree
     entry["approved_commit"] = commit
     entry["verify_result"] = "PASS"
@@ -220,8 +235,14 @@ def handle_request(request: dict, peer_uid: int, regdir: str, lock_fd: int) -> d
         verdict["task_id"] = task_id
         if op == "validate" or verdict["decision"] != "VALIDATED":
             return verdict
-        # Apply the EXACT approved object — no worktree re-read, no branch.
-        applied = promotion_core.apply_object(entry["project"], entry["approved_commit"], task_id)
+        target_ref = entry.get("target_ref")
+        target_oid = entry.get("target_oid")
+        if not target_ref or not target_oid:
+            return {"decision": "REJECTED", "reason": "target_not_bound", "task_id": task_id}
+        # Apply the EXACT approved commit onto the bound ref — no worktree re-read,
+        # no branch name, no checkout of the formal tree.
+        applied = promotion_core.apply_to_ref(
+            entry["project"], entry["approved_commit"], target_ref, target_oid, task_id)
         applied["task_id"] = task_id
         return applied
     finally:

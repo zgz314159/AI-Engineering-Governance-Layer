@@ -161,10 +161,15 @@ try: print(json.load(sys.stdin).get("decision",""))
 except Exception: print("PARSE_ERROR")' 2>/dev/null)"
     if [ "$got" = "$4" ]; then say "  PASS: $1"; else say "  FAIL: $1 (got $got want $4)"; fails=$((fails+1)); fi; }
 
+  # Candidate tip must be a real commit (full-stack freeze); commit as repo owner.
+  chown -R "$BROKER_USER":"$BROKER_GROUP" "$WT"
+  bgit -C "$WT" add -A
+  bgit -C "$WT" -c user.email=t@t -c user.name=t commit -qm cand
+  bgit -C "$APP" branch -M main
   expect "AI identity cannot register (recorder-only)" "$AI_USER" \
-    "{\"op\":\"register\",\"task_id\":\"u1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT\",\"branch\":\"cand\"}" REJECTED
+    "{\"op\":\"register\",\"task_id\":\"u1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/main\"}" REJECTED
   expect "root registers" root \
-    "{\"op\":\"register\",\"task_id\":\"u1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT\",\"branch\":\"cand\"}" REGISTERED
+    "{\"op\":\"register\",\"task_id\":\"u1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/main\"}" REGISTERED
   expect "root records (verify PASS)" root \
     "{\"op\":\"record\",\"task_id\":\"u1\",\"verify_result\":\"PASS\"}" RECORDED
   expect "AI identity promotes the approved task" "$AI_USER" \
