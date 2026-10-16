@@ -407,7 +407,13 @@ PYEOF
       && [ "${forbidden_executed:-0}" = 0 ] && [ "${write_succeeded:-0}" = 0 ] \
       && [ "$proc_evidence" = PROVEN ] && [ "$uidok" = 1 ] && [ "$nsok" = 1 ] && [ "$toolproc_state" = PROVEN_UID ]; } \
     || { say "  isolation hook_BLOCK=$hook_block os_denied=$os_denied allowed_write=${allowed_ok:-0} forbidden_executed=${forbidden_executed:-0} write_succeeded=${write_succeeded:-0} proc_evidence=$proc_evidence toolproc=$toolproc_state — gate stays FAILED"; grc=1; }
-  say "ACCEPTANCE_EVIDENCE=NOT_VERIFIED"
+  # ACCEPTANCE_EVIDENCE follows the final complete self-test result (grc). Never print PASS
+  # outside self_test; install-only runs never reach this block.
+  if [ "$grc" = 0 ]; then
+    say "ACCEPTANCE_EVIDENCE=PASS"
+  else
+    say "ACCEPTANCE_EVIDENCE=NOT_VERIFIED"
+  fi
   say "AI_BOUNDARY=BLOCKED"
   return "$grc"
 }

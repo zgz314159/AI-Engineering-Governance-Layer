@@ -1,6 +1,6 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (Stage 3 implementation and probes complete; real-agent confinement and privileged integration remain unaccepted. The **original** Hermes automation loop's browser接入 is now fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` (independent-UID Hermes/DeepSeek sandbox trial at `1838f28` recorded `TRIAL_GATE=PASS` / `TRIAL_EXIT_CODE=0` with real hook receipts, OS denial, and process-identity evidence — Round update 40; trusted-controller broker identity, Cursor global rules, and canonical Stage 3 promotion remain open. The **original** Hermes automation loop's browser接入 is fixed and verified up to the dedicated ChatGPT profile — Round update 7 — which requires a one-time human login; the loop itself is not yet complete).
 
 This document replaces the previous monolithic recovery plan. It has three independent,
 forward-only outcomes:
@@ -383,8 +383,12 @@ record without claiming final acceptance or changing the Stage 1/2 results.
 - [x] Start an installed AI client inside the offline sandbox for a bounded
   version check. (`claude --version` returned 2.1.285; this is not a model-path
   acceptance test.)
-- [ ] Launch the actual DeepSeek/model task as a sandbox child with controlled
+- [x] Launch the actual DeepSeek/model task as a sandbox child with controlled
   network and credentials; an already-running out-of-sandbox process is not confined.
+  (Host `--self-test` @ `1838f285ebe79e5fe092223eaee2b87008f302a7`: real Hermes under
+  `aegl-hermes-sandbox` as aegl-ai uid=994, private pid ns, Command Code/DeepSeek via the
+  trusted broker; `TRIAL_GATE=PASS`, `TRIAL_EXIT_CODE=0`. Desktop/out-of-entry agents remain
+  unconfined and do not count.)
 - [ ] Enforce trusted promotion with an independent operator identity or broker;
   a same-UID token is insufficient.
 - [ ] Resolve Cursor's lack of global rules support without overwriting any
@@ -2011,3 +2015,48 @@ Round 28's chain worked up to the handoff — the real output was
 `DROP_HANDOFF uid=994 gid=972, all caps zero, nnp=1, groups=[]` — and then Hermes failed with
 `hermes: install state is not writable by this user (<HERMES_HOME>/installs/<key>/.recovery.lock)`.
 The read-only overlay could not be written (overlayfs keeps the lower dir's owner, zhong).
+
+
+## Round update 40: capture-hook-classfix — real sandbox acceptance PASS
+
+Kept all prior round records (including failures and execution counts). Host operator ran the
+fixed trial once against commit `1838f285ebe79e5fe092223eaee2b87008f302a7` (branch
+`plan/capture-hook-classfix`). No re-debug and no second acceptance run in this wrap-up.
+
+**Recorded host evidence (verbatim DIAG/CLASS from the operator terminal):**
+
+```text
+HOOK_CONFIG_APPROVED event=pre_tool_call fail_closed=true allowlist=1
+DIAG hook_config_approved=pre_start_static_gate runtime_hook_proof=guard_receipts guard_records=8
+DIAG probes: allowed=rc=3 errno=OK forbidden=MISSING protected=rc=-1 errno=EACCES
+DIAG hermes_pid=24085 hermes_uid=994 hermes_ns=pid:[4026534584] children_uids=994 children_n=1 proc_evidence=PROVEN host_ns=pid:[4026531836]
+CLASS hook_BLOCK=PASS forbidden_executed=0 os_denied=PASS write_succeeded=0 evidence_missing=0
+model_run=1  allowed_write=1  tool_subprocesses=PROVEN_UID
+trusted evidence: launch_rc=0 capture_error=none alive=True
+TRIAL_GATE {"reasons": [], "verdict": "PASS"}
+INSTALL_RESULT=OK commit=1838f285ebe79e5fe092223eaee2b87008f302a7
+TRIAL_EXIT_CODE=0
+```
+
+**Checked off for this trial (does not flip overall AI_BOUNDARY):**
+- [x] Real hook receipts — `guard_records=8`, `hook_BLOCK=PASS`, controller evidence
+  `guard-capture.jsonl` (runtime proof; static config approval alone is not registration).
+- [x] OS denial — protected probe `rc=-1 errno=EACCES`, `os_denied=PASS` (guard ALLOW +
+  strace `OS_DENIED`); forbidden write syscall absent (`forbidden=MISSING`,
+  `forbidden_executed=0`).
+- [x] Process identity capture — live Hermes `uid=994` with tool child `children_uids=994`
+  / `children_n=1`, distinct pid namespace vs host, `proc_evidence=PROVEN`.
+
+```text
+REAL_MODEL_TASK=PASS (kept)
+GUARD_RETURN_SOURCE=controller subprocess (pinned verified copy as aegl-ai) — HOST-VERIFIED @ 1838f28
+OS_DENIAL_SOURCE=strace of the real sandbox tool branch (exact target + errno) — HOST-VERIFIED
+PROCESS_IDENTITY=Hermes+tool child HOST uid/ns while alive — HOST-VERIFIED
+ACCEPTANCE_EVIDENCE=PASS (host self-test TRIAL_GATE=PASS, TRIAL_EXIT_CODE=0)
+AI_BOUNDARY=BLOCKED
+TRIAL_COMMIT=1838f285ebe79e5fe092223eaee2b87008f302a7
+TRIAL_EXIT_CODE=0
+```
+
+Still open before `AI_BOUNDARY=PASS`: independent trusted-controller broker identity, Cursor
+global-rules decision, and canonical promotion of the isolated Stage 3 implementation.
