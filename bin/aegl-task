@@ -16,6 +16,8 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 PROJECTS_ROOT="${PROJECTS_ROOT:-$(cd "$AEGL_ROOT/.." && pwd)}"
+# External business root (KeepLab); default sibling AppProjects — not $HOME itself.
+BUSINESS_ROOT="${AEGL_BUSINESS_ROOT:-$(cd "$PROJECTS_ROOT/.." && pwd)/AppProjects}"
 TASKS_ROOT="${AEGL_TASKS_ROOT:-${AEGL_STATE_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/aegl}/tasks}"
 
 BWRAP="${BWRAP:-/usr/bin/bwrap}"
@@ -29,6 +31,11 @@ resolve_project() {
   local p="$1"
   case "$p" in
     /*) [ -d "$p" ] && { printf '%s' "$p"; return; } ;;
+    KeepLab-Relay)
+      # Prefer business root; accept pre-migrate location under Projects until moved.
+      [ -d "$BUSINESS_ROOT/KeepLab-Relay" ] && { printf '%s' "$BUSINESS_ROOT/KeepLab-Relay"; return; }
+      [ -d "$PROJECTS_ROOT/KeepLab-Relay" ] && { printf '%s' "$PROJECTS_ROOT/KeepLab-Relay"; return; }
+      ;;
     *) [ -d "$PROJECTS_ROOT/$p" ] && { printf '%s' "$PROJECTS_ROOT/$p"; return; } ;;
   esac
   die "unknown project: $p"
@@ -84,12 +91,21 @@ boundary_audit() {
   say "tasks_root=$TASKS_ROOT"
   say "sandbox=$BWRAP ($( "$BWRAP" --version 2>/dev/null || echo missing))"
   [ -x "$BWRAP" ] || { say "  sandbox missing"; bad=$((bad+1)); }
-  for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do
+  for p in Google-Android-Agent-Development-Stack AI-Engineering-Governance-Layer; do
     local d="$PROJECTS_ROOT/$p"
-    [ -d "$d" ] || { say "  MISSING project: $p"; bad=$((bad+1)); continue; }
+    [ -d "$d" ] || { say "  MISSING system project: $p"; bad=$((bad+1)); continue; }
     local dirty; dirty="$(git -C "$d" status --porcelain 2>/dev/null | grep -vE '^ M references/' | wc -l)"
-    say "  $p: git=$([ -d "$d/.git" ] && echo yes || echo no) dirty=$dirty"
+    say "  $p (system): git=$( { [ -d "$d/.git" ] || [ -f "$d/.git" ]; } && echo yes || echo no) dirty=$dirty"
   done
+  local kd=""
+  if [ -d "$BUSINESS_ROOT/KeepLab-Relay" ]; then kd="$BUSINESS_ROOT/KeepLab-Relay"
+  elif [ -d "$PROJECTS_ROOT/KeepLab-Relay" ]; then kd="$PROJECTS_ROOT/KeepLab-Relay"
+  fi
+  if [ -z "$kd" ]; then say "  MISSING business project: KeepLab-Relay"; bad=$((bad+1))
+  else
+    local dirty; dirty="$(git -C "$kd" status --porcelain 2>/dev/null | grep -vE '^ M references/' | wc -l)"
+    say "  KeepLab-Relay (business@$kd): git=$( { [ -d "$kd/.git" ] || [ -f "$kd/.git" ]; } && echo yes || echo no) dirty=$dirty"
+  fi
   if [ -f "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack/scripts/verify-layout.sh" ]; then
     local v; v="$(bash "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack/scripts/verify-layout.sh" --root "$PROJECTS_ROOT/Google-Android-Agent-Development-Stack" 2>&1 | tail -1)"
     say "  stack layout: $v"

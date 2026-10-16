@@ -163,5 +163,39 @@ d_t="$(req '{"op":"promote","task_id":"rt"}')"
 [ "$(dec "$d_t")" = REJECTED ] && [ "$(reason "$d_t")" = target_changed ] \
   && ok "target OID change -> REJECTED target_changed" || no "target change not refused ($(dec "$d_t") $(reason "$d_t"))"
 
+
+# --- business project under AEGL_BUSINESS_ROOT (KeepLab) --------------------- #
+BROOT="$ST/AppProjects"; mkdir -p "$BROOT"
+export AEGL_BUSINESS_ROOT="$BROOT" AEGL_PROJECT_ALLOWLIST="Google-Android-Agent-Development-Stack,KeepLab-Relay,AI-Engineering-Governance-Layer"
+KL="$(new_project KeepLab-Relay)"; # wrong: new_project puts under PROOT
+# relocate KeepLab into business root
+rm -rf "$BROOT/KeepLab-Relay"
+mv "$KL" "$BROOT/KeepLab-Relay"
+KL="$BROOT/KeepLab-Relay"
+BASE_KL="$(base_of "$KL")"
+WT_KL="$(make_wt "$KL" rkl 'echo biz > biz.txt')"
+# restart broker with business root (same socket; kill old)
+kill "$BPID" 2>/dev/null; wait "$BPID" 2>/dev/null
+rm -f "$SOCK"
+export AEGL_BROKER_SOCKET="$SOCK" AEGL_BROKER_REGISTRY_DIR="$REG" PROJECTS_ROOT="$PROOT" \
+       AEGL_BUSINESS_ROOT="$BROOT" \
+       AEGL_PROJECT_ALLOWLIST="Google-Android-Agent-Development-Stack,KeepLab-Relay,AI-Engineering-Governance-Layer" \
+       AEGL_BROKER_ALLOW_REQUESTERS="$(id -u)" AEGL_BROKER_ALLOW_RECORDERS="$(id -u)"
+"$BROKER" serve >"$ST/broker2.log" 2>&1 &
+BPID=$!
+for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
+reg rkl "$KL" "$BASE_KL" "$WT_KL" rkl
+req '{"op":"record","task_id":"rkl","verify_result":"PASS"}' >/dev/null
+dkl="$(dec "$(req '{"op":"promote","task_id":"rkl"}')")"
+[ "$dkl" = APPLIED ] && ok "business KeepLab under AppProjects promotes" || no "business KeepLab promote ($dkl)"
+# KeepLab left under Projects must reject
+BADKL="$PROOT/KeepLab-Relay"; mkdir -p "$BADKL"; git -C "$BADKL" init -q
+( cd "$BADKL" && echo z > z.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm z )
+git -C "$BADKL" branch -M main
+WT_BAD="$(make_wt "$BADKL" rbad 'echo bad > bad.txt')"
+reg rbad "$BADKL" "$(base_of "$BADKL")" "$WT_BAD" rbad
+[ "$(dec "$(req '{"op":"promote","task_id":"rbad"}')")" = REJECTED ] \
+  && ok "KeepLab under Projects root rejected" || no "KeepLab under Projects accepted"
+
 echo "BROKER_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

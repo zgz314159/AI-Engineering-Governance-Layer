@@ -114,11 +114,29 @@ def _peer_uid(conn: socket.socket) -> int:
 
 
 def _authorized_project(project: str) -> str:
+    """Authorize a registered project under exactly one allowlisted root.
+
+    System names must sit directly under ``PROJECTS_ROOT``; business names
+    (KeepLab) under ``AEGL_BUSINESS_ROOT``. The allow root is never expanded to
+    ``$HOME`` or any other parent.
+    """
+    if not isinstance(project, str) or not project:
+        raise ValueError("project path missing")
     proj = os.path.realpath(project)
-    if os.path.dirname(proj) != promotion_core.projects_root():
-        raise ValueError("project is not directly under the projects root")
-    if os.path.basename(proj) not in project_allowlist():
+    name = os.path.basename(proj)
+    parent = os.path.dirname(proj)
+    if name not in project_allowlist():
         raise ValueError("project is not in the allowlist")
+    if name in promotion_core.ALLOWED_SYSTEM_PROJECT_DIRS:
+        if parent != promotion_core.projects_root():
+            raise ValueError("system project is not directly under the projects root")
+    elif name in promotion_core.ALLOWED_BUSINESS_PROJECT_DIRS:
+        if parent != promotion_core.business_root():
+            raise ValueError("business project is not directly under the business root")
+    else:
+        # Custom allowlist entries (tests): system-root children only.
+        if parent != promotion_core.projects_root():
+            raise ValueError("project is not directly under the projects root")
     if not os.path.isdir(proj):
         raise ValueError("project dir missing")
     return proj

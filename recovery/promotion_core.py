@@ -39,9 +39,13 @@ GEN = re.compile(
     r"(^|/)secrets\.json$|(^|/)credentials\.json$|(^|/)\.env($|\.)"
 )
 
-ALLOWED_PROJECT_DIRS = frozenset(
-    {"Google-Android-Agent-Development-Stack", "KeepLab-Relay", "AI-Engineering-Governance-Layer"}
+# System formal projects — direct children of PROJECTS_ROOT only.
+ALLOWED_SYSTEM_PROJECT_DIRS = frozenset(
+    {"Google-Android-Agent-Development-Stack", "AI-Engineering-Governance-Layer"}
 )
+# External business projects — direct children of AEGL_BUSINESS_ROOT only.
+ALLOWED_BUSINESS_PROJECT_DIRS = frozenset({"KeepLab-Relay"})
+ALLOWED_PROJECT_DIRS = ALLOWED_SYSTEM_PROJECT_DIRS | ALLOWED_BUSINESS_PROJECT_DIRS
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 AEGL_ROOT = os.path.dirname(_HERE)
@@ -67,6 +71,14 @@ GIT_HARDEN = [
 
 def projects_root() -> str:
     return os.path.realpath(os.environ.get("PROJECTS_ROOT") or DEFAULT_PROJECTS_ROOT)
+
+
+def business_root() -> str:
+    """External business-project root (sibling of Projects by default: …/AppProjects)."""
+    override = os.environ.get("AEGL_BUSINESS_ROOT")
+    if override:
+        return os.path.realpath(override)
+    return os.path.realpath(os.path.join(os.path.dirname(projects_root()), "AppProjects"))
 
 
 def _safe_directory_args(repo: str) -> list:

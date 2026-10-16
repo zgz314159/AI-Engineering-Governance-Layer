@@ -26,8 +26,11 @@ set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
 PROJECTS_ROOT="${PROJECTS_ROOT:-$(cd "$AEGL_ROOT/.." && pwd)}"
+BUSINESS_ROOT="${AEGL_BUSINESS_ROOT:-$(cd "$PROJECTS_ROOT/.." && pwd)/AppProjects}"
 STACK="$PROJECTS_ROOT/Google-Android-Agent-Development-Stack"
-KEEPLAB="$PROJECTS_ROOT/KeepLab-Relay"
+# KeepLab is an external business project under AppProjects after migrate.
+KEEPLAB="$BUSINESS_ROOT/KeepLab-Relay"
+[ -d "$KEEPLAB" ] || KEEPLAB="$PROJECTS_ROOT/KeepLab-Relay"
 PINS="$AEGL_ROOT/recovery/toolchain-pins.json"
 
 ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
@@ -53,6 +56,7 @@ doctor() {
   local req_missing=0 opt_missing=0
   say "AEGL RECOVERY DOCTOR (read-only)"
   say "projects_root=$PROJECTS_ROOT"
+  say "business_root=$BUSINESS_ROOT"
   say "stack=$STACK"
   say "keeplab=$KEEPLAB"
   say "aegl=$AEGL_ROOT"

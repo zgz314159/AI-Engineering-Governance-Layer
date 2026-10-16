@@ -35,10 +35,14 @@ BROKER_MARKER="/etc/aegl/broker-verified"     # root-owned; written only after i
 HOME_DIR="/home/zhong"
 AEGL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECTS_PARENT="/home/zhong/Projects"
+BUSINESS_PARENT="/home/zhong/AppProjects"
+# System formal projects under Projects; KeepLab registered as external business.
 PROJECTS=(
   "$PROJECTS_PARENT/Google-Android-Agent-Development-Stack"
-  "$PROJECTS_PARENT/KeepLab-Relay"
   "$PROJECTS_PARENT/AI-Engineering-Governance-Layer"
+)
+BUSINESS_PROJECTS=(
+  "$BUSINESS_PARENT/KeepLab-Relay"
 )
 # item 1: generated dependency trees to remove before the switch (review list; never auto-deleted)
 GENERATED_DEPS=(
@@ -61,7 +65,8 @@ list_generated_deps(){
   for d in "${GENERATED_DEPS[@]}"; do
     if [ ! -e "$d" ]; then say "  (absent) $d"; continue; fi
     local dev rdev sz nf tracked
-    dev="$(stat -c '%d' "$d")"; rdev="$(stat -c '%d' "${PROJECTS[2]}")"
+    # PROJECTS[1] = AEGL (system formal tree used as same-device reference)
+    dev="$(stat -c '%d' "$d")"; rdev="$(stat -c '%d' "${PROJECTS[1]}")"
     sz="$(du -sh "$d" 2>/dev/null | cut -f1)"; nf="$(find -P "$d" -type f 2>/dev/null | wc -l)"
     tracked="$(git -C "${d%%/fixture/*}" ls-files -- "${d#"$PROJECTS_PARENT/AI-Engineering-Governance-Layer/"}" 2>/dev/null | wc -l)"
     say "  $d"
@@ -86,27 +91,48 @@ check(){
   if [ "$got" = "$want" ]; then echo "$got (expected $want)"; else echo "$got (EXPECTED $want)"; VFAIL=$((VFAIL+1)); fi
 }
 verify_target(){
-  local p="$1"
-  say "  --- $p"
+  local p="$1" parent="${2:-$PROJECTS_PARENT}" expect_immutable="${3:-yes}"
+  say "  --- $p (parent=$parent)"
   local nested; nested="$(find -P "$p" -path "$p/.git" -prune -o -type f -print -quit 2>/dev/null || true)"
   check "operator cannot write project root"   no  "$OPERATOR_USER" test -w "$p"
   [ -n "$nested" ] && check "operator cannot write a nested file" no "$OPERATOR_USER" test -w "$nested"
   [ -e "$p/.git" ] && check "operator cannot write .git config"  no "$OPERATOR_USER" test -w "$p/.git/config"
-  check "operator cannot write the parent dir" no  "$OPERATOR_USER" test -w "$PROJECTS_PARENT"
+  check "operator cannot write the parent dir" no  "$OPERATOR_USER" test -w "$parent"
   check "broker can write the project"         ok  "$BROKER_USER"   test -w "$p"
-  printf '  %-46s ' "parent lsattr (expect i)"
-  local fl; fl="$(lsattr -d "$PROJECTS_PARENT" 2>/dev/null | awk '{print $1}')"
-  case "$fl" in *i*) echo "$fl i-present";; *) echo "$fl NO-i"; VFAIL=$((VFAIL+1));; esac
+  if [ "$expect_immutable" = yes ]; then
+    printf '  %-46s ' "parent lsattr (expect i)"
+    local fl; fl="$(lsattr -d "$parent" 2>/dev/null | awk '{print $1}')"
+    case "$fl" in *i*) echo "$fl i-present";; *) echo "$fl NO-i"; VFAIL=$((VFAIL+1));; esac
+  else
+    say "  parent immutable: not required for business root (system Projects only)"
+  fi
   say "    (non-mutating: proves permission model + immutable flag; does NOT attempt a write/rename)"
 }
-do_verify(){ phase "verify (non-mutating)"; local p; for p in "${PROJECTS[@]}"; do verify_target "$p"; done; say "  VERIFY_VIOLATIONS=$VFAIL"; [ "$VFAIL" -eq 0 ]; }
+do_verify(){
+  phase "verify (non-mutating)"
+  local p
+  for p in "${PROJECTS[@]}"; do verify_target "$p" "$PROJECTS_PARENT" yes; done
+  for p in "${BUSINESS_PROJECTS[@]}"; do
+    [ -e "$p" ] || { say "  SKIP absent business project: $p"; continue; }
+    verify_target "$p" "$BUSINESS_PARENT" no
+  done
+  say "  VERIFY_VIOLATIONS=$VFAIL"; [ "$VFAIL" -eq 0 ]
+}
 
 # --------------------------------------------------------------------------- #
 # issue 3a: prepare (idempotent, safely retryable)
 # --------------------------------------------------------------------------- #
 preflight_paths(){
-  local p; for p in "${PROJECTS[@]}" "$PROJECTS_PARENT" "$HOME_DIR"; do
+  local p
+  for p in "${PROJECTS[@]}" "$PROJECTS_PARENT" "$HOME_DIR"; do
     [ -e "$p" ] || die "manifest path missing: $p"; [ -L "$p" ] && die "manifest path is a symlink: $p"
+  done
+  for p in "${BUSINESS_PROJECTS[@]}"; do
+    if [ -e "$p" ]; then
+      [ -L "$p" ] && die "business path is a symlink: $p"
+    else
+      say "  (note) business project not yet present: $p"
+    fi
   done
 }
 prepare(){
@@ -147,19 +173,31 @@ switch(){
   say "  no fake revert: an interrupted chown cannot be restored to exact per-file modes;"
   say "  the run stops and prints the precise partial state instead of claiming 'restored'."
   local p
-  for p in "${PROJECTS[@]}"; do
+  _switch_tree(){
+    p="$1"
     say "  --- tree $p (readable throughout: group $HUMAN_GROUP keeps r-x)"
     run find -P "$p" -path "$p/.git" -prune -o -type d -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 2750 {} +
     run find -P "$p" -path "$p/.git" -prune -o -type f -perm -u+x -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 0750 {} +
     run find -P "$p" -path "$p/.git" -prune -o -type f ! -perm -u+x -exec chown "$BROKER_USER:$HUMAN_GROUP" {} + -exec chmod 0640 {} +
-    [ -e "$p/.git" ] || continue
+    [ -e "$p/.git" ] || return 0
     run find -P "$p/.git" -type d -exec chown "$BROKER_USER:$BROKER_GROUP" {} + -exec chmod 2700 {} +
     run find -P "$p/.git" -type f -exec chown "$BROKER_USER:$BROKER_GROUP" {} + -exec chmod 0600 {} +
+  }
+  for p in "${PROJECTS[@]}"; do _switch_tree "$p"; done
+  for p in "${BUSINESS_PROJECTS[@]}"; do
+    [ -e "$p" ] || die "business project missing (migrate KeepLab first): $p"
+    _switch_tree "$p"
   done
   run setfacl -m "u:$BROKER_USER:--x" "$HOME_DIR"
   run chown "$BROKER_USER:$HUMAN_GROUP" "$PROJECTS_PARENT"
   run chmod 2755 "$PROJECTS_PARENT"
-  run chattr +i "$PROJECTS_PARENT"        # LAST: entry lock
+  run chattr +i "$PROJECTS_PARENT"        # LAST: system entry lock (Projects only)
+  # Business parent: ownership only — immutable lock on AppProjects needs separate approval.
+  if [ -d "$BUSINESS_PARENT" ]; then
+    run chown "$BROKER_USER:$HUMAN_GROUP" "$BUSINESS_PARENT"
+    run chmod 2755 "$BUSINESS_PARENT"
+    say "  business parent owned; chattr +i on $BUSINESS_PARENT NOT applied (needs host approval)"
+  fi
   say "  switch applied. Run acceptance now:  $0 verify"
 }
 

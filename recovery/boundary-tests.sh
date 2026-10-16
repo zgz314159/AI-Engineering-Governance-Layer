@@ -65,7 +65,17 @@ AEGL_CONTROLLER_TOKEN="$TOKEN" bash "$TASK" controller probe "$ID" "test -z \"\$
   && ok "T4 token secret not retrievable in-sandbox" || no "T4 token secret not retrievable in-sandbox"
 
 # ---- T5: RuleSync plan writes nothing and reports global targets/conflicts ----
-proj_state() { local d="$PROJECTS_ROOT/$1"; { for f in AGENTS.md CLAUDE.md; do [ -e "$d/$f" ] && sha256sum "$d/$f"; done; for x in .cursor rulesync.jsonc .rulesync; do [ -e "$d/$x" ] && echo "$x present"; done; } | sha256sum | awk '{print $1}'; }
+BUSINESS_ROOT="${AEGL_BUSINESS_ROOT:-$(cd "$PROJECTS_ROOT/.." && pwd)/AppProjects}"
+proj_state() {
+  local name="$1" d
+  if [ "$name" = KeepLab-Relay ]; then
+    if [ -d "$BUSINESS_ROOT/KeepLab-Relay" ]; then d="$BUSINESS_ROOT/KeepLab-Relay"
+    else d="$PROJECTS_ROOT/KeepLab-Relay"; fi
+  else
+    d="$PROJECTS_ROOT/$name"
+  fi
+  { for f in AGENTS.md CLAUDE.md; do [ -e "$d/$f" ] && sha256sum "$d/$f"; done; for x in .cursor rulesync.jsonc .rulesync; do [ -e "$d/$x" ] && echo "$x present"; done; } | sha256sum | awk '{print $1}'
+}
 declare -A before
 for p in Google-Android-Agent-Development-Stack KeepLab-Relay AI-Engineering-Governance-Layer; do before[$p]="$(proj_state "$p")"; done
 mkdir -p "$T/operator-home/.codex"

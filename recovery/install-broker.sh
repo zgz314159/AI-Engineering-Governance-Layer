@@ -11,14 +11,15 @@
 # `switch`, change project permissions, merge any project, or write /etc/aegl/broker-verified.
 #
 #   sudo bash install-broker.sh --repo <AEGL> --projects-root <Projects> \
-#        --commit <full-40-hex> [--self-test]
+#        --commit <full-40-hex> [--business-root <AppProjects>] [--self-test]
 set -uo pipefail
 
-REPO=""; PROJECTS_ROOT=""; COMMIT=""; SELF_TEST=0
+REPO=""; PROJECTS_ROOT=""; BUSINESS_ROOT=""; COMMIT=""; SELF_TEST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
     --projects-root) PROJECTS_ROOT="${2:-}"; shift 2 ;;
+    --business-root) BUSINESS_ROOT="${2:-}"; shift 2 ;;
     --commit) COMMIT="${2:-}"; shift 2 ;;
     --self-test) SELF_TEST=1; shift ;;
     *) printf 'INSTALL_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
@@ -44,6 +45,22 @@ sha_of(){ sha256sum | awk '{print $1}'; }
 [ -n "$COMMIT" ] || fail "--commit is required"
 [ -d "$REPO/.git" ] || fail "--repo is not a git repository: $REPO"
 [ -d "$PROJECTS_ROOT" ] || fail "--projects-root is not a directory: $PROJECTS_ROOT"
+# Business root: external AppProjects sibling of Projects (not $HOME itself).
+# Directory may be absent until first business-project migrate; unit still carries the path.
+_PROJ_PARENT="$(cd "$PROJECTS_ROOT/.." && pwd)" || fail "--projects-root parent unreadable"
+if [ -z "$BUSINESS_ROOT" ]; then
+  BUSINESS_ROOT="$_PROJ_PARENT/AppProjects"
+else
+  _br_parent="$(dirname "$BUSINESS_ROOT")"
+  _br_base="$(basename "$BUSINESS_ROOT")"
+  [ -d "$_br_parent" ] || fail "--business-root parent missing: $_br_parent"
+  BUSINESS_ROOT="$(cd "$_br_parent" && pwd)/$_br_base"
+fi
+case "$BUSINESS_ROOT" in
+  "$PROJECTS_ROOT"|"$PROJECTS_ROOT"/*) fail "--business-root must not be inside --projects-root" ;;
+esac
+[ "$BUSINESS_ROOT" != "$_PROJ_PARENT" ] \
+  || fail "--business-root must not be the projects parent itself (refusing home-wide allow root)"
 case "$COMMIT" in
   [0-9a-f][0-9a-f]*) : ;;
   *) fail "--commit must be a full 40-hex commit id" ;;
@@ -54,7 +71,7 @@ for f in "${FILES[@]}"; do
   git -C "$REPO" cat-file -e "$COMMIT:$f" 2>/dev/null || fail "required file missing in commit: $f"
 done
 
-say "AEGL promotion broker install   repo=$REPO projects_root=$PROJECTS_ROOT commit=$COMMIT"
+say "AEGL promotion broker install   repo=$REPO projects_root=$PROJECTS_ROOT business_root=$BUSINESS_ROOT commit=$COMMIT"
 
 # --- stage the files (verify hashes) BEFORE touching the host ---------------- #
 STAGE="$(mktemp -d)" || fail "mktemp failed"
@@ -99,6 +116,7 @@ RuntimeDirectoryMode=2770
 Environment=AEGL_BROKER_SOCKET=$RUNDIR/broker.sock
 Environment=AEGL_BROKER_REGISTRY_DIR=$REGDIR
 Environment=PROJECTS_ROOT=$PROJECTS_ROOT
+Environment=AEGL_BUSINESS_ROOT=$BUSINESS_ROOT
 Environment=AEGL_PROJECT_ALLOWLIST=Google-Android-Agent-Development-Stack,KeepLab-Relay,AI-Engineering-Governance-Layer
 Environment=AEGL_BROKER_ALLOW_REQUESTERS=$AI_USER
 Environment=AEGL_BROKER_ALLOW_RECORDERS=root

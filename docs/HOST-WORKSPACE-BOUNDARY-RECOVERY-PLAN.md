@@ -2499,3 +2499,123 @@ AI_BOUNDARY=BLOCKED
 BLOCKERS=host_same_uid_write_surface,cursor_project_rules_scope
 ```
 
+## Round update 47: KeepLab → AppProjects (path contract + migrate pack)
+
+Authorized preparation only — **no sudo, no directory move, no switch, no
+broker-verified, no Cursor rules deploy, no push** in this round.
+
+### Precheck (host)
+
+| Check | Result |
+|---|---|
+| Destination `/home/zhong/AppProjects/KeepLab-Relay` | **absent** (no overwrite/merge) |
+| Source `/home/zhong/Projects/KeepLab-Relay` | present; `master` = `a92d9bd3d76948ecfaf644f6394ed464d0528597`; porcelain empty; one worktree |
+| Same filesystem | Projects parent and `/home/zhong` share device → rename OK |
+| Active KeepLab AEGL tasks | none bound to the source tree |
+| Stop/start | **none** — Chrome / Bridge / Supervisor / other projects untouched |
+
+### Path adaptations (active entries only)
+
+| Surface | Change |
+|---|---|
+| `promotion_core` | `ALLOWED_SYSTEM_*` vs `ALLOWED_BUSINESS_*` (`KeepLab-Relay`); `business_root()` → `AEGL_BUSINESS_ROOT` or `…/AppProjects` |
+| `promotion_broker._authorized_project` | system names under `PROJECTS_ROOT` only; business names under business root only; **never** home-wide |
+| `install-broker.sh` | `--business-root`; unit `AEGL_BUSINESS_ROOT=…` |
+| `bin/aegl-task` / `bin/aegl-recovery` | resolve KeepLab under business root (pre-migrate fallback under Projects) |
+| `host-identity-bootstrap.sh` | KeepLab listed in `BUSINESS_PROJECTS` under `/home/zhong/AppProjects`; system `PROJECTS` = Stack + AEGL only; `chattr +i` remains **Projects** only |
+| `migrate-keeplab-to-appprojects.sh` | trusted-terminal move + optional `--sync-broker` |
+| Google Stack (isolation) | `contract_guard` default package under AppProjects; `verify-layout` drops KeepLab from Projects siblings |
+
+Historical docs/reports/Git history **not** rewritten. No old-path symlinks.
+
+### Projects top-level use map (shallow; declaration/entry based)
+
+| Entry | Use | Class |
+|---|---|---|
+| `AI-Engineering-Governance-Layer` | AEGL governance / broker / recovery | **系统正式项目** |
+| `Google-Android-Agent-Development-Stack` | Hermes/stack orchestration | **系统正式项目** |
+| `KeepLab-Relay` *(until migrate)* | KeepLab product | **外部业务项目** (moving to AppProjects) |
+| `AI-System-Bakeoff` | Bakeoff / BMAD experiments | 实验 / 上游参考 |
+| `Archon-AI-Software-Factory` | Archon factory reference | 上游参考 |
+| `BMAD-Method-TEA` | BMAD TEA reference | 上游参考 |
+| `GitHub-Spec-Kit` | Spec-kit reference | 上游参考 |
+| `Program` | Program nest | 工具状态 / 实验 |
+| `MULTI-PLATFORM AI DEVELOPMENT STACK` | Multi-platform notes/tree | 实验 / 文档 |
+| `*-Implementation-*.md` / design md at Projects root | Design notes | 文档（非正式源码树） |
+
+No other top-level tree is relocated or deleted in this round.
+
+### A-scheme protection scope (updated)
+
+**System formal (Projects; optional future `chattr +i` on `/home/zhong/Projects`):**
+
+- `Google-Android-Agent-Development-Stack`
+- `AI-Engineering-Governance-Layer`
+
+**External business (AppProjects; same broker identities; no Projects entry lock):**
+
+- `KeepLab-Relay` → `/home/zhong/AppProjects/KeepLab-Relay`
+
+Still reuse `aegl-promote` / `aegl-ai` / `host-identity-bootstrap` — no parallel registry.
+
+### Targeted checks (this tip)
+
+```text
+KEEPLAB_PATH_TESTS passed=5 failed=0
+BROKER_TESTS passed=20 failed=0
+```
+
+### Trusted migrate command (operator; after this tip is on the isolation branch)
+
+Substitute `TIP` with the full SHA of this Round 47 commit on
+`plan/keeplab-appprojects-migrate`. Does **not** promote AEGL, does **not** run
+switch / broker-verified / Cursor rules.
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=<FULL_SHA_THIS_COMMIT>
+# Optional preflight (no move):
+git -C "$AEGL" show "$TIP:recovery/migrate-keeplab-to-appprojects.sh" \
+  | bash -s -- --dry-run
+# Move + reinstall broker unit with AEGL_BUSINESS_ROOT (requires root for --sync-broker):
+git -C "$AEGL" show "$TIP:recovery/migrate-keeplab-to-appprojects.sh" \
+  | sudo bash -s -- --aegl "$AEGL" --aegl-commit "$TIP" --sync-broker
+# Post (migrate-related only):
+test ! -e /home/zhong/Projects/KeepLab-Relay
+test -d /home/zhong/AppProjects/KeepLab-Relay/.git
+test "$(git -C /home/zhong/AppProjects/KeepLab-Relay rev-parse HEAD)" \
+  = a92d9bd3d76948ecfaf644f6394ed464d0528597
+grep -q 'AEGL_BUSINESS_ROOT=/home/zhong/AppProjects' \
+  /etc/systemd/system/aegl-promote-broker.service
+```
+
+**Impact:** renames KeepLab tree; updates broker unit env; leaves no old path /
+backup / symlink. Does not stop Chrome/Bridge. Does not chown/switch Projects.
+Does not touch other Projects siblings.
+
+Google Stack path tip (separate isolation branch `plan/keeplab-appprojects-path`)
+must be promoted through the normal broker flow when ready — not bundled into the
+directory move.
+
+### Host changes still needing explicit approval
+
+1. Run the migrate command above (directory move + broker unit sync).
+2. Promote this AEGL isolation tip (and Stack path tip) via broker → `main`.
+3. Remaining item A option 1/2/3 (`broker-verified` → `switch`) — **not** unlocked by migrate.
+4. Optional: `chattr +i` on `/home/zhong/AppProjects` (currently **not** applied by switch).
+5. Cursor project-rules scope (Round 46 item B) — unchanged.
+6. `git push` — explicit only.
+
+```text
+KEEPLAB_MIGRATE=PREPARED_NOT_EXECUTED
+BUSINESS_ROOT=/home/zhong/AppProjects
+SYSTEM_PROJECTS=Stack,AEGL
+BUSINESS_PROJECTS=KeepLab-Relay
+SWITCH=NOT_THIS_ROUND
+BROKER_VERIFIED=NOT_THIS_ROUND
+CURSOR_RULES=NOT_THIS_ROUND
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
