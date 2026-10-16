@@ -52,9 +52,11 @@ printf '%s\n' "$ARGV" | grep -q '/run/aegl-run/installs-ro' && no "argv still re
 
 # === 3. process sampling ======================================================= #
 CH="$(mktemp -d)"
-# an "init" whose OWN cmdline does not look like Hermes, but whose child does
+# init is a shell wrapper; the real Hermes-shaped child is python -c '...hermes...'
+# (raw NUL argv + real exe). An exec -a rename of sleep must NOT count.
 cat > "$CH/init.sh" <<'EOS'
-bash -c 'exec -a "hermes -p android-stack chat --oneshot" sleep 25' &
+python3 -c 'import time; # hermes startup marker
+time.sleep(25)' &
 wait
 EOS
 bash "$CH/init.sh" &
@@ -68,7 +70,13 @@ HP="$(printf '%s' "$EV" | python3 -c 'import json,sys;print(json.load(sys.stdin)
   && ok "capture reports the Hermes process's own host uid" || no "capture uid is not the Hermes uid"
 printf '%s' "$EV" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if "children_uids" in d else 1)' \
   && ok "capture reports children separately (empty is not 'all passed')" || no "capture hides the children field"
-kill "$INIT" 2>/dev/null; wait "$INIT" 2>/dev/null
+# shell-wrapper argv rename must never be accepted as Hermes
+bash -c 'exec -a "hermes -p android-stack chat --oneshot" sleep 25' & WRAP=$!
+sleep 0.3
+printf '{"child-pid": %d}\n' "$WRAP" > "$CH/info-wrap.json"
+EVW="$(python3 "$AEGL_ROOT/recovery/capture_evidence.py" "$CH/info-wrap.json" --max-wait 2 --hermes-wait 2)"
+printf '%s' "$EVW" | grep -q 'hermes_not_found' && ok "exec -a wrapper is NOT Hermes (NOT_PROVEN)" || no "wrapper mistaken for Hermes ($EVW)"
+kill "$INIT" "$WRAP" 2>/dev/null; wait "$INIT" "$WRAP" 2>/dev/null
 # a real init with NO Hermes descendant must be NOT_RUN/NOT_PROVEN, never a false pass
 bash -c 'sleep 25' & PLAIN=$!
 sleep 0.4

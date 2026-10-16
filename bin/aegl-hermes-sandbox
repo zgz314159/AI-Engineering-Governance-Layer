@@ -169,6 +169,76 @@ PY
 }
 gen_config "$SK/.hermes/config.yaml" || die "config build failed"
 cp "$SK/.hermes/config.yaml" "$SK/.hermes/profiles/android-stack/config.yaml"
+
+# Task-local shell-hooks allowlist: ONLY the exact trusted pre_tool_call command.
+# Hermes (non-interactive) skips unapproved shell hooks; YAML alone is not registration.
+# Mounted read-only at the android-stack profile HERMES_HOME path; host allowlist untouched.
+ALLOWLIST_SRC="$RUN/shell-hooks-allowlist.json"
+AEGL_HOOK_CMD="$AEGL_HOOK_CMD" python3 - "$ALLOWLIST_SRC" <<'PY' || die "task allowlist build failed"
+import json, os, sys
+from datetime import datetime, timezone
+dst, cmd = sys.argv[1], os.environ.get("AEGL_HOOK_CMD") or ""
+if not cmd:
+    sys.exit("empty AEGL_HOOK_CMD")
+# Match agent/shell_hooks.py::_record_approval shape (event+command is the registration key).
+mtime = None
+script = next((t for t in cmd.split() if t.endswith(".py")), None)
+if script and os.path.isfile(script):
+    mtime = datetime.fromtimestamp(os.path.getmtime(script), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+entry = {
+    "event": "pre_tool_call",
+    "command": cmd,
+    "approved_at": datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+    "script_mtime_at_approval": mtime,
+}
+with open(dst, "w", encoding="utf-8") as fh:
+    json.dump({"approvals": [entry]}, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.chmod(dst, 0o444)
+PY
+# Refuse to start unless the required hook is wired AND allowlisted for exact command.
+# (Hermes register_from_config skips non-allowlisted hooks on non-TTY without --accept-hooks.)
+AEGL_HOOK_CMD="$AEGL_HOOK_CMD" python3 - "$SK/.hermes/profiles/android-stack/config.yaml" "$ALLOWLIST_SRC" <<'PY' || die "required pre_tool_call hook not registered (config/allowlist mismatch)"
+import json, os, re, sys
+cfg_path, al_path = sys.argv[1], sys.argv[2]
+want = os.environ.get("AEGL_HOOK_CMD") or ""
+text = open(cfg_path, encoding="utf-8").read().splitlines()
+in_pre = False
+cmd = None
+fail_closed = False
+for line in text:
+    if not line[:1].isspace() and line.strip() and not line.startswith("hooks:"):
+        in_pre = False
+    stripped = line.strip()
+    if stripped == "pre_tool_call:":
+        in_pre = True
+        continue
+    if in_pre and stripped.endswith(":") and not stripped.startswith("-") and stripped != "pre_tool_call:":
+        in_pre = False
+    if not in_pre:
+        continue
+    m = re.match(r"- command:\s*['\"]?(.*?)['\"]?\s*$", stripped)
+    if m and cmd is None:
+        cmd = m.group(1)
+    if stripped.startswith("fail_closed:"):
+        fail_closed = stripped.split(":", 1)[1].strip().lower() in ("true", "yes", "1")
+if cmd != want:
+    sys.exit("config pre_tool_call command %r != required %r" % (cmd, want))
+if not fail_closed:
+    sys.exit("pre_tool_call fail_closed is not true")
+al = json.load(open(al_path, encoding="utf-8"))
+approvals = al.get("approvals") if isinstance(al, dict) else None
+if not isinstance(approvals, list):
+    sys.exit("allowlist missing approvals list")
+ok = any(isinstance(e, dict) and e.get("event") == "pre_tool_call" and e.get("command") == want for e in approvals)
+if not ok:
+    sys.exit("allowlist has no exact pre_tool_call approval for the required command")
+if len(approvals) != 1:
+    sys.exit("task allowlist must contain exactly one approval (got %d)" % len(approvals))
+print("HOOK_REGISTERED event=pre_tool_call fail_closed=true allowlist=1")
+PY
+say "  required hook registration: OK (pre_tool_call allowlisted; fail_closed=true)"
+
 : > "$RUN/stage/empty"; chmod 0644 "$RUN/stage/empty"
 chown -R root:"$AI_GROUP" "$RUN/stage"; chmod -R g+rX,o-rwx "$RUN/stage"
 chmod 0755 "$SK" "$SK/.hermes" "$SK/.hermes/profiles" "$SK/.hermes/profiles/android-stack" "$SK/.local/bin" "$RUN/stage/run-aegl" "$SK$(dirname "${GUARD_DEST#/home/zhong}")"
@@ -219,6 +289,7 @@ PROFV="$RUN/profile"; mkdir -p "$PROFV/sessions" "$PROFV/logs" "$PROFV/runtime" 
   "$PROFV/terminal-sessions" "$PROFV/cache" "$PROFV/sandboxes" "$PROFV/skills" "$PROFV/hooks"
 : > "$PROFV/state.db"; : > "$PROFV/config.yaml"          # mount points only
 : > "$PROFV/SOUL.md"; : > "$PROFV/profile.yaml"
+: > "$PROFV/shell-hooks-allowlist.json"                  # overwritten by ro-bind of task allowlist
 chown -R "$AI_USER":"$AI_GROUP" "$PROFV"
 # read-only PROJECTION of the declared instruction content: the host profile, skills and
 # hooks are 0700, so a bind alias would stay unreadable after the drop. Copy ONLY these
@@ -239,10 +310,13 @@ MOUNTS=()
 for d in venv workspace; do
   MOUNTS+=("ro-bind:$SRC/gen/environments/$GENHASH/$d:/home/zhong/.hermes/installs/$KEY/environments/$GENHASH/$d")
 done
-# the profile dir is the writable task view; the trusted config and the projected
-# instruction files are mounted read-only OVER it (the model cannot edit config or hooks)
+# the profile dir is the writable task view; the trusted config, projected
+# instruction files, and the task-local shell-hooks allowlist are mounted read-only
+# OVER it (the model cannot edit config, hooks, or approvals). hermes -p android-stack
+# sets HERMES_HOME to this profile dir, so allowlist_path() resolves here.
 MOUNTS+=("bind:$PROFV:/home/zhong/.hermes/profiles/android-stack")
 MOUNTS+=("ro-bind:$SK/.hermes/config.yaml:/home/zhong/.hermes/profiles/android-stack/config.yaml")
+MOUNTS+=("ro-bind:$ALLOWLIST_SRC:/home/zhong/.hermes/profiles/android-stack/shell-hooks-allowlist.json")
 for f in SOUL.md profile.yaml; do
   MOUNTS+=("ro-bind:$PROJV/$f:/home/zhong/.hermes/profiles/android-stack/$f")
 done

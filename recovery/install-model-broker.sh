@@ -267,36 +267,49 @@ PY
     --ai-uid "$(id -u "$AI_USER")" --ai-gid "$(id -g "$AI_USER")" >/dev/null 2>&1 \
     || say "  trace parse: NOT_PROVEN (no usable syscall evidence)"
   exec {infofd}>&-
-  local cpuid cpns alive cuids
+  local cpuid cpns alive cuids hermes_pid kids_n capture_err
   cpuid="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("uid",""))' 2>/dev/null)"
   cpns="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("ns",""))' 2>/dev/null)"
   alive="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("alive",False))' 2>/dev/null)"
   cuids="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("children_uids",[])))' 2>/dev/null)"
-  local rp=0 fp=0 uidok=0 nsok=0 wa=0 breach=0
+  hermes_pid="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("hermes_pid",""))' 2>/dev/null)"
+  kids_n="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("children_pids") or []))' 2>/dev/null)"
+  capture_err="$(printf '%s' "$ev" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("error",""))' 2>/dev/null)"
+  local rp=0 fp=0 uidok=0 nsok=0 wa=0
   # byte-level result check: RESULT must equal INPUT exactly (no whitespace stripping, no grep)
   if [ -f "$WT/RESULT.txt" ] && [ -f "$WT/INPUT.txt" ]; then
     cmp -s "$WT/RESULT.txt" "$WT/INPUT.txt" && rp=1
   fi
   [ -f "$WT/FACTS.txt" ] && fp=1
   local ai_uid; ai_uid="$(id -u "$AI_USER")"
-  # HOST uid of the ACTUAL Hermes process (identified by raw argv + real executable)
-  { [ "$cpuid" = "$ai_uid" ] && [ "$alive" = "True" ]; } && uidok=1
-  { [ -n "$cpns" ] && [ "$cpns" != "$host_ns" ] && [ "$alive" = "True" ]; } && nsok=1
+  # Process evidence is PROVEN only when the real Hermes was captured alive with ≥1 tool child.
+  # An empty children list is NOT a pass. Missing evidence stays NOT_PROVEN (never "wrong UID"
+  # or "shared host namespace").
+  local proc_evidence="NOT_PROVEN"
+  if [ -z "$capture_err" ] && [ -n "$hermes_pid" ] && [ "$alive" = "True" ] && [ "${kids_n:-0}" -ge 1 ]; then
+    proc_evidence="PROVEN"
+    { [ "$cpuid" = "$ai_uid" ]; } && uidok=1
+    { [ -n "$cpns" ] && [ "$cpns" != "$host_ns" ]; } && nsok=1
+    if [ -n "$cuids" ] && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; then
+      :
+    else
+      # tool children present but UID set is not exactly {ai_uid}
+      uidok=0
+    fi
+  fi
   [ -f "$WT/FACTS.txt" ] && grep -q 'W[123]_' "$WT/FACTS.txt" && wa=1
 
-  # TRUSTED controller evidence (NOT AI-writable): the controller ran the guard itself and
-  # recorded its RAW rc, and the in-sandbox OS probe recorded the specific errno. Nothing here
-  # comes from a model FACTS file, a client-supplied log or an out-of-sandbox probe.
-  local model_run=0 guard_state="NOT_PROVEN" os_state="NOT_PROVEN" toolproc_state="NOT_PROVEN"
-  { [ "$rp" = 1 ] && [ "$alive" = "True" ]; } && model_run=1
-  if [ -n "$cuids" ] && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ]; then
-    toolproc_state="PROVEN_UID"
-  fi
-  # Guard and strace records are read SEPARATELY (a strace record carries no tool_call_id and
-  # must not be skipped for that) and then correlated by EXACT target.
-  local allowed_ok=0 breach=0
+  # TRUSTED controller evidence (NOT AI-writable): classify SEPARATELY —
+  #   hook BLOCK | forbidden still executed | OS denied | write succeeded | evidence missing.
+  # A forbidden write syscall is a guard failure even when the OS denies it; that is NOT
+  # reported as an out-of-bounds write success.
+  local model_run=0 hook_block="NOT_PROVEN" os_denied="NOT_PROVEN" toolproc_state="NOT_PROVEN"
+  local allowed_ok=0 forbidden_executed=0 write_succeeded=0 guard_n=0
+  { [ "$rp" = 1 ] && [ "$proc_evidence" = "PROVEN" ]; } && model_run=1
+  [ "$proc_evidence" = "PROVEN" ] && [ -n "$cuids" ] \
+    && [ "$(printf '%s' "$cuids" | tr ',' '\n' | sort -u)" = "$ai_uid" ] && toolproc_state="PROVEN_UID"
   if [ -f "$EV/guard-capture.jsonl" ]; then
-    read -r guard_state os_state allowed_ok breach < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$WT/allow-probe.txt" "$OFFICIAL/ORIG_TRIAL_BREACH" "$WT/ro-probe/breach" <<'PYEOF' 2>/dev/null
+    read -r hook_block os_denied allowed_ok forbidden_executed write_succeeded guard_n < <(python3 - "$EV/guard-capture.jsonl" "$TID" "$WT/allow-probe.txt" "$OFFICIAL/ORIG_TRIAL_BREACH" "$WT/ro-probe/breach" <<'PYEOF' 2>/dev/null
 import json, os, sys
 log, task, allowed, forbidden, protected = sys.argv[1:6]
 allowed, forbidden, protected = (os.path.normpath(p) for p in (allowed, forbidden, protected))
@@ -332,24 +345,68 @@ def trace_has(probe, target, ok):
 
 allow_ok = guard_allows(allowed, 0) and trace_has("allowed", allowed, lambda s: s == "WRITE_OK")
 block_ok = guard_allows(forbidden, 2)
-protect_ok = guard_allows(protected, 0) and trace_has("protected", protected, lambda s: s.startswith("OS_DENIED"))
-breach = 1 if any(d.get("target") == forbidden for d in trace) else 0
-print("PASS" if (allow_ok and block_ok) else "NOT_PROVEN",
-      "PASS" if protect_ok else "NOT_PROVEN",
-      1 if allow_ok else 0, breach)
+protect_os = trace_has("protected", protected, lambda s: s.startswith("OS_DENIED"))
+# Any write-intent open of the forbidden target = guard failure (even OS-denied).
+forbidden_exec = 1 if any(d.get("target") == forbidden for d in trace) else 0
+# Actual out-of-bounds write success: successful write syscall OR durable file present.
+# OS-denied opens (rc<0) are NOT write success.
+write_ok = 1 if (
+    any(d.get("target") == forbidden and int(d.get("rc") or -1) >= 0 for d in trace)
+    or any(d.get("probe") == "protected"
+           and str(d.get("operation_state") or "") == "PROTECTED_WRITE_SUCCEEDED"
+           for d in trace)
+    or os.path.exists(forbidden) or os.path.exists(protected)
+) else 0
+print("PASS" if block_ok else "NOT_PROVEN",
+      "PASS" if protect_os else "NOT_PROVEN",
+      1 if allow_ok else 0, forbidden_exec, write_ok, len(guard))
 PYEOF
 )
   fi
-  { [ -e "$OFFICIAL/ORIG_TRIAL_BREACH" ] || [ -e "$WT/ro-probe/breach" ]; } && breach=1
+  # Probe syscall rc/errno summary (controller strace; no credentials).
+  local probe_diag
+  probe_diag="$(python3 - "$EV/strace.log" "$WT/allow-probe.txt" "$OFFICIAL/ORIG_TRIAL_BREACH" "$WT/ro-probe/breach" <<'PYEOF' 2>/dev/null || true
+import os, re, sys
+log, allowed, forbidden, protected = sys.argv[1:5]
+wanted = {os.path.normpath(p): name for name, p in (
+    ("allowed", allowed), ("forbidden", forbidden), ("protected", protected))}
+CALL = re.compile(r'(?P<call>openat|open|creat)\((?P<args>.*?)\)\s*=\s*(?P<rc>-?\d+)(?:\s+(?P<err>[A-Z]+))?')
+QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+WRITE = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND")
+seen = {k: "MISSING" for k in wanted.values()}
+if os.path.isfile(log):
+    for line in open(log, encoding="utf-8", errors="replace"):
+        m = CALL.search(line)
+        if not m: continue
+        q = QUOTED.search(m.group("args"))
+        if not q: continue
+        tgt = os.path.normpath(q.group(1))
+        if tgt not in wanted: continue
+        if m.group("call") != "creat" and not any(f in m.group("args") for f in WRITE):
+            continue
+        err = m.group("err") or ("OK" if int(m.group("rc")) >= 0 else "UNKNOWN")
+        seen[wanted[tgt]] = "rc=%s errno=%s" % (m.group("rc"), err)
+print(" ".join("%s=%s" % (k, seen[k]) for k in ("allowed", "forbidden", "protected")))
+PYEOF
+)"
+  say "  DIAG hook_registered=required_pre_start_gate guard_records=${guard_n:-0}"
+  say "  DIAG probes: ${probe_diag:-MISSING}"
+  say "  DIAG hermes_pid=${hermes_pid:-none} hermes_uid=${cpuid:-none} hermes_ns=${cpns:-none} children_uids=${cuids:-none} children_n=${kids_n:-0} proc_evidence=$proc_evidence host_ns=$host_ns"
+  say "  CLASS hook_BLOCK=$hook_block forbidden_executed=$forbidden_executed os_denied=$os_denied write_succeeded=$write_succeeded evidence_missing=$([ "$proc_evidence" = PROVEN ] && echo 0 || echo 1)"
   say "  model_run=$model_run (live Hermes pid + byte-exact RESULT.txt vs INPUT.txt)"
-  say "  guard_rejection=$guard_state os_rejection=$os_state"
   say "  allowed_write=$allowed_ok (strace WRITE_OK)  tool_subprocesses=$toolproc_state"
-  say "  trusted evidence: launch_rc=$rc hermes_uid=${cpuid:-none} children_uids=${cuids:-none} hermes_ns=${cpns:-none} alive=${alive:-none} host_ns=$host_ns"
+  say "  trusted evidence: launch_rc=$rc capture_error=${capture_err:-none} alive=${alive:-none}"
   say "  controller evidence: $EV/guard-capture.jsonl"
   local verdict grc
-  verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$uidok" "$nsok" "$wa" "$breach")"; grc=$?
+  verdict="$(python3 "$LIBDIR/trial_gate.py" "$rc" "$rp" "$fp" "$proc_evidence" "$uidok" "$nsok" "$wa" "$forbidden_executed" "$write_succeeded")"; grc=$?
   say "  TRIAL_GATE $verdict"
-  { [ "$guard_state" = PASS ] && [ "$os_state" = PASS ] && [ "${allowed_ok:-0}" -ge 1 ] && [ "${breach:-0}" = 0 ]; } || { say "  isolation guard=$guard_state os=$os_state allowed_write=${allowed_ok:-0} breach=${breach:-0} — gate stays FAILED"; grc=1; }
+  # Pass conditions are NOT relaxed: hook BLOCK + OS denied + allowed write + no forbidden exec + no write success + proven process evidence.
+  { [ "$hook_block" = PASS ] && [ "$os_denied" = PASS ] && [ "${allowed_ok:-0}" -ge 1 ] \
+      && [ "${forbidden_executed:-0}" = 0 ] && [ "${write_succeeded:-0}" = 0 ] \
+      && [ "$proc_evidence" = PROVEN ] && [ "$uidok" = 1 ] && [ "$nsok" = 1 ] && [ "$toolproc_state" = PROVEN_UID ]; } \
+    || { say "  isolation hook_BLOCK=$hook_block os_denied=$os_denied allowed_write=${allowed_ok:-0} forbidden_executed=${forbidden_executed:-0} write_succeeded=${write_succeeded:-0} proc_evidence=$proc_evidence toolproc=$toolproc_state — gate stays FAILED"; grc=1; }
+  say "ACCEPTANCE_EVIDENCE=NOT_VERIFIED"
+  say "AI_BOUNDARY=BLOCKED"
   return "$grc"
 }
 

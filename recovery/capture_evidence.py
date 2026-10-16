@@ -60,10 +60,6 @@ def raw_argv(pid: int):
     return [x.decode("utf-8", "replace") for x in data.split(b"\0") if x]
 
 
-def cmdline(pid: int) -> str:
-    return " ".join(raw_argv(pid))
-
-
 def real_exe(pid: int) -> str:
     """The ACTUAL executable behind the process (not argv[0])."""
     try:
@@ -120,25 +116,6 @@ def descendants(pid: int):
                 out.append(child)
                 frontier.append(child)
     return out
-
-
-def is_hermes(pid: int) -> bool:
-    """True only for the Hermes entry itself, never for a launcher wrapper.
-
-    A wrapper such as ``bash .../sandbox-run.sh hermes -p android-stack chat ...`` merely has
-    hermes/chat in its arguments; matching on that string made the sampler report the wrapper
-    as the model. The real process runs the entry script: either argv[0] is ``hermes`` or an
-    interpreter runs the ``hermes`` entry as argv[1].
-    """
-    parts = cmdline(pid).split()
-    if not parts:
-        return False
-    exe = os.path.basename(parts[0])
-    if exe == "hermes":
-        return True
-    if "python" in exe or exe in ("bash", "sh", "dash", "env"):
-        return len(parts) > 1 and os.path.basename(parts[1]) == "hermes"
-    return False
 
 
 def capture(info_file: str, max_wait: float = 30.0, hermes_wait: float = 240.0) -> dict:
