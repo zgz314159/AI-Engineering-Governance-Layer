@@ -138,16 +138,15 @@ TIP_OID="$(runuser -u "$BROKER_USER" -- git \
   || fail "aegl-promote cannot rev-parse $TARGET_REF (traverse/read ACL or safe.directory incomplete)"
 [ "${#TIP_OID}" -eq 40 ] || fail "unexpected tip oid"
 
-# Prove HEAD.lock + HEAD reflog (not merely rev-parse).
-if ! runuser -u "$BROKER_USER" -- bash -c "
-  set -e
-  touch '$GIT/HEAD.lock'
-  rm -f '$GIT/HEAD.lock'
-  test -w '$GIT/logs/HEAD'
-  printf '' >> '$GIT/logs/HEAD'
-"; then
-  fail "aegl-promote cannot create HEAD.lock or append logs/HEAD"
-fi
+# Never create/remove HEAD.lock here — preserve any existing lock; fail closed.
+[ ! -e "$GIT/HEAD.lock" ] \
+  || fail "HEAD.lock already present; refusing to disturb it: $GIT/HEAD.lock"
+# Non-destructive permission checks only. Lock creation is proven by throwaway
+# cross-UID CAS (exec step 0b), not by probing formal repos.
+runuser -u "$BROKER_USER" -- test -w "$GIT" \
+  || fail "aegl-promote cannot write .git directory (required for HEAD.lock)"
+runuser -u "$BROKER_USER" -- test -w "$GIT/logs/HEAD" \
+  || fail "aegl-promote cannot write logs/HEAD"
 if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
   rm -f "$PROJ/.aegl-acl-probe"
   fail "aegl-promote can write project worktree — ACL too broad"
@@ -158,4 +157,4 @@ if runuser -u "$BROKER_USER" -- touch "$GIT/objects/.aegl-acl-probe" 2>/dev/null
   fail "aegl-promote can write .git/objects — ACL too broad"
 fi
 
-say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=ok head_reflog=ok"
+say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=perm_ok head_reflog=perm_ok"

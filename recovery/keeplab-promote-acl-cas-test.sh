@@ -6,7 +6,7 @@
 #
 #   sudo bash recovery/keeplab-promote-acl-cas-test.sh --commit <AEGL 40-hex> --repo <AEGL>
 #   # or from exec pack (already root) before any formal promote
-set -uo pipefail
+set -euo pipefail
 
 REPO=""; COMMIT=""
 OP_USER="zhong"
@@ -24,7 +24,7 @@ done
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'CAS_TEST_FAIL: %s\n' "$*" >&2; exit 1; }
 
-# Static gates (no root): ACL script must grant HEAD.lock + logs/HEAD.
+# Static gates (no root): ACL script must grant HEAD.lock + logs/HEAD; no lock probe.
 ACL_SRC=""
 if [ -n "$COMMIT" ] && [ -n "$REPO" ] && [ -d "${REPO:-/}/.git" ]; then
   ACL_SRC="$(git -C "$REPO" show "$COMMIT:recovery/install-promote-target-acl.sh" 2>/dev/null)" \
@@ -41,9 +41,15 @@ printf '%s\n' "$ACL_SRC" | grep -q 'logs/HEAD' \
   || fail "ACL installer does not grant logs/HEAD"
 printf '%s\n' "$ACL_SRC" | grep -qE 'setfacl -m "u:\$\{BROKER_USER\}:rwx" "\$GIT"' \
   || fail "ACL installer missing non-recursive rwx on .git dir"
-printf '%s\n' "$ACL_SRC" | grep -qE 'setfacl -R -m "u:\$\{BROKER_USER\}:rw' \
-  && fail "ACL installer recursively grants write under .git" || true
-say "PASS: ACL script grants HEAD.lock + logs/HEAD without recursive .git write"
+if printf '%s\n' "$ACL_SRC" | grep -qE 'setfacl -R -m "u:\$\{BROKER_USER\}:rw'; then
+  fail "ACL installer recursively grants write under .git"
+fi
+if printf '%s\n' "$ACL_SRC" | grep -qE 'touch .*HEAD\.lock|rm -f .*HEAD\.lock'; then
+  fail "ACL installer still probes HEAD.lock with touch/rm"
+fi
+printf '%s\n' "$ACL_SRC" | grep -q 'HEAD.lock already present' \
+  || fail "ACL installer must fail closed on existing HEAD.lock"
+say "PASS: ACL script grants HEAD.lock + logs/HEAD; no touch/rm lock probe"
 
 if [ "$(id -u)" != 0 ]; then
   say "PROMOTE_ACL_CAS=NOT_RUN need_root (not faking cross-UID PASS)"
@@ -99,12 +105,11 @@ test "$(runuser -u "$OP_USER" -- git -c "safe.directory=$PROJ" -C "$PROJ" rev-pa
 # Production ACL installer from fixed commit (not mutable worktree as root).
 git -C "$REPO" show "$COMMIT:recovery/install-promote-target-acl.sh" \
   | bash -s -- --repo "$REPO" --project "$PROJ" --commit "$COMMIT" \
-       --target-ref refs/heads/main \
-  || fail "install-promote-target-acl failed on throwaway"
+       --target-ref refs/heads/main
 
 # Body must still be v1 before any formal sync (CAS only moves the ref).
 BODY_BEFORE="$(runuser -u "$OP_USER" -- cat "$PROJ/body.txt")"
-[ "$BODY_BEFORE" = "v1" ] || fail "body changed before CAS"
+test "$BODY_BEFORE" = "v1"
 
 # Real CAS update-ref as aegl-promote while main is checked out (needs HEAD.lock + logs/HEAD).
 runuser -u "$BROKER_USER" -- git \
@@ -112,17 +117,16 @@ runuser -u "$BROKER_USER" -- git \
   -c "core.hooksPath=/dev/null" \
   -c "core.fsmonitor=false" \
   -c "core.attributesFile=/dev/null" \
-  -C "$PROJ" update-ref refs/heads/main "$V2" "$V1" \
-  || fail "aegl-promote update-ref CAS failed (HEAD.lock/reflog ACL?)"
+  -C "$PROJ" update-ref refs/heads/main "$V2" "$V1"
 
 GOT="$(runuser -u "$OP_USER" -- git -c "safe.directory=$PROJ" -C "$PROJ" rev-parse refs/heads/main)"
-[ "$GOT" = "$V2" ] || fail "ref not advanced want=$V2 got=$GOT"
+test "$GOT" = "$V2"
 # Worktree/index still at v1 until sync — proves we did not overwrite body in CAS.
 BODY_AFTER="$(runuser -u "$OP_USER" -- cat "$PROJ/body.txt")"
-[ "$BODY_AFTER" = "v1" ] || fail "CAS unexpectedly changed worktree body"
-# HEAD reflog must have advanced (not only rev-parse).
-runuser -u "$OP_USER" -- git -c "safe.directory=$PROJ" -C "$PROJ" reflog show HEAD -1 \
-  | grep -q . || fail "HEAD reflog empty after CAS"
+test "$BODY_AFTER" = "v1"
+# HEAD reflog tip must be V2 (not merely "any entry exists").
+REFLOG_TOP="$(runuser -u "$OP_USER" -- git -c "safe.directory=$PROJ" -C "$PROJ" rev-parse HEAD@{0})"
+test "$REFLOG_TOP" = "$V2"
 # AI must not gain worktree write.
 if runuser -u "$AI_USER" -- touch "$PROJ/.ai-probe" 2>/dev/null; then
   rm -f "$PROJ/.ai-probe"
