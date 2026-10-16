@@ -58,6 +58,13 @@ SOCK=/run/aegl-promote/broker.sock
 export AEGL_BROKER_SOCKET="$SOCK"
 
 say "== A. Preflight =="
+BRANCH_TIP="$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)"
+if [ "$COMMIT" != "$BRANCH_TIP" ]; then
+  git -C "$AEGL" merge-base --is-ancestor "$COMMIT" "$BRANCH_TIP" \
+    || fail "--commit $COMMIT is not on plan/capture-hook-classfix (tip $BRANCH_TIP)"
+  say "  elevating --commit $COMMIT -> tip $BRANCH_TIP"
+  COMMIT="$BRANCH_TIP"
+fi
 test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$COMMIT" \
   || fail "plan/capture-hook-classfix is not $COMMIT"
 git -C "$AEGL" merge-base --is-ancestor feat/beads-adapter "$COMMIT" \

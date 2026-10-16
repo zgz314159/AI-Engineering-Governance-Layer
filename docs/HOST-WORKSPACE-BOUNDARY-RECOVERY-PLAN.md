@@ -2262,10 +2262,13 @@ PROMOTE_STACK_TESTS passed=9 failed=0
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=149fee35190e19b8971430c9c45d90c4a39b83cc
+TIP=02e4129c20d3518f110ca037c5c246cb71ef44a2
 test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
 git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh"   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
+
+`promote-to-main-stack.sh` elevates `--commit` to `plan/capture-hook-classfix` when
+the passed SHA is a strict ancestor (so a stale pin in this note still installs the tip).
 
 That script performs A–F: preflight → confirm exactly the 10 gradle-actions
 deletions (abort on any other dirt) → restore from
@@ -2280,7 +2283,7 @@ PROMOTE_STACK_TESTS=PASS (9/9 first run)
 BROKER_TESTS=PASS (18/18)
 LIVE_PROMOTE=NOT_THIS_ROUND
 IMPL=0c50259293ba43721848dfd647e0f42c1b813d2e
-TIP=149fee35190e19b8971430c9c45d90c4a39b83cc
+TIP=02e4129c20d3518f110ca037c5c246cb71ef44a2
 AI_BOUNDARY=BLOCKED
 ```
 
