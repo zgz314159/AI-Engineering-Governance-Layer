@@ -143,9 +143,11 @@ TIP_OID="$(runuser -u "$BROKER_USER" -- git \
   || fail "HEAD.lock already present; refusing to disturb it: $GIT/HEAD.lock"
 # Non-destructive permission checks only. Lock creation is proven by throwaway
 # cross-UID CAS (exec step 0b), not by probing formal repos.
-runuser -u "$BROKER_USER" -- test -w "$GIT" \
+runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+  -c 'builtin test -w "$1"' _ "$GIT" \
   || fail "aegl-promote cannot write .git directory (required for HEAD.lock)"
-runuser -u "$BROKER_USER" -- test -w "$GIT/logs/HEAD" \
+runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+  -c 'builtin test -w "$1"' _ "$GIT/logs/HEAD" \
   || fail "aegl-promote cannot write logs/HEAD"
 if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
   rm -f "$PROJ/.aegl-acl-probe"
