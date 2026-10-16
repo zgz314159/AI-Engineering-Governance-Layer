@@ -47,6 +47,13 @@ ALLOWED_SYSTEM_PROJECT_DIRS = frozenset(
 ALLOWED_BUSINESS_PROJECT_DIRS = frozenset({"KeepLab-Relay"})
 ALLOWED_PROJECT_DIRS = ALLOWED_SYSTEM_PROJECT_DIRS | ALLOWED_BUSINESS_PROJECT_DIRS
 
+# Exact promote target per project basename — do not rename Stack/KeepLab to main.
+PROJECT_TARGET_REFS = {
+    "AI-Engineering-Governance-Layer": "refs/heads/main",
+    "Google-Android-Agent-Development-Stack": "refs/heads/master",
+    "KeepLab-Relay": "refs/heads/master",
+}
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 AEGL_ROOT = os.path.dirname(_HERE)
 DEFAULT_PROJECTS_ROOT = os.path.dirname(AEGL_ROOT)
@@ -79,6 +86,15 @@ def business_root() -> str:
     if override:
         return os.path.realpath(override)
     return os.path.realpath(os.path.join(os.path.dirname(projects_root()), "AppProjects"))
+
+
+def target_ref_for(project_basename: str) -> str:
+    """Canonical refs/heads/* for a registered project (exact; no branch rename)."""
+    return PROJECT_TARGET_REFS.get(project_basename, "refs/heads/main")
+
+
+def allowed_target_refs(project_basename: str) -> frozenset:
+    return frozenset({target_ref_for(project_basename)})
 
 
 def _safe_directory_args(repo: str) -> list:

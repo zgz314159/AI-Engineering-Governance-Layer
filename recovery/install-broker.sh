@@ -203,7 +203,7 @@ except Exception: print("PARSE_ERROR")' 2>/dev/null)"
   chown -R "$BROKER_USER":"$BROKER_GROUP" "$WT"
   bgit -C "$WT" add -A
   bgit -C "$WT" -c user.email=t@t -c user.name=t commit -qm cand
-  bgit -C "$APP" branch -M main
+  bgit -C "$APP" branch -M master
   expect "AI identity cannot register (recorder-only)" "$AI_USER" \
     "{\"op\":\"register\",\"task_id\":\"u1\",\"project\":\"$APP\",\"base\":\"$BASE\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/main\"}" REJECTED
   expect "root registers" root \

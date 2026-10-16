@@ -33,7 +33,9 @@ except Exception: print("")' 2>/dev/null; }
 
 new_project(){ local d="$PROOT/$1"; mkdir -p "$d"; git -C "$d" init -q
   ( cd "$d" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base )
-  git -C "$d" branch -M main
+  local bname
+  bname="$(AEGL_ROOT="$AEGL_ROOT" python3 -c 'import os,sys;sys.path.insert(0,os.environ["AEGL_ROOT"]+"/recovery");import promotion_core as c;print(c.target_ref_for(sys.argv[1]).rsplit("/",1)[-1])' "$1")"
+  git -C "$d" branch -M "$bname"
   printf '%s' "$d"; }
 base_of(){ git -C "$1" rev-parse HEAD; }
 # Candidate worktree: commit the setup so freeze_candidate_commit can bind a real tip.
@@ -41,7 +43,12 @@ make_wt(){ local proj="$1" br="$2" setup="$3"; local wt="$ST/wt-$br"
   git -C "$proj" worktree add -q -b "$br" "$wt" HEAD
   ( cd "$wt" && eval "$setup" && git add -A && git -c user.email=t@t -c user.name=t commit -qm "cand-$br" )
   printf '%s' "$wt"; }
-reg(){ req "{\"op\":\"register\",\"task_id\":\"$1\",\"project\":\"$2\",\"base\":\"$3\",\"worktree\":\"$4\",\"branch\":\"$5\",\"target_ref\":\"refs/heads/main\"}" >/dev/null; }
+reg(){
+  local ref
+  ref="$(AEGL_ROOT="$AEGL_ROOT" python3 -c 'import os,sys;sys.path.insert(0,os.environ["AEGL_ROOT"]+"/recovery");import promotion_core as c;print(c.target_ref_for(os.path.basename(sys.argv[1])))' "$2")"
+  req "$(python3 -c 'import json,sys;print(json.dumps({"op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5],"target_ref":sys.argv[6]}))' \
+    "$1" "$2" "$3" "$4" "$5" "$ref")" >/dev/null
+}
 
 APP="$(new_project Google-Android-Agent-Development-Stack)"
 BASE="$(base_of "$APP")"
@@ -77,49 +84,49 @@ req '{"op":"record","task_id":"r1","verify_result":"PASS"}' >/dev/null
 TIP1="$(git -C "$WT1" rev-parse HEAD)"
 d1="$(req '{"op":"promote","task_id":"r1"}')"
 [ "$(dec "$d1")" = APPLIED ] && ok "approved tip promotes" || no "approved promote ($(dec "$d1") $(reason "$d1"))"
-MAIN1="$(git -C "$APP" rev-parse refs/heads/main)"
-{ [ "$MAIN1" = "$TIP1" ] && git -C "$APP" merge-base --is-ancestor "$TIP1" refs/heads/main; } \
+MAIN1="$(git -C "$APP" rev-parse refs/heads/master)"
+{ [ "$MAIN1" = "$TIP1" ] && git -C "$APP" merge-base --is-ancestor "$TIP1" refs/heads/master; } \
   && ok "main is the approved tip (history preserved)" || no "main tip mismatch main=$MAIN1 tip=$TIP1"
-git -C "$APP" cat-file -e "refs/heads/main:one.txt" 2>/dev/null && ok "approved change on main" || no "approved change missing"
+git -C "$APP" cat-file -e "refs/heads/master:one.txt" 2>/dev/null && ok "approved change on main" || no "approved change missing"
 [ "$(git -C "$APP" rev-parse keep-other)" = "$OTHER_BR_OID" ] && ok "unrelated branch keep-other unchanged" || no "other branch moved"
 
 # --- exact object: worktree swap after record does not change apply --------- #
 WT8="$(make_wt "$APP" r8 'echo approved > eight.txt')"
 # re-bind target to current main (moved by r1)
-BASE8="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE8="$(git -C "$APP" rev-parse refs/heads/master)"
 reg r8 "$APP" "$BASE8" "$WT8" r8
 req '{"op":"record","task_id":"r8","verify_result":"PASS"}' >/dev/null
 TIP8="$(git -C "$WT8" rev-parse HEAD)"
 echo SWAPPED > "$WT8/eight.txt"      # dirty AFTER freeze
 # dirty worktree must not affect promote (apply uses frozen OID); but a *new* record would fail
 d8="$(dec "$(req '{"op":"promote","task_id":"r8"}')")"
-content="$(git -C "$APP" show refs/heads/main:eight.txt 2>/dev/null | tr -d '\n')"
-{ [ "$d8" = APPLIED ] && [ "$content" = approved ] && [ "$(git -C "$APP" rev-parse refs/heads/main)" = "$TIP8" ]; } \
+content="$(git -C "$APP" show refs/heads/master:eight.txt 2>/dev/null | tr -d '\n')"
+{ [ "$d8" = APPLIED ] && [ "$content" = approved ] && [ "$(git -C "$APP" rev-parse refs/heads/master)" = "$TIP8" ]; } \
   && ok "applies frozen tip; worktree swap ignored" || no "exact object apply ($d8 content=$content)"
 
 # --- symlink target + file mode bound via committed tip --------------------- #
-BASE9="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE9="$(git -C "$APP" rev-parse refs/heads/master)"
 WT9="$(make_wt "$APP" r9 'echo runnable > tool.sh && chmod +x tool.sh && ln -s tool.sh link.sh')"
 reg r9 "$APP" "$BASE9" "$WT9" r9
 req '{"op":"record","task_id":"r9","verify_result":"PASS"}' >/dev/null
 d9="$(dec "$(req '{"op":"promote","task_id":"r9"}')")"
-mode="$(git -C "$APP" ls-tree refs/heads/main tool.sh | awk '{print $1}')"
-linkmode="$(git -C "$APP" ls-tree refs/heads/main link.sh | awk '{print $1}')"
+mode="$(git -C "$APP" ls-tree refs/heads/master tool.sh | awk '{print $1}')"
+linkmode="$(git -C "$APP" ls-tree refs/heads/master link.sh | awk '{print $1}')"
 { [ "$d9" = APPLIED ] && [ "$mode" = 100755 ] && [ "$linkmode" = 120000 ]; } \
   && ok "symlink target + exec mode bound and applied ($mode/$linkmode)" || no "mode/symlink binding ($d9 $mode/$linkmode)"
 
 # --- committed violating content still rejected ----------------------------- #
-BASE6="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE6="$(git -C "$APP" rev-parse refs/heads/master)"
 WT6="$(make_wt "$APP" r6 'mkdir -p build && echo z > build/app.class')"
 reg r6 "$APP" "$BASE6" "$WT6" r6
 d6="$(dec "$(req '{"op":"record","task_id":"r6","verify_result":"PASS"}')")"
 [ "$d6" = REJECTED ] && ok "committed violating content -> record REJECTED" || no "committed violation allowed ($d6)"
-PRE6="$(git -C "$APP" rev-parse refs/heads/main)"
+PRE6="$(git -C "$APP" rev-parse refs/heads/master)"
 req '{"op":"promote","task_id":"r6"}' >/dev/null
-[ "$(git -C "$APP" rev-parse refs/heads/main)" = "$PRE6" ] && ok "target unchanged after reject" || no "target moved after reject"
+[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$PRE6" ] && ok "target unchanged after reject" || no "target moved after reject"
 
 # --- dirty worktree at record is rejected ----------------------------------- #
-BASE_D="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE_D="$(git -C "$APP" rev-parse refs/heads/master)"
 WT_D="$(make_wt "$APP" rd 'echo ok > rd.txt')"
 echo dirt >> "$WT_D/rd.txt"
 reg rd "$APP" "$BASE_D" "$WT_D" rd
@@ -129,7 +136,7 @@ dd="$(dec "$rd_out")"; rdreason="$(reason "$rd_out")"
 
 # --- candidate script never runs -------------------------------------------- #
 SIDE="$ST/broker_side_effect"
-BASE7="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE7="$(git -C "$APP" rev-parse refs/heads/master)"
 WT7="$(make_wt "$APP" r7 'echo ok > r7.txt; mkdir -p scripts; printf "#!/bin/sh\ntouch %s\n" "'"$SIDE"'" > scripts/verify-layout.sh; chmod +x scripts/verify-layout.sh')"
 reg r7 "$APP" "$BASE7" "$WT7" r7
 req '{"op":"record","task_id":"r7","verify_result":"PASS"}' >/dev/null
@@ -145,20 +152,20 @@ reg r10 "$BAD" "$BB" "$WT10" r10
 [ "$(dec "$(req "{\"op\":\"kill\",\"task_id\":\"r1\"}")")" = REJECTED ] && ok "unsupported op rejected" || no "unsupported op"
 
 # --- object-bound symlink escape rejected ----------------------------------- #
-BASE13="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE13="$(git -C "$APP" rev-parse refs/heads/master)"
 WT13="$(make_wt "$APP" r13 'echo ok > x.txt && ln -s /etc/passwd escape')"
 reg r13 "$APP" "$BASE13" "$WT13" r13
 d13="$(dec "$(req '{"op":"record","task_id":"r13","verify_result":"PASS"}')")"
 [ "$d13" = REJECTED ] && ok "object-bound symlink escape rejected" || no "object symlink escape allowed ($d13)"
 
 # --- target_oid change rejects promote -------------------------------------- #
-BASE_T="$(git -C "$APP" rev-parse refs/heads/main)"
+BASE_T="$(git -C "$APP" rev-parse refs/heads/master)"
 WT_T="$(make_wt "$APP" rt 'echo target > t.txt')"
 reg rt "$APP" "$BASE_T" "$WT_T" rt
 req '{"op":"record","task_id":"rt","verify_result":"PASS"}' >/dev/null
-TREE_T="$(git -C "$APP" rev-parse "refs/heads/main^{tree}")"
-SNEAK="$(git -C "$APP" -c user.email=t@t -c user.name=t commit-tree "$TREE_T" -p refs/heads/main -m sneak)"
-git -C "$APP" update-ref refs/heads/main "$SNEAK"
+TREE_T="$(git -C "$APP" rev-parse "refs/heads/master^{tree}")"
+SNEAK="$(git -C "$APP" -c user.email=t@t -c user.name=t commit-tree "$TREE_T" -p refs/heads/master -m sneak)"
+git -C "$APP" update-ref refs/heads/master "$SNEAK"
 d_t="$(req '{"op":"promote","task_id":"rt"}')"
 [ "$(dec "$d_t")" = REJECTED ] && [ "$(reason "$d_t")" = target_changed ] \
   && ok "target OID change -> REJECTED target_changed" || no "target change not refused ($(dec "$d_t") $(reason "$d_t"))"

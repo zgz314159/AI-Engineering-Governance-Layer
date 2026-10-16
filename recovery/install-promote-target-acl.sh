@@ -1,36 +1,35 @@
 #!/usr/bin/env bash
-# install-promote-target-acl.sh — minimal ACL so aegl-promote can FF one project's main.
+# install-promote-target-acl.sh — minimal ACL so aegl-promote can FF one project's
+# exact target ref (AEGL=main, Stack/KeepLab=master).
 #
 # Root requesting a promote does NOT change the broker service UID (still aegl-promote).
 # This installer grants ONLY what that UID needs for a fast-forward update-ref of
-# refs/heads/main on ONE allowlisted project — no chown of three projects, no AI
+# the project's canonical refs/heads/* — no chown of three projects, no AI
 # permission expansion.
 #
-# Required capability (aegl-promote):
-#   traverse: --x on each path component from / to <project>
-#   read:     r-X on <project>/.git, objects, refs, packed-refs, HEAD, config
-#   write:    rwx on .git/refs/heads and .git/logs/refs/heads (CAS update-ref + reflog)
-#
 # Delivery form (piped to bash -s): every input is explicit — --repo, --project,
-# --commit (full 40-hex). Nothing is derived from $BASH_SOURCE. Validated before
-# any host change. Never executes a mutable worktree script as root.
+# --commit (full 40-hex), optional --target-ref / --business-root.
 #
-#   sudo bash -s -- --repo <AEGL> --project <AEGL-abs-or-basename> --commit <full-40-hex> \
+#   sudo bash -s -- --repo <AEGL> --project <abs-or-basename> --commit <full-40-hex> \
 #     < <(git -C <AEGL> show <full-40-hex>:recovery/install-promote-target-acl.sh)
 set -uo pipefail
 
-REPO=""; PROJECT=""; COMMIT=""
+REPO=""; PROJECT=""; COMMIT=""; TARGET_REF=""; BUSINESS_ROOT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
     --project) PROJECT="${2:-}"; shift 2 ;;
     --commit) COMMIT="${2:-}"; shift 2 ;;
+    --target-ref) TARGET_REF="${2:-}"; shift 2 ;;
+    --business-root) BUSINESS_ROOT="${2:-}"; shift 2 ;;
     *) printf 'ACL_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
 BROKER_USER="aegl-promote"
-ALLOWED='AI-Engineering-Governance-Layer'
+# Exact project basenames that may receive promote ACL (not a home-wide root).
+ALLOWED_SYSTEM='AI-Engineering-Governance-Layer Google-Android-Agent-Development-Stack'
+ALLOWED_BUSINESS='KeepLab-Relay'
 
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'ACL_ERROR: %s\n' "$*" >&2; exit 1; }
@@ -51,22 +50,43 @@ git -C "$REPO" cat-file -e "$COMMIT:recovery/install-promote-target-acl.sh" 2>/d
 id "$BROKER_USER" >/dev/null 2>&1 || fail "broker user missing: $BROKER_USER (install broker first)"
 command -v setfacl >/dev/null 2>&1 || fail "setfacl required (acl package)"
 
-# Resolve project to an absolute path under the same parent as REPO (Projects root).
 PROOT="$(cd "$(dirname "$REPO")" && pwd)"
+[ -n "$BUSINESS_ROOT" ] || BUSINESS_ROOT="$(cd "$PROOT/.." && pwd)/AppProjects"
+
+# Resolve project path: absolute, system under Projects, or business under AppProjects.
 case "$PROJECT" in
   /*) PROJ="$(cd "$PROJECT" && pwd)" ;;
+  KeepLab-Relay)
+    if [ -d "$BUSINESS_ROOT/KeepLab-Relay" ]; then PROJ="$BUSINESS_ROOT/KeepLab-Relay"
+    elif [ -d "$PROOT/KeepLab-Relay" ]; then PROJ="$PROOT/KeepLab-Relay"
+    else fail "KeepLab-Relay not found under $BUSINESS_ROOT or $PROOT"; fi
+    ;;
   *)  PROJ="$PROOT/$PROJECT" ;;
 esac
 [ -d "$PROJ/.git" ] || fail "project git dir missing: $PROJ/.git"
 BASE="$(basename "$PROJ")"
-[ "$BASE" = "$ALLOWED" ] || fail "project not in ACL allowlist (got $BASE; allow $ALLOWED)"
-# Refuse symlink .git (worktree gitfile) — ACL must hit the real object store.
+case " $ALLOWED_SYSTEM $ALLOWED_BUSINESS " in
+  *" $BASE "*) ;;
+  *) fail "project not in ACL allowlist (got $BASE)" ;;
+esac
 [ -d "$PROJ/.git" ] && [ ! -f "$PROJ/.git" ] || fail "project .git must be a directory (not a worktree gitfile)"
 
-say "AEGL promote target ACL   project=$PROJ commit=$COMMIT user=$BROKER_USER"
+# Exact target ref (must match promotion_core.PROJECT_TARGET_REFS — no branch rename).
+if [ -z "$TARGET_REF" ]; then
+  case "$BASE" in
+    AI-Engineering-Governance-Layer) TARGET_REF="refs/heads/main" ;;
+    Google-Android-Agent-Development-Stack|KeepLab-Relay) TARGET_REF="refs/heads/master" ;;
+    *) fail "no canonical target_ref for $BASE" ;;
+  esac
+fi
+case "$TARGET_REF" in
+  refs/heads/*) ;;
+  *) fail "invalid --target-ref: $TARGET_REF" ;;
+esac
+BRANCH_NAME="${TARGET_REF#refs/heads/}"
 
-# Traverse each path component from filesystem root to the project — execute-only.
-# Do not grant list/read on home; only the path components needed to reach .git.
+say "AEGL promote target ACL   project=$PROJ target_ref=$TARGET_REF commit=$COMMIT user=$BROKER_USER"
+
 grant_x(){
   local p="$1"
   [ -e "$p" ] || fail "missing path for traverse: $p"
@@ -80,7 +100,6 @@ done
 
 GIT="$PROJ/.git"
 setfacl -m "u:${BROKER_USER}:r-x" "$GIT" || fail "setfacl .git"
-# objects / info: read (verify commit); refs/heads + logs: write for update-ref CAS
 if [ -d "$GIT/objects" ]; then
   setfacl -R -m "u:${BROKER_USER}:r-X" "$GIT/objects" || fail "setfacl objects"
 fi
@@ -94,32 +113,24 @@ setfacl -m "u:${BROKER_USER}:rwx" "$GIT/refs/heads" || fail "setfacl refs/heads"
 setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs" 2>/dev/null || true
 setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs/refs" 2>/dev/null || true
 setfacl -m "u:${BROKER_USER}:rwx" "$GIT/logs/refs/heads" || fail "setfacl logs/refs/heads"
-if [ -e "$GIT/refs/heads/main" ]; then
-  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/refs/heads/main" || fail "setfacl refs/heads/main"
+if [ -e "$GIT/refs/heads/$BRANCH_NAME" ]; then
+  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/refs/heads/$BRANCH_NAME" || fail "setfacl refs/heads/$BRANCH_NAME"
 fi
-if [ -e "$GIT/logs/refs/heads/main" ]; then
-  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/refs/heads/main" || fail "setfacl logs/main"
+if [ -e "$GIT/logs/refs/heads/$BRANCH_NAME" ]; then
+  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/refs/heads/$BRANCH_NAME" || fail "setfacl logs/$BRANCH_NAME"
 fi
 
-# Bounded check: broker can resolve main; cannot write project worktree files.
-# Command-level safe.directory for this exact project only (no glob, no global config).
-MAIN_OID="$(runuser -u "$BROKER_USER" -- git \
+TIP_OID="$(runuser -u "$BROKER_USER" -- git \
   -c "safe.directory=$PROJ" \
   -c "core.hooksPath=/dev/null" \
   -c "core.fsmonitor=false" \
   -c "core.attributesFile=/dev/null" \
-  -C "$PROJ" rev-parse --verify refs/heads/main 2>/dev/null)" \
-  || fail "aegl-promote cannot rev-parse refs/heads/main (traverse/read ACL or safe.directory incomplete)"
-[ "${#MAIN_OID}" -eq 40 ] || fail "unexpected main oid"
-# Must NOT be able to create a file in the project worktree as aegl-promote.
-if runuser -u "$BROKER_USER" -- test -w "$PROJ"; then
-  # writable worktree root is unexpected for this minimal ACL — warn but only fail
-  # if create succeeds (we never grant write on $PROJ itself above).
-  :
-fi
+  -C "$PROJ" rev-parse --verify "$TARGET_REF" 2>/dev/null)" \
+  || fail "aegl-promote cannot rev-parse $TARGET_REF (traverse/read ACL or safe.directory incomplete)"
+[ "${#TIP_OID}" -eq 40 ] || fail "unexpected tip oid"
 if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
   rm -f "$PROJ/.aegl-acl-probe"
   fail "aegl-promote can write project worktree — ACL too broad"
 fi
 
-say "ACL_RESULT=OK project=$BASE main=$MAIN_OID user=$BROKER_USER"
+say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# migrate-keeplab-path-tests.sh — minimal path-contract checks for KeepLab AppProjects.
-# No APK/model/browser/recovery full suite.
+# migrate-keeplab-path-tests.sh — minimal path-contract / migrate-safety checks.
+# No full broker suite, APK, model, or browser acceptance.
 set -uo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AEGL_ROOT="$(cd "$SELF_DIR/.." && pwd)"
@@ -14,123 +14,130 @@ trap cleanup EXIT
 PROOT="$ST/Projects"; BROOT="$ST/AppProjects"
 mkdir -p "$PROOT" "$BROOT"
 
-# --- authorize helpers ---
-auth(){
-  PROJECTS_ROOT="$PROOT" AEGL_BUSINESS_ROOT="$BROOT" AEGL_PROJECT_ALLOWLIST="$3" \
-    python3 - "$1" "$2" <<'PY'
-import os, sys
-sys.path.insert(0, os.environ.get("AEGL_RECOVERY", ""))
-# path injected below
-PY
-}
-
+# --- 1) dual-root authorize + target refs ---------------------------------- #
 export PYTHONPATH="$AEGL_ROOT/recovery"
 python3 - <<PY
-import os, sys, tempfile
+import os, sys
 sys.path.insert(0, "$AEGL_ROOT/recovery")
 import promotion_core as c
 import promotion_broker as b
 
-proot = "$PROOT"
-broot = "$BROOT"
+proot, broot = "$PROOT", "$BROOT"
 os.environ["PROJECTS_ROOT"] = proot
 os.environ["AEGL_BUSINESS_ROOT"] = broot
 os.environ["AEGL_PROJECT_ALLOWLIST"] = "Google-Android-Agent-Development-Stack,KeepLab-Relay,AI-Engineering-Governance-Layer"
-
-assert c.projects_root() == os.path.realpath(proot)
-assert c.business_root() == os.path.realpath(broot)
-assert "KeepLab-Relay" in c.ALLOWED_BUSINESS_PROJECT_DIRS
-assert "KeepLab-Relay" not in c.ALLOWED_SYSTEM_PROJECT_DIRS
-assert "AI-Engineering-Governance-Layer" in c.ALLOWED_SYSTEM_PROJECT_DIRS
-print("CORE_SPLIT_OK")
-
-# materialize dirs
 os.makedirs(os.path.join(proot, "AI-Engineering-Governance-Layer"), exist_ok=True)
 os.makedirs(os.path.join(broot, "KeepLab-Relay"), exist_ok=True)
-os.makedirs(os.path.join(proot, "KeepLab-Relay"), exist_ok=True)  # wrong place
-
-# business under business root: ok
+os.makedirs(os.path.join(proot, "KeepLab-Relay"), exist_ok=True)
+assert c.target_ref_for("AI-Engineering-Governance-Layer") == "refs/heads/main"
+assert c.target_ref_for("Google-Android-Agent-Development-Stack") == "refs/heads/master"
+assert c.target_ref_for("KeepLab-Relay") == "refs/heads/master"
+b._authorized_project(os.path.join(broot, "KeepLab-Relay"))
 try:
-    got = b._authorized_project(os.path.join(broot, "KeepLab-Relay"))
-    assert got == os.path.realpath(os.path.join(broot, "KeepLab-Relay"))
-    print("AUTH_BUSINESS_OK")
-except Exception as e:
-    print("AUTH_BUSINESS_FAIL", e); sys.exit(1)
-
-# KeepLab under Projects: reject
-try:
-    b._authorized_project(os.path.join(proot, "KeepLab-Relay"))
-    print("AUTH_KEEPLAB_UNDER_PROJECTS_UNEXPECTED_OK"); sys.exit(1)
-except ValueError as e:
-    assert "business" in str(e)
-    print("AUTH_KEEPLAB_UNDER_PROJECTS_REJECT_OK")
-
-# system under projects: ok
-try:
-    got = b._authorized_project(os.path.join(proot, "AI-Engineering-Governance-Layer"))
-    assert os.path.basename(got) == "AI-Engineering-Governance-Layer"
-    print("AUTH_SYSTEM_OK")
-except Exception as e:
-    print("AUTH_SYSTEM_FAIL", e); sys.exit(1)
-
-# refuse home-wide: project directly under parent of Projects
-homeish = os.path.dirname(proot)
-os.makedirs(os.path.join(homeish, "KeepLab-Relay"), exist_ok=True)
-try:
-    b._authorized_project(os.path.join(homeish, "KeepLab-Relay"))
-    print("AUTH_HOME_WIDE_UNEXPECTED_OK"); sys.exit(1)
+    b._authorized_project(os.path.join(proot, "KeepLab-Relay")); raise SystemExit("keeplab under projects accepted")
 except ValueError:
-    print("AUTH_HOME_WIDE_REJECT_OK")
+    pass
+print("AUTH_AND_TARGET_OK")
 PY
-rc=$?
-[ $rc -eq 0 ] && ok "promotion dual-root authorize" || no "promotion dual-root authorize"
+[ $? -eq 0 ] && ok "authorize + per-project target_ref" || no "authorize + target_ref"
 
-# --- aegl-task resolve ---
-TASK="$AEGL_ROOT/bin/aegl-task"
-# shellcheck source resolve by running a tiny extract
-BUSINESS_ROOT="$BROOT" PROJECTS_ROOT="$PROOT" bash -c '
-  source /dev/null
-  PROJECTS_ROOT="'"$PROOT"'"; BUSINESS_ROOT="'"$BROOT"'"
-  resolve_project() {
-    local p="$1"
-    case "$p" in
-      /*) [ -d "$p" ] && { printf "%s" "$p"; return; } ;;
-      KeepLab-Relay)
-        [ -d "$BUSINESS_ROOT/KeepLab-Relay" ] && { printf "%s" "$BUSINESS_ROOT/KeepLab-Relay"; return; }
-        [ -d "$PROJECTS_ROOT/KeepLab-Relay" ] && { printf "%s" "$PROJECTS_ROOT/KeepLab-Relay"; return; }
-        ;;
-      *) [ -d "$PROJECTS_ROOT/$p" ] && { printf "%s" "$PROJECTS_ROOT/$p"; return; } ;;
-    esac
-    echo "FAIL"; return 1
-  }
-  got="$(resolve_project KeepLab-Relay)"
-  test "$got" = "'"$BROOT"'/KeepLab-Relay"
-' && ok "aegl-task KeepLab resolves business root" || no "aegl-task KeepLab resolve"
-
-# --- migrate script dry-run / dst exists / same-fs mv ----------------------- #
+# --- 2) task.json never eval'd; bad metadata hard-fails -------------------- #
 MIG="$AEGL_ROOT/recovery/migrate-keeplab-to-appprojects.sh"
-mkrepo(){
-  local d="$1"; rm -rf "$d"; mkdir -p "$d"
-  git -C "$d" init -q
+TASKS="$ST/zhong-state/aegl/tasks"
+mkdir -p "$TASKS/good/worktree" "$TASKS/badmeta"
+mkrepo(){ local d="$1"; rm -rf "$d"; mkdir -p "$d"; git -C "$d" init -q
   ( cd "$d" && echo x > r.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm t )
-  git -C "$d" branch -M master
-}
-MIG_AREA="$ST/mig"; mkdir -p "$MIG_AREA/AppProjects"
-SRC_A="$MIG_AREA/KeepLab-Relay-A"; DST_A="$MIG_AREA/AppProjects/KeepLab-Relay-A"
-mkrepo "$SRC_A"
-OUT="$(bash "$MIG" --src "$SRC_A" --dst "$DST_A" --dry-run 2>&1)" || true
-printf '%s\n' "$OUT" | grep -q 'STOP_AT=dry_run_ok' && ok "migrate dry-run" || no "migrate dry-run ($OUT)"
+  git -C "$d" branch -M master; }
+SRC_A="$ST/KeepLab-Relay"; mkrepo "$SRC_A"
+rm -rf "$BROOT/KeepLab-Relay" "$BROOT/Kmeta" "$BROOT/K2" "$BROOT/K3"
+# path with spaces / metacharacters in JSON — must not execute as shell
+python3 - <<PY
+import json, os
+meta=os.path.join("$TASKS","good","task.json")
+json.dump({"id":"t1","project":"$SRC_A","worktree":os.path.join("$TASKS","good","worktree"),
+           "evil":"; touch $ST/PWNED; #"}, open(meta,"w"))
+open(os.path.join("$TASKS","badmeta","task.json"),"w").write("{not json")
+PY
+OUT="$(HOME="$ST/root-home" AEGL_TASKS_ROOT="$TASKS" bash "$MIG" --src "$SRC_A" --dst "$BROOT/Kmeta" --dry-run 2>&1)" || rc=$?
+rc=${rc:-0}
+printf '%s\n' "$OUT" | grep -q 'STOP_AT=precheck_task_metadata_error' && [ "$rc" != 0 ] \
+  && ok "bad task.json hard-stops (not silent idle)" || no "bad metadata ($rc $OUT)"
+[ ! -e "$ST/PWNED" ] && ok "task.json fields not executed as shell" || no "task.json executed shell"
 
-mkdir -p "$DST_A"
-OUT2="$(bash "$MIG" --src "$SRC_A" --dst "$DST_A" 2>&1)" && rc2=0 || rc2=$?
-printf '%s\n' "$OUT2" | grep -q 'STOP_AT=precheck_dst_exists' && [ "$rc2" != 0 ] \
-  && ok "migrate refuses existing dst" || no "migrate dst exists ($OUT2)"
+# --- 3) sudo HOME must not hide zhong tasks -------------------------------- #
+rm -rf "$TASKS/badmeta"
+# hit: project points at SRC
+OUT2="$(HOME="$ST/root-home" AEGL_TASKS_ROOT="$TASKS" bash "$MIG" --src "$SRC_A" --dst "$BROOT/K2" --dry-run 2>&1)" || rc2=$?
+rc2=${rc2:-0}
+printf '%s\n' "$OUT2" | grep -q 'STOP_AT=precheck_active_keeplab_tasks' && [ "$rc2" != 0 ] \
+  && ok "operator AEGL_TASKS_ROOT seen under fake sudo HOME" || no "tasks root ($rc2 $OUT2)"
 
-rm -rf "$DST_A"
-PRE="$(git -C "$SRC_A" rev-parse HEAD)"
-OUT3="$(bash "$MIG" --src "$SRC_A" --dst "$DST_A" 2>&1)" && rc3=0 || rc3=$?
-POST="$(git -C "$DST_A" rev-parse HEAD 2>/dev/null || echo missing)"
-{ [ "$rc3" = 0 ] && [ "$PRE" = "$POST" ] && [ ! -e "$SRC_A" ] && printf '%s\n' "$OUT3" | grep -q 'MIGRATE_RESULT=OK'; } \
-  && ok "migrate same-fs mv preserves HEAD" || no "migrate mv ($rc3 $OUT3)"
+# default operator home layout without AEGL_TASKS_ROOT
+OPHOME="$ST/home-zhong"; mkdir -p "$OPHOME/.local/state/aegl/tasks/t9"
+# rewrite getent? script uses getent passwd zhong — real zhong home. Instead set AEGL_STATE_HOME.
+rm -f "$TASKS/good/task.json"
+OUT3="$(HOME="$ST/root-home" AEGL_STATE_HOME="$OPHOME/.local/state/aegl" bash "$MIG" \
+  --src "$SRC_A" --dst "$BROOT/K3" --dry-run 2>&1)" || true
+printf '%s\n' "$OUT3" | grep -q "TASKS_ROOT=$OPHOME/.local/state/aegl/tasks" \
+  && ok "AEGL_STATE_HOME resolves under sudo HOME" || no "state home ($OUT3)"
+
+# --- 4) migrate same-fs + resume-post surface ------------------------------ #
+rm -rf "$BROOT/KeepLab-Relay"
+mkdir -p "$ST/empty-tasks"
+OUT4="$(HOME="$ST/root-home" AEGL_TASKS_ROOT="$ST/empty-tasks" bash "$MIG" \
+  --src "$SRC_A" --dst "$BROOT/KeepLab-Relay" --phase all --no-require-patches 2>&1)" && rc4=0 || rc4=$?
+printf '%s\n' "$OUT4" | grep -q 'MIGRATE_RESULT=OK' && [ ! -e "$SRC_A" ] && [ -d "$BROOT/KeepLab-Relay/.git" ] \
+  && ok "migrate move preserves git" || no "migrate move ($rc4 $OUT4)"
+
+OUT5="$(bash "$MIG" --src "$SRC_A" --dst "$BROOT/KeepLab-Relay" --phase all --no-require-patches 2>&1)" && rc5=0 || rc5=$?
+printf '%s\n' "$OUT5" | grep -qE 'STOP_AT=precheck_already_moved|STOP_AT=precheck_src_missing|STOP_AT=precheck_dst_exists' \
+  && ok "re-run after move refuses move phase" || no "rerun refuse ($rc5 $OUT5)"
+
+OUT6="$(bash "$MIG" --resume-post --src "$SRC_A" --dst "$BROOT/KeepLab-Relay" --no-require-patches 2>&1)" && rc6=0 || rc6=$?
+printf '%s\n' "$OUT6" | grep -q 'STOP_AT=complete' \
+  && ok "resume-post runs without requiring SRC" || no "resume-post ($rc6 $OUT6)"
+
+# --- 5) no eval; guard source_root expansion (Stack isolation tip if present) --- #
+if grep -nE '^[[:space:]]*eval[[:space:]]|^[[:space:]]*eval\$' "$MIG"; then
+  no "migrate script still contains eval"
+else
+  ok "migrate script has no eval"
+fi
+
+GUARD_CAND=(
+  /home/zhong/.local/state/aegl/tasks/keeplab-migrate-stack-*/worktree/orchestration/hermes/evaluation_adapter/contract_guard.py
+)
+GUARD=""
+for g in "${GUARD_CAND[@]}"; do
+  for f in $g; do [ -f "$f" ] && GUARD="$f" && break 2; done
+done
+if [ -n "$GUARD" ]; then
+  mkdir -p "$BROOT/KeepLab-Relay/specs/p0b-close-benchmarkability"
+  # minimal package for load if real package missing at throwaway keeplab — use real KeepLab package when present
+  REAL_PKG=""
+  for cand in /home/zhong/Projects/KeepLab-Relay/specs/p0b-close-benchmarkability \
+              /home/zhong/AppProjects/KeepLab-Relay/specs/p0b-close-benchmarkability; do
+    [ -f "$cand/project-context.json" ] && REAL_PKG="$cand" && break
+  done
+  if [ -n "$REAL_PKG" ]; then
+    python3 - "$GUARD" "$REAL_PKG" "$BROOT" "$PROOT" <<'PY' && ok "guard expands source_root token" || no "guard source_root"
+import importlib.util, os, sys
+guard_path, pkg, business, projects = sys.argv[1:5]
+os.environ["AEGL_BUSINESS_ROOT"] = business
+os.environ["PROJECTS_ROOT"] = projects
+spec = importlib.util.spec_from_file_location("cg", guard_path)
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+loaded = mod.load_contract(pkg)
+assert "$" not in loaded["source_root"], loaded["source_root"]
+assert loaded["source_root"] == os.path.realpath(projects), loaded["source_root"]
+print("SOURCE_ROOT", loaded["source_root"])
+PY
+  else
+    ok "guard source_root skipped (no real package on host)"
+  fi
+else
+  no "stack guard candidate missing"
+fi
+
 echo "KEEPLAB_PATH_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

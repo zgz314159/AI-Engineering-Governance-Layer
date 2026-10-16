@@ -142,9 +142,6 @@ def _authorized_project(project: str) -> str:
     return proj
 
 
-TARGET_REF_ALLOWED = frozenset({"refs/heads/main"})
-
-
 def _op_register(request: dict, registry: dict) -> dict:
     task_id = request.get("task_id")
     if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
@@ -162,7 +159,8 @@ def _op_register(request: dict, registry: dict) -> dict:
     if not isinstance(request.get("branch"), str) or not request.get("branch"):
         return {"decision": "REJECTED", "reason": "missing_branch"}
     target_ref = request.get("target_ref")
-    if not isinstance(target_ref, str) or target_ref not in TARGET_REF_ALLOWED:
+    allowed_refs = promotion_core.allowed_target_refs(os.path.basename(proj))
+    if not isinstance(target_ref, str) or target_ref not in allowed_refs:
         return {"decision": "REJECTED", "reason": "invalid_target_ref"}
     target_oid = promotion_core.ref_oid(proj, target_ref)
     if not target_oid or len(target_oid) != 40:

@@ -351,9 +351,9 @@ task_register() {
   local id="${1:?task register <id>}" td wt proj branch base req
   _verify_paths "$id"
   branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
-  # target_ref is bound server-side to the live OID of refs/heads/main; the client
-  # never supplies a mutable branch name as the apply target.
-  req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5],"target_ref":"refs/heads/main"}))' "$id" "$proj" "$base" "$wt" "$branch")"
+  # Exact target_ref per project (AEGL=main, Stack/KeepLab=master). Never rename branches.
+  req="$(python3 -c 'import json,os,sys;sys.path.insert(0,os.path.join(sys.argv[6],"recovery"));import promotion_core as c;ref=c.target_ref_for(os.path.basename(sys.argv[2]));print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5],"target_ref":ref}))' \
+    "$id" "$proj" "$base" "$wt" "$branch" "$AEGL_ROOT")"
   broker_call "$req"
 }
 

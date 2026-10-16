@@ -32,8 +32,8 @@ APP="$PROOT/AI-Engineering-Governance-Layer"
 mkdir -p "$APP"
 git -C "$APP" init -q
 ( cd "$APP" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base )
-git -C "$APP" branch -M main
-MAIN0="$(git -C "$APP" rev-parse refs/heads/main)"
+git -C "$APP" branch -M master
+MAIN0="$(git -C "$APP" rev-parse refs/heads/master)"
 git -C "$APP" branch side-keep HEAD
 SIDE0="$(git -C "$APP" rev-parse side-keep)"
 # Simulate formal dirty content on a non-main checkout path (file not in git).
@@ -57,12 +57,12 @@ for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || { echo "broker failed to start"; cat "$ST/broker.log"; exit 2; }
 
 # --- 1. happy path: main FF to tip; other branch + dirt untouched ------------ #
-req "{\"op\":\"register\",\"task_id\":\"stack1\",\"project\":\"$APP\",\"base\":\"$MAIN0\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/main\"}" >/dev/null
+req "{\"op\":\"register\",\"task_id\":\"stack1\",\"project\":\"$APP\",\"base\":\"$MAIN0\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/master\"}" >/dev/null
 req '{"op":"record","task_id":"stack1","verify_result":"PASS"}' >/dev/null
 d="$(req '{"op":"promote","task_id":"stack1"}')"
 [ "$(dec "$d")" = APPLIED ] && ok "stack promote APPLIED" || no "stack promote $(dec "$d") $(reason "$d")"
-[ "$(git -C "$APP" rev-parse refs/heads/main)" = "$TIP" ] && ok "main updated to candidate tip" || no "main not tip"
-git -C "$APP" merge-base --is-ancestor "$PARENT" refs/heads/main \
+[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$TIP" ] && ok "main updated to candidate tip" || no "main not tip"
+git -C "$APP" merge-base --is-ancestor "$PARENT" refs/heads/master \
   && ok "main contains candidate parent (history)" || no "parent not on main"
 [ "$(git -C "$APP" rev-parse side-keep)" = "$SIDE0" ] && ok "side-keep unchanged" || no "side-keep moved"
 [ "$(sha256sum "$APP/FORMAL_DIRTY.txt" | awk '{print $1}')" = "$DIRT_HASH" ] \
@@ -70,40 +70,40 @@ git -C "$APP" merge-base --is-ancestor "$PARENT" refs/heads/main \
 
 # --- 2. target OID change rejected ------------------------------------------ #
 WT2="$ST/cand2"
-git -C "$APP" worktree add -q -b cand2 "$WT2" refs/heads/main
+git -C "$APP" worktree add -q -b cand2 "$WT2" refs/heads/master
 ( cd "$WT2" && echo more > more.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm more )
-MAIN1="$(git -C "$APP" rev-parse refs/heads/main)"
-req "{\"op\":\"register\",\"task_id\":\"stack2\",\"project\":\"$APP\",\"base\":\"$MAIN1\",\"worktree\":\"$WT2\",\"branch\":\"cand2\",\"target_ref\":\"refs/heads/main\"}" >/dev/null
+MAIN1="$(git -C "$APP" rev-parse refs/heads/master)"
+req "{\"op\":\"register\",\"task_id\":\"stack2\",\"project\":\"$APP\",\"base\":\"$MAIN1\",\"worktree\":\"$WT2\",\"branch\":\"cand2\",\"target_ref\":\"refs/heads/master\"}" >/dev/null
 req '{"op":"record","task_id":"stack2","verify_result":"PASS"}' >/dev/null
 # Move main via commit-tree + update-ref (no checkout / no formal switch).
-TREE="$(git -C "$APP" rev-parse "refs/heads/main^{tree}")"
-SNEAK="$(git -C "$APP" -c user.email=t@t -c user.name=t commit-tree "$TREE" -p refs/heads/main -m sneak)"
-git -C "$APP" update-ref refs/heads/main "$SNEAK"
+TREE="$(git -C "$APP" rev-parse "refs/heads/master^{tree}")"
+SNEAK="$(git -C "$APP" -c user.email=t@t -c user.name=t commit-tree "$TREE" -p refs/heads/master -m sneak)"
+git -C "$APP" update-ref refs/heads/master "$SNEAK"
 d2="$(req '{"op":"promote","task_id":"stack2"}')"
 [ "$(dec "$d2")" = REJECTED ] && [ "$(reason "$d2")" = target_changed ] \
   && ok "target OID change REJECTED" || no "target change $(dec "$d2") $(reason "$d2")"
-[ "$(git -C "$APP" rev-parse refs/heads/main)" = "$SNEAK" ] && ok "main stays at sneak after reject" || no "main moved on reject"
+[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$SNEAK" ] && ok "main stays at sneak after reject" || no "main moved on reject"
 
 # --- 3. permission failure is explicit (chmod objects away from broker uid) - #
 # Simulate by pointing PROJECTS_ROOT at a project whose .git/refs/heads is unwritable
 # to the current process after dropping write bits (same-uid test of update-ref fail).
 WT3="$ST/cand3"
 # reset main to tip lineage for a fresh FF attempt
-git -C "$APP" update-ref refs/heads/main "$TIP"
+git -C "$APP" update-ref refs/heads/master "$TIP"
 git -C "$APP" worktree add -q -b cand3 "$WT3" "$TIP"
 ( cd "$WT3" && echo p > p.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm p )
-MAIN3="$(git -C "$APP" rev-parse refs/heads/main)"
-req "{\"op\":\"register\",\"task_id\":\"stack3\",\"project\":\"$APP\",\"base\":\"$MAIN3\",\"worktree\":\"$WT3\",\"branch\":\"cand3\",\"target_ref\":\"refs/heads/main\"}" >/dev/null
+MAIN3="$(git -C "$APP" rev-parse refs/heads/master)"
+req "{\"op\":\"register\",\"task_id\":\"stack3\",\"project\":\"$APP\",\"base\":\"$MAIN3\",\"worktree\":\"$WT3\",\"branch\":\"cand3\",\"target_ref\":\"refs/heads/master\"}" >/dev/null
 req '{"op":"record","task_id":"stack3","verify_result":"PASS"}' >/dev/null
-chmod a-w "$APP/.git/refs/heads" "$APP/.git/refs/heads/main" 2>/dev/null || true
+chmod a-w "$APP/.git/refs/heads" "$APP/.git/refs/heads/master" 2>/dev/null || true
 d3="$(req '{"op":"promote","task_id":"stack3"}')"
-chmod u+w "$APP/.git/refs/heads" "$APP/.git/refs/heads/main" 2>/dev/null || true
+chmod u+w "$APP/.git/refs/heads" "$APP/.git/refs/heads/master" 2>/dev/null || true
 # Expect FAILED with update_ref (or REJECTED if race); must not silently APPLIED.
 case "$(dec "$d3")" in
   FAILED|REJECTED) ok "insufficient write -> explicit $(dec "$d3") ($(reason "$d3"))" ;;
   *) no "permission deny not explicit ($(dec "$d3") $(reason "$d3"))" ;;
 esac
-[ "$(git -C "$APP" rev-parse refs/heads/main)" = "$MAIN3" ] && ok "main unchanged on perm fail" || no "main moved on perm fail"
+[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$MAIN3" ] && ok "main unchanged on perm fail" || no "main moved on perm fail"
 
 echo "PROMOTE_STACK_TESTS passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

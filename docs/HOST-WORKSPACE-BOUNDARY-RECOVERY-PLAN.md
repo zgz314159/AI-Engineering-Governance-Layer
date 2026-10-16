@@ -2619,3 +2619,96 @@ PUSH=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 48: migrate handoff — no-eval tasks, deploy-before-move, exec pack
+
+Authorized preparation only — **no sudo, no directory move, no switch, no
+broker-verified, no Cursor rules, no push** in this round.
+
+### Fixes on top of Round 47
+
+| Item | Change |
+|---|---|
+| task.json scan | Data-only JSON parse; no shell eval; unreadable/unparseable → STOP_AT=precheck_task_metadata_error |
+| Tasks root under sudo | AEGL_TASKS_ROOT → AEGL_STATE_HOME/tasks → zhong ~/.local/state/aegl/tasks (never root HOME) |
+| Broker target refs | Exact bind: AEGL=refs/heads/main; Stack/KeepLab=refs/heads/master (no branch rename) |
+| ACL installer | --target-ref + Stack/KeepLab allow; business-root resolve for KeepLab |
+| Live guard | Hermes loads formal Stack contract_guard.py (not an installed copy). Token expand + KeepLab via AEGL_BUSINESS_ROOT |
+| Frozen contract | KeepLab path_resolution note + hash_manifest remanifest (compiler) |
+| Migrate phases | precheck / move / post / resume-post; patch-liveness gate before move |
+| Exec pack | recovery/keeplab-appprojects-exec.sh — promote AEGL→main, install-broker, promote Stack→master, optional KeepLab→master, then move |
+
+### Deploy-before-move (required live before mv)
+
+1. AEGL tip on refs/heads/main + formal bin/aegl-task / promotion_core business-root code
+2. Installed /usr/local/lib/aegl-promote/* + unit AEGL_BUSINESS_ROOT=/home/zhong/AppProjects (not isolation WT)
+3. Stack tip on refs/heads/master with dual-root contract_guard (Hermes profile points at formal tree)
+4. KeepLab contract tip on refs/heads/master (recommended; remanifested packages)
+
+Isolation-branch commits alone are **not** live.
+
+### Targeted checks
+
+```text
+KEEPLAB_PATH_TESTS passed=10 failed=0
+BROKER_TESTS passed=20 failed=0
+GUARD: source_root expands; KeepLab benchmark ALLOW; Stack lock ALLOW
+```
+
+### Isolation tips (this round)
+
+| Repo | Branch | Full SHA |
+|---|---|---|
+| KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
+| Stack | plan/keeplab-appprojects-path | 397d7817f44cb4c6578634a17bd3797a18fc0b6a |
+| AEGL | plan/keeplab-appprojects-migrate | (this Round 48 commit; see git rev-parse after commit) |
+
+### Unified exec pack (operator trusted terminal; fixed SHAs)
+
+After this Round 48 commit lands, set AEGL_TIP to that full SHA. Stack/KeepLab SHAs are fixed.
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+AEGL_TIP=REPLACE_WITH_ROUND48_AEGL_FULL_SHA
+STACK_TIP=397d7817f44cb4c6578634a17bd3797a18fc0b6a
+KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
+
+# Optional preflight only (no promote/move):
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --dry-run
+
+# Full pack: AEGL→main, install-broker, Stack→master, KeepLab→master, move+post
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- \
+      --commit "$AEGL_TIP" \
+      --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP"
+
+# If move succeeded but a later step failed (SRC gone, DST present):
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --resume-after-move
+```
+
+**Impact:** FF-promote AEGL/Stack/KeepLab onto their canonical branches; reinstall
+broker unit with business root; rename KeepLab to AppProjects; no old-path
+symlink/backup; no switch/chattr/Cursor rules/push.
+
+**STOP_AT values (non-exhaustive):** need_commit, promote_*, install_broker_failed,
+precheck_*, mv_failed, resume_dst_missing, complete.
+
+### Still needing separate approval (not in this pack)
+
+- host-identity switch / broker-verified / Projects chattr +i
+- AppProjects chattr +i
+- Cursor project-rules scope
+- git push
+
+```text
+KEEPLAB_MIGRATE=HANDOFF_READY_NOT_EXECUTED
+DEPLOY_BEFORE_MOVE=AEGL_main+broker_install+Stack_master+KeepLab_master
+LIVE_GUARD=formal_Stack_contract_guard.py
+SWITCH=NOT_THIS_ROUND
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
