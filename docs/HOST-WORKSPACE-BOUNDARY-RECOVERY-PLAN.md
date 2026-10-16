@@ -2236,7 +2236,7 @@ AI_BOUNDARY=BLOCKED
 Implements the authorized full-stack promote path. **No sudo, no formal-tree mutate,
 no live promote/push in this round** — only code + out-of-tree tests + this note.
 
-### Code (this tip)
+### Code
 
 | Piece | Behavior |
 |---|---|
@@ -2262,10 +2262,9 @@ PROMOTE_STACK_TESTS passed=9 failed=0
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=ROUND43_TIP_SHA
+TIP=f4172efd60625ca28972dc318fa63b22a8c6f2b0
 test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
-git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
-  | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
+git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh"   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
 
 That script performs A–F: preflight → confirm exactly the 10 gradle-actions
@@ -2280,6 +2279,8 @@ PROMOTE_IMPL=TARGET_BIND_FF
 PROMOTE_STACK_TESTS=PASS (9/9 first run)
 BROKER_TESTS=PASS (18/18)
 LIVE_PROMOTE=NOT_THIS_ROUND
-TIP=ROUND43_TIP_SHA
+IMPL=0c50259293ba43721848dfd647e0f42c1b813d2e
+TIP=f4172efd60625ca28972dc318fa63b22a8c6f2b0
 AI_BOUNDARY=BLOCKED
 ```
+
