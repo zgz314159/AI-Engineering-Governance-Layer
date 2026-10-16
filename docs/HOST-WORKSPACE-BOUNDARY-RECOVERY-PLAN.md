@@ -2328,3 +2328,45 @@ TIP=1c61a2fa1d4469509c9612d7bd2d259c83e9f163
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 45: install restart + E resume (print broker JSON/rc)
+
+A–D already ran on host; main stayed at baseline; stop was at E. This round only
+fixes install/load and E visibility + resume entry. No full-pack re-run.
+
+| Fix | Behavior |
+|---|---|
+| `install-broker.sh` | After installing files: `enable` + **`restart`**, wait **active** + **socket ready** (not `enable --now` alone) |
+| broker client calls | Print `BROKER_*_RC` + `BROKER_*_JSON` first (`set +e` capture), then gate |
+| `--resume-from-E` | Check main=`6f495c45…`, clean formal+gradle pin, installed==`--commit`; recreate candidate; E–F only |
+
+### Targeted checks
+
+```text
+DEPLOY_E_RESUME_TESTS passed=7 failed=0
+```
+
+### Resume-from-E command (exact tip; no SHA upgrade)
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=ROUND45_TIP_SHA
+test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
+test "$(git -C "$AEGL" rev-parse refs/heads/main)" = 6f495c45b67a0217034be2510068b2bc56c85607
+# Trusted terminal: load installed program (restart). If D already installed this tip's
+# LIBDIR files, restart alone is enough; install-broker also restarts after copy.
+sudo systemctl restart aegl-promote-broker
+systemctl is-active --quiet aegl-promote-broker
+test -S /run/aegl-promote/broker.sock
+git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
+  | sudo bash -s -- --resume-from-E --repo "$AEGL" --commit "$TIP"
+```
+
+```text
+RESUME_FROM_E=READY
+MAIN_BASELINE=6f495c45b67a0217034be2510068b2bc56c85607
+TIP=ROUND45_TIP_SHA
+LIVE_PROMOTE=OPERATOR_RESUME
+AI_BOUNDARY=BLOCKED
+```
+

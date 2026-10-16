@@ -115,10 +115,30 @@ else
   say "  wrote unit: $UNIT"
 fi
 systemctl daemon-reload || fail "systemctl daemon-reload"
-systemctl enable --now aegl-promote-broker >/dev/null 2>&1 || fail "systemctl enable/start aegl-promote-broker"
-# real service state, not a printed status command
-systemctl is-active --quiet aegl-promote-broker || fail "service aegl-promote-broker is not active"
-say "  service active: aegl-promote-broker"
+# Ensure enabled, then always restart so the running process loads the files just
+# installed from --commit. enable --now alone is insufficient when the unit was
+# already active (it would keep the old program in memory).
+systemctl enable aegl-promote-broker >/dev/null 2>&1 || fail "systemctl enable aegl-promote-broker"
+say "  restarting aegl-promote-broker to load installed program commit=$COMMIT"
+systemctl restart aegl-promote-broker || fail "systemctl restart aegl-promote-broker"
+# Contained wait: active state, then socket ready. Identity/allowlists unchanged.
+_i=0
+while [ "$_i" -lt 50 ]; do
+  systemctl is-active --quiet aegl-promote-broker && break
+  sleep 0.1
+  _i=$((_i + 1))
+done
+systemctl is-active --quiet aegl-promote-broker \
+  || fail "service aegl-promote-broker is not active after restart"
+_i=0
+while [ "$_i" -lt 50 ]; do
+  [ -S "$RUNDIR/broker.sock" ] && break
+  sleep 0.1
+  _i=$((_i + 1))
+done
+[ -S "$RUNDIR/broker.sock" ] \
+  || fail "broker socket not ready after restart: $RUNDIR/broker.sock"
+say "  service active; socket ready: $RUNDIR/broker.sock"
 
 # --- bounded independent-UID acceptance -------------------------------------- #
 self_test(){
