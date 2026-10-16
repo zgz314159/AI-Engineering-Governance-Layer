@@ -28,7 +28,8 @@ reason(){ printf '%s' "$1" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("reason",""))
 except Exception: print("")' 2>/dev/null; }
 
-APP="$PROOT/AI-Engineering-Governance-Layer"
+# Stack canonical target is refs/heads/master (exact bind; do not rename to main).
+APP="$PROOT/Google-Android-Agent-Development-Stack"
 mkdir -p "$APP"
 git -C "$APP" init -q
 ( cd "$APP" && echo base > README.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm base )
@@ -36,11 +37,11 @@ git -C "$APP" branch -M master
 MAIN0="$(git -C "$APP" rev-parse refs/heads/master)"
 git -C "$APP" branch side-keep HEAD
 SIDE0="$(git -C "$APP" rev-parse side-keep)"
-# Simulate formal dirty content on a non-main checkout path (file not in git).
+# Simulate formal dirty content on a non-target checkout path (file not in git).
 echo formal-dirt > "$APP/FORMAL_DIRTY.txt"
 DIRT_HASH="$(sha256sum "$APP/FORMAL_DIRTY.txt" | awk '{print $1}')"
 
-# Candidate lineage: two commits ahead of main.
+# Candidate lineage: two commits ahead of master.
 WT="$ST/cand"
 git -C "$APP" worktree add -q -b cand "$WT" HEAD
 ( cd "$WT" && echo f1 > feat.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm c1
@@ -49,21 +50,21 @@ TIP="$(git -C "$WT" rev-parse HEAD)"
 PARENT="$(git -C "$WT" rev-parse HEAD^)"
 
 export AEGL_BROKER_SOCKET="$SOCK" AEGL_BROKER_REGISTRY_DIR="$REG" PROJECTS_ROOT="$PROOT" \
-       AEGL_PROJECT_ALLOWLIST="AI-Engineering-Governance-Layer" \
+       AEGL_PROJECT_ALLOWLIST="Google-Android-Agent-Development-Stack" \
        AEGL_BROKER_ALLOW_REQUESTERS="$(id -u)" AEGL_BROKER_ALLOW_RECORDERS="$(id -u)"
 "$BROKER" serve >"$ST/broker.log" 2>&1 &
 BPID=$!
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || { echo "broker failed to start"; cat "$ST/broker.log"; exit 2; }
 
-# --- 1. happy path: main FF to tip; other branch + dirt untouched ------------ #
+# --- 1. happy path: master FF to tip; other branch + dirt untouched ---------- #
 req "{\"op\":\"register\",\"task_id\":\"stack1\",\"project\":\"$APP\",\"base\":\"$MAIN0\",\"worktree\":\"$WT\",\"branch\":\"cand\",\"target_ref\":\"refs/heads/master\"}" >/dev/null
 req '{"op":"record","task_id":"stack1","verify_result":"PASS"}' >/dev/null
 d="$(req '{"op":"promote","task_id":"stack1"}')"
 [ "$(dec "$d")" = APPLIED ] && ok "stack promote APPLIED" || no "stack promote $(dec "$d") $(reason "$d")"
-[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$TIP" ] && ok "main updated to candidate tip" || no "main not tip"
+[ "$(git -C "$APP" rev-parse refs/heads/master)" = "$TIP" ] && ok "master updated to candidate tip" || no "master not tip"
 git -C "$APP" merge-base --is-ancestor "$PARENT" refs/heads/master \
-  && ok "main contains candidate parent (history)" || no "parent not on main"
+  && ok "master contains candidate parent (history)" || no "parent not on master"
 [ "$(git -C "$APP" rev-parse side-keep)" = "$SIDE0" ] && ok "side-keep unchanged" || no "side-keep moved"
 [ "$(sha256sum "$APP/FORMAL_DIRTY.txt" | awk '{print $1}')" = "$DIRT_HASH" ] \
   && ok "pre-existing dirty file untouched" || no "dirty file altered"

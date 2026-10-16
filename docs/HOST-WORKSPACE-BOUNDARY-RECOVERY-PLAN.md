@@ -2712,3 +2712,65 @@ PUSH=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 49: exec orchestration — proven promote glue, sync, KeepLab-after-move
+
+Authorized preparation only — **no sudo, no directory move, no switch, no push**.
+
+### Orchestration fixes
+
+| Item | Behavior |
+|---|---|
+| Promote helper | Reuses promote-to-main-stack patterns: cross-UID setfacl on candidate, broker_client_call RC+JSON, decision + approved_commit gates, EXIT cleanup |
+| Formal sync | After CAS update-ref: operator `git restore --source=HEAD` when clean; dirty trees preserved and refused; branch name alone ≠ deployed |
+| KeepLab order | AEGL+broker+Stack before move; KeepLab contract promote **after** mv at AppProjects; no permanent dual-path allow |
+| Post checks | `keeplab-appprojects-postcheck.sh` as zhong via `runuser`; requires MANIFEST_OK; source_root stays Projects |
+| Dry-run | Requires three SHAs; prints PLANNED_STEPS; migrate dir precheck is not pack readiness |
+
+### Targeted checks
+
+```text
+KEEPLAB_ORCH_TESTS passed=8 failed=0 (first + one re-verify)
+BROKER_TESTS passed=20 failed=0
+KEEPLAB_PATH_TESTS passed=10 failed=0
+```
+
+### Isolation tips
+
+| Repo | Branch | Full SHA |
+|---|---|---|
+| KeepLab | plan/keeplab-source-root-note | 626ce29bbf95d94f55a34c4d630a87492f44a47b |
+| Stack | plan/keeplab-appprojects-path | 397d7817f44cb4c6578634a17bd3797a18fc0b6a |
+| AEGL | plan/keeplab-appprojects-migrate | (Round 49 tip after commit) |
+
+### Unified exec pack
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+AEGL_TIP=REPLACE_WITH_ROUND49_AEGL_FULL_SHA
+STACK_TIP=397d7817f44cb4c6578634a17bd3797a18fc0b6a
+KEEPLAB_TIP=626ce29bbf95d94f55a34c4d630a87492f44a47b
+
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP" --dry-run
+
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP"
+
+# After move if a later step failed (SRC gone, DST present):
+git -C "$AEGL" show "$AEGL_TIP:recovery/keeplab-appprojects-exec.sh" \
+  | sudo bash -s -- --commit "$AEGL_TIP" --stack-commit "$STACK_TIP" \
+      --keeplab-commit "$KEEPLAB_TIP" --resume-after-move
+```
+
+```text
+KEEPLAB_MIGRATE=ORCH_FIXED_NOT_EXECUTED
+KEEP_LAB_PROMOTE=AFTER_MOVE
+FORMAL_SYNC=restore_when_clean
+SWITCH=NOT_THIS_ROUND
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
