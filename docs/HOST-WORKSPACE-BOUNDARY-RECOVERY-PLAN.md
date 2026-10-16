@@ -2307,11 +2307,14 @@ DEPLOY_GLUE_TESTS passed=7 failed=0
 
 ### Unified command pack (exact tip; no pin-upgrade)
 
+Impl (scripts): `e58818b901b0651ec992fa9f28579712afe29674`.  
+Run with the **branch tip** full SHA after this Round 44 note (result block). Stack
+refuses if `--commit` ≠ `plan/capture-hook-classfix` (no elevation).
+
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=ROUND44_TIP_SHA
-test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
+TIP=ROUND44_BRANCH_TIP
 git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
@@ -2320,7 +2323,8 @@ git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
 DEPLOY_GLUE=EXACT_COMMIT_CROSS_UID
 DEPLOY_GLUE_TESTS=PASS (7/7)
 LIVE_PROMOTE=NOT_THIS_ROUND
-TIP=ROUND44_TIP_SHA
+IMPL=e58818b901b0651ec992fa9f28579712afe29674
+TIP=ROUND44_BRANCH_TIP
 AI_BOUNDARY=BLOCKED
 ```
 
