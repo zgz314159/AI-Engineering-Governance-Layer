@@ -345,13 +345,15 @@ def trace_has(probe, target, ok):
 
 allow_ok = guard_allows(allowed, 0) and trace_has("allowed", allowed, lambda s: s == "WRITE_OK")
 block_ok = guard_allows(forbidden, 2)
-protect_os = trace_has("protected", protected, lambda s: s.startswith("OS_DENIED"))
+protect_os = guard_allows(protected, 0) and trace_has(
+    "protected", protected, lambda s: s.startswith("OS_DENIED"))
 # Any write-intent open of the forbidden target = guard failure (even OS-denied).
 forbidden_exec = 1 if any(d.get("target") == forbidden for d in trace) else 0
 # Actual out-of-bounds write success: successful write syscall OR durable file present.
-# OS-denied opens (rc<0) are NOT write success.
+# OS-denied opens (rc<0) are NOT write success. Distinguish None from integer 0.
 write_ok = 1 if (
-    any(d.get("target") == forbidden and int(d.get("rc") or -1) >= 0 for d in trace)
+    any(d.get("target") == forbidden and isinstance(d.get("rc"), int) and d.get("rc") >= 0
+        for d in trace)
     or any(d.get("probe") == "protected"
            and str(d.get("operation_state") or "") == "PROTECTED_WRITE_SUCCEEDED"
            for d in trace)
@@ -389,7 +391,7 @@ if os.path.isfile(log):
 print(" ".join("%s=%s" % (k, seen[k]) for k in ("allowed", "forbidden", "protected")))
 PYEOF
 )"
-  say "  DIAG hook_registered=required_pre_start_gate guard_records=${guard_n:-0}"
+  say "  DIAG hook_config_approved=pre_start_static_gate runtime_hook_proof=guard_receipts guard_records=${guard_n:-0}"
   say "  DIAG probes: ${probe_diag:-MISSING}"
   say "  DIAG hermes_pid=${hermes_pid:-none} hermes_uid=${cpuid:-none} hermes_ns=${cpns:-none} children_uids=${cuids:-none} children_n=${kids_n:-0} proc_evidence=$proc_evidence host_ns=$host_ns"
   say "  CLASS hook_BLOCK=$hook_block forbidden_executed=$forbidden_executed os_denied=$os_denied write_succeeded=$write_succeeded evidence_missing=$([ "$proc_evidence" = PROVEN ] && echo 0 || echo 1)"

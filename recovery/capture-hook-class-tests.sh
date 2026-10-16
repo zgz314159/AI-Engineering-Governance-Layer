@@ -53,7 +53,8 @@ kill "$RP" "$WP" "$INIT" 2>/dev/null; wait "$RP" "$WP" "$INIT" 2>/dev/null
 
 # === B. allowlist wiring + refuse without registration ======================== #
 grep -q 'shell-hooks-allowlist.json' "$LAUNCH" && ok "launcher references task shell-hooks-allowlist" || no "allowlist not wired"
-grep -q 'HOOK_REGISTERED' "$LAUNCH" && ok "launcher has registration gate (not YAML-only)" || no "registration gate missing"
+grep -q 'HOOK_CONFIG_APPROVED' "$LAUNCH" && ok "launcher has config-approval gate (not YAML-only; not runtime HOOK_REGISTERED)" || no "config-approval gate missing"
+grep -q 'HOOK_REGISTERED' "$LAUNCH" && no "static check still prints HOOK_REGISTERED" || ok "static check does not claim HOOK_REGISTERED"
 grep -q 'ro-bind:\$ALLOWLIST_SRC:/home/zhong/.hermes/profiles/android-stack/shell-hooks-allowlist.json' "$LAUNCH" \
   && ok "allowlist ro-mounted at android-stack profile path" || no "allowlist mount path wrong"
 # Simulate the gate: exact command must match config+allowlist; extras refused

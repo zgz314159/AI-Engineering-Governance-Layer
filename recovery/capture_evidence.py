@@ -147,12 +147,33 @@ def capture(info_file: str, max_wait: float = 30.0, hermes_wait: float = 240.0) 
     if not hermes_pid:
         return {"error": "hermes_not_found", "child_pid": pid}
 
-    kids = descendants(hermes_pid)
+    # Same hermes_wait deadline: keep sampling until a real tool child appears,
+    # Hermes exits, or the deadline hits. Empty children stay empty (NOT_PROVEN);
+    # never invent a wrapper or unrelated stand-in, never extend the deadline.
+    kids = []
+    uid = ""
+    ns = ""
+    while time.monotonic() < end:
+        if not os.path.isdir("/proc/%d" % hermes_pid):
+            break
+        uid = uid_of(hermes_pid) or uid
+        ns = ns_of(hermes_pid) or ns
+        kids = descendants(hermes_pid)
+        if kids:
+            uid = uid_of(hermes_pid) or uid
+            ns = ns_of(hermes_pid) or ns
+            break
+        time.sleep(0.2)
+    alive = os.path.isdir("/proc/%d" % hermes_pid)
+    if alive:
+        uid = uid_of(hermes_pid) or uid
+        ns = ns_of(hermes_pid) or ns
+        kids = descendants(hermes_pid) or kids
     return {"child_pid": pid, "hermes_pid": hermes_pid,
-            "uid": uid_of(hermes_pid), "ns": ns_of(hermes_pid),
+            "uid": uid, "ns": ns,
             "children_uids": sorted({uid_of(k) for k in kids} - {""}),
             "children_pids": kids,
-            "alive": os.path.isdir("/proc/%d" % hermes_pid)}
+            "alive": alive}
 
 
 def main(argv):
