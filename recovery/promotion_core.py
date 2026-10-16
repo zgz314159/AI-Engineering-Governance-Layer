@@ -69,12 +69,51 @@ def projects_root() -> str:
     return os.path.realpath(os.environ.get("PROJECTS_ROOT") or DEFAULT_PROJECTS_ROOT)
 
 
+def _safe_directory_args(repo: str) -> list:
+    """Command-level ``safe.directory`` for exact trusted paths only (no globs).
+
+    Cross-UID Git (broker as aegl-promote on a zhong-owned worktree/repo) must not
+    rely on user global config or ``safe.directory=*``.
+    """
+    paths = []
+    try:
+        paths.append(os.path.realpath(repo))
+    except OSError:
+        return []
+    git_path = os.path.join(repo, ".git")
+    try:
+        if os.path.isfile(git_path):
+            with open(git_path, encoding="utf-8") as handle:
+                line = handle.readline().strip()
+            if line.startswith("gitdir:"):
+                gitdir = line.split(":", 1)[1].strip()
+                if not os.path.isabs(gitdir):
+                    gitdir = os.path.normpath(os.path.join(repo, gitdir))
+                paths.append(os.path.realpath(gitdir))
+                # Common object store: <repo>/.git  (parent of worktrees/<name>)
+                common = os.path.realpath(os.path.join(gitdir, "..", ".."))
+                if os.path.isdir(common):
+                    paths.append(common)
+        elif os.path.isdir(git_path):
+            paths.append(os.path.realpath(git_path))
+    except OSError:
+        pass
+    args = []
+    seen = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        args += ["-c", "safe.directory=%s" % path]
+    return args
+
+
 def _git(repo: str, *args, env=None, input_text=None, check=False) -> subprocess.CompletedProcess:
     merged = dict(GIT_ENV)
     if env:
         merged.update(env)
     return subprocess.run(
-        ["git", "-C", repo, *GIT_HARDEN, *args],
+        ["git", "-C", repo, *_safe_directory_args(repo), *GIT_HARDEN, *args],
         capture_output=True, text=True, env=merged, input=input_text, check=check,
     )
 
@@ -260,8 +299,11 @@ def freeze_candidate_commit(wt: str) -> tuple:
     if head.returncode != 0 or len(head.stdout.strip()) != 40:
         raise RuntimeError("candidate_head_missing")
     commit = head.stdout.strip()
-    porcelain = _git(wt, "status", "--porcelain").stdout
-    if porcelain.strip():
+    status = _git(wt, "status", "--porcelain")
+    if status.returncode != 0:
+        # Never treat a failed Git check (e.g. safe.directory / EACCES) as clean.
+        raise RuntimeError("worktree_status_failed")
+    if status.stdout.strip():
         raise RuntimeError("worktree_dirty")
     tree = object_tree(wt, commit)
     if not tree or len(tree) != 40:

@@ -2262,13 +2262,12 @@ PROMOTE_STACK_TESTS passed=9 failed=0
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=6bd77468364305a90a65d6f4eee47fd9b1e1243f
-# Script elevates --commit to plan/capture-hook-classfix tip when TIP is an ancestor.
-git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh"   | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
+TIP=SUPERSEDED_BY_ROUND44
+git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
+  | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 ```
 
-`promote-to-main-stack.sh` elevates `--commit` to `plan/capture-hook-classfix` when
-the passed SHA is a strict ancestor (so a stale pin in this note still installs the tip).
+Superseded by Round 44 (no tip elevation; exact `--commit` only).
 
 That script performs A–F: preflight → confirm exactly the 10 gradle-actions
 deletions (abort on any other dirt) → restore from
@@ -2283,7 +2282,45 @@ PROMOTE_STACK_TESTS=PASS (9/9 first run)
 BROKER_TESTS=PASS (18/18)
 LIVE_PROMOTE=NOT_THIS_ROUND
 IMPL=0c50259293ba43721848dfd647e0f42c1b813d2e
-TIP=6bd77468364305a90a65d6f4eee47fd9b1e1243f (elevates to plan tip)
+TIP=SUPERSEDED_BY_ROUND44
+AI_BOUNDARY=BLOCKED
+```
+
+## Round update 44: deploy glue — exact commit, cross-UID ACL, safe.directory, early preflight
+
+No broker redesign. Fixes stack/ACL/Git deploy stitching only.
+
+| Fix | Behavior |
+|---|---|
+| No elevate | `--commit` is install source + candidate for the whole run; tip mismatch → hard reject |
+| Candidate ACL | Task dir only: `zhong` create; `aegl-promote` traverse/read (+ wt gitdir); `aegl-ai` socket only |
+| No unused token | Broker-client promote path does not mint controller tokens |
+| `safe.directory` | Command-level exact paths in `promotion_core._git` and ACL `runuser` verify; no globs/global config |
+| Status rc | `freeze_candidate_commit` rejects `worktree_status_failed` (empty stdout ≠ clean) |
+| Early preflight | Throwaway `/var/tmp/aegl-stack-preflight-*` before restore/service/ACL |
+
+### Targeted checks (not full broker/stack suites)
+
+```text
+DEPLOY_GLUE_TESTS passed=7 failed=0
+```
+
+### Unified command pack (exact tip; no pin-upgrade)
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=ROUND44_TIP_SHA
+test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$TIP"
+git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
+  | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
+```
+
+```text
+DEPLOY_GLUE=EXACT_COMMIT_CROSS_UID
+DEPLOY_GLUE_TESTS=PASS (7/7)
+LIVE_PROMOTE=NOT_THIS_ROUND
+TIP=ROUND44_TIP_SHA
 AI_BOUNDARY=BLOCKED
 ```
 

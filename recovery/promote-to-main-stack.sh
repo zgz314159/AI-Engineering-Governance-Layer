@@ -8,12 +8,13 @@
 #   git -C "$AEGL" show "$TIP:recovery/promote-to-main-stack.sh" \
 #     | sudo bash -s -- --repo "$AEGL" --commit "$TIP"
 #
-# Steps: preflight → confirm only the 10 expected gradle-actions deletions →
-# restore those from the pin → install broker + target ACL from the same TIP →
-# external candidate worktree → register/record (root) → promote (aegl-ai) →
-# close formal checkout onto main. Controller mint of AEGL_CONTROLLER_TOKEN is
-# injected into the aegl-ai promote env only when using bin/aegl-task; this pack
-# calls the installed broker client directly (SO_PEERCRED) and never prints secrets.
+# --commit is the install source AND the promote candidate for the entire run.
+# Branch tip movement never substitutes a different SHA; mismatch is a hard reject.
+#
+# Order: throwaway cross-UID preflight (no formal mutate) → gradle restore →
+# broker+ACL install from the same --commit → external candidate →
+# register/record (root) / promote (aegl-ai via SO_PEERCRED) → formal switch main.
+# This path calls the broker client directly; it does not mint controller tokens.
 set -euo pipefail
 
 REPO=""; COMMIT=""
@@ -27,6 +28,9 @@ done
 
 PIN=50e97c2cd7a37755bbfafc9c5b7cafaece252f6e
 TASK_ID="capture-hook-classfix-promote"
+BROKER_USER="aegl-promote"
+AI_USER="aegl-ai"
+OP_USER="zhong"
 GRADLE_DIST_FILES=(
   dist/dependency-submission/main/index.js
   dist/dependency-submission/main/index.js.map
@@ -38,6 +42,14 @@ GRADLE_DIST_FILES=(
   dist/setup-gradle/post/index.js.map
   dist/wrapper-validation/main/index.js
   dist/wrapper-validation/main/index.js.map
+)
+STACK_FILES=(
+  recovery/promote-to-main-stack.sh
+  recovery/install-broker.sh
+  recovery/install-promote-target-acl.sh
+  recovery/promotion_broker.py
+  recovery/promotion_core.py
+  bin/aegl-promote-broker
 )
 
 say(){ printf '%s\n' "$*"; }
@@ -57,24 +69,101 @@ BROKER_BIN=/usr/local/lib/aegl-promote/aegl-promote-broker
 SOCK=/run/aegl-promote/broker.sock
 export AEGL_BROKER_SOCKET="$SOCK"
 
-say "== A. Preflight =="
-BRANCH_TIP="$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)"
-if [ "$COMMIT" != "$BRANCH_TIP" ]; then
-  git -C "$AEGL" merge-base --is-ancestor "$COMMIT" "$BRANCH_TIP" \
-    || fail "--commit $COMMIT is not on plan/capture-hook-classfix (tip $BRANCH_TIP)"
-  say "  elevating --commit $COMMIT -> tip $BRANCH_TIP"
-  COMMIT="$BRANCH_TIP"
+# --------------------------------------------------------------------------- #
+# 0. Throwaway preflight — before formal restore / service update / project ACL
+# --------------------------------------------------------------------------- #
+say "== 0. Throwaway cross-UID preflight (no formal mutate) =="
+for t in git setfacl runuser python3; do
+  command -v "$t" >/dev/null 2>&1 || fail "missing tool: $t"
+done
+id "$OP_USER" >/dev/null 2>&1 || fail "missing operator user: $OP_USER"
+id "$BROKER_USER" >/dev/null 2>&1 || fail "missing broker user: $BROKER_USER (install broker first)"
+id "$AI_USER" >/dev/null 2>&1 || fail "missing AI user: $AI_USER"
+for f in "${STACK_FILES[@]}"; do
+  git -C "$AEGL" cat-file -e "$COMMIT:$f" 2>/dev/null || fail "required path missing in --commit: $f"
+done
+BRANCH_TIP="$(git -C "$AEGL" rev-parse --verify plan/capture-hook-classfix)"
+[ "$BRANCH_TIP" = "$COMMIT" ] \
+  || fail "plan/capture-hook-classfix is $BRANCH_TIP; --commit is $COMMIT (refusing tip substitution)"
+
+PRE=""
+EXT=""
+cleanup_all(){
+  if [ -n "${EXT:-}" ] && [ -d "$EXT" ]; then
+    git -C "$AEGL" worktree remove --force "$EXT/wt" 2>/dev/null || true
+    chmod -R u+w "$EXT" 2>/dev/null || true
+    rm -rf "$EXT"
+  fi
+  if [ -n "${PRE:-}" ] && [ -d "$PRE" ]; then
+    chmod -R u+w "$PRE" 2>/dev/null || true
+    rm -rf "$PRE"
+  fi
+}
+trap cleanup_all EXIT
+
+PRE="$(mktemp -d /var/tmp/aegl-stack-preflight-XXXXXX)" || fail "mktemp preflight failed"
+chmod 0750 "$PRE"
+chown root:root "$PRE"
+# Operator creates the throwaway repo; broker only gets ACL on this PRE tree.
+setfacl -m "u:${OP_USER}:rwx" "$PRE"
+runuser -u "$OP_USER" -- git -c "safe.directory=$PRE/repo" init -q "$PRE/repo"
+runuser -u "$OP_USER" -- bash -c "echo pre > '$PRE/repo/README.md'"
+runuser -u "$OP_USER" -- git -c "safe.directory=$PRE/repo" -C "$PRE/repo" add -A
+runuser -u "$OP_USER" -- git -c "safe.directory=$PRE/repo" -C "$PRE/repo" \
+  -c user.email=t@t -c user.name=t commit -qm preflight
+PRE_HEAD="$(runuser -u "$OP_USER" -- git -c "safe.directory=$PRE/repo" -C "$PRE/repo" rev-parse HEAD)"
+[ "${#PRE_HEAD}" -eq 40 ] || fail "preflight repo head missing"
+# aegl-promote: traverse + read only inside PRE (not /var/tmp broadly, not AEGL).
+setfacl -m "u:${BROKER_USER}:--x" "$PRE"
+setfacl -R -m "u:${BROKER_USER}:r-X" "$PRE/repo"
+BROKER_HEAD="$(runuser -u "$BROKER_USER" -- git \
+  -c "safe.directory=$PRE/repo" \
+  -c "core.hooksPath=/dev/null" \
+  -c "core.fsmonitor=false" \
+  -c "core.attributesFile=/dev/null" \
+  -C "$PRE/repo" rev-parse --verify HEAD 2>/dev/null)" \
+  || fail "aegl-promote cannot rev-parse throwaway repo (ACL/safe.directory)"
+[ "$BROKER_HEAD" = "$PRE_HEAD" ] || fail "aegl-promote saw unexpected head"
+BROKER_ST_RC=0
+BROKER_ST_OUT="$(runuser -u "$BROKER_USER" -- git \
+  -c "safe.directory=$PRE/repo" \
+  -c "core.hooksPath=/dev/null" \
+  -c "core.fsmonitor=false" \
+  -c "core.attributesFile=/dev/null" \
+  -C "$PRE/repo" status --porcelain 2>/dev/null)" || BROKER_ST_RC=$?
+[ "$BROKER_ST_RC" = 0 ] || fail "aegl-promote git status failed in throwaway (rc=$BROKER_ST_RC)"
+[ -z "$BROKER_ST_OUT" ] || fail "throwaway repo unexpectedly dirty"
+# aegl-ai: only what promote needs — reach the broker socket (group), not PRE/AEGL.
+if [ -S "$SOCK" ]; then
+  runuser -u "$AI_USER" -- test -S "$SOCK" \
+    || fail "aegl-ai cannot access broker socket $SOCK"
+else
+  say "  note: broker socket absent until step D (identity/group check only)"
+  id -nG "$AI_USER" | tr ' ' '\n' | grep -qx aegl-broker \
+    || fail "aegl-ai not in aegl-broker group (cannot request promote)"
 fi
-test "$(git -C "$AEGL" rev-parse plan/capture-hook-classfix)" = "$COMMIT" \
-  || fail "plan/capture-hook-classfix is not $COMMIT"
+# Negative: aegl-ai must not write the throwaway candidate tree.
+if runuser -u "$AI_USER" -- touch "$PRE/repo/.ai-probe" 2>/dev/null; then
+  rm -f "$PRE/repo/.ai-probe"
+  fail "aegl-ai can write throwaway repo — ACL too broad"
+fi
+chmod -R u+w "$PRE" 2>/dev/null || true
+rm -rf "$PRE"
+PRE=""
+say "  preflight OK commit=$COMMIT (throwaway cleaned)"
+
+# --------------------------------------------------------------------------- #
+# A–F formal path — still pinned to the same --commit
+# --------------------------------------------------------------------------- #
+say "== A. Commit bind (exact --commit; no tip elevate) =="
 git -C "$AEGL" merge-base --is-ancestor feat/beads-adapter "$COMMIT" \
-  || fail "feat/beads-adapter is not an ancestor of tip"
+  || fail "feat/beads-adapter is not an ancestor of --commit"
 test "$(git -C "$AEGL" rev-list --count "$COMMIT"..feat/beads-adapter)" = 0 \
-  || fail "feat/beads-adapter has commits not in tip"
+  || fail "feat/beads-adapter has commits not in --commit"
 test "$(git -C "$AEGL" ls-tree "$COMMIT" upstream/gradle-actions | awk '{print $3}')" = "$PIN" \
   || fail "gradle-actions gitlink is not $PIN"
 MAIN_BEFORE="$(git -C "$AEGL" rev-parse refs/heads/main)"
-say "  tip=$COMMIT main_before=$MAIN_BEFORE"
+say "  commit=$COMMIT main_before=$MAIN_BEFORE"
 
 say "== B. Confirm only the 10 expected gradle-actions deletions =="
 [ -d "$GA/.git" ] || [ -f "$GA/.git" ] || fail "gradle-actions checkout missing"
@@ -96,27 +185,40 @@ else
 fi
 
 say "== C. Restore pinned gradle-actions dist (formal tree; pin only) =="
-runuser -u zhong -- git -C "$GA" restore --source="$PIN" -- "${GRADLE_DIST_FILES[@]}"
+runuser -u "$OP_USER" -- git -C "$GA" restore --source="$PIN" -- "${GRADLE_DIST_FILES[@]}"
 test -z "$(git -C "$GA" status --porcelain)" || fail "gradle-actions still dirty after restore"
-# Parent may still show submodule letter if index lagged; require no porcelain on GA and
-# no unexpected non-submodule dirt on AEGL aside from submodule status noise we re-check:
-test -z "$(git -C "$GA" status --porcelain)"
 say "  gradle-actions clean at pin $PIN"
 
-say "== D. Trusted deploy: broker + target ACL from fixed TIP (not worktree) =="
+say "== D. Trusted deploy: broker + target ACL from fixed --commit (not worktree) =="
 git -C "$AEGL" show "$COMMIT:recovery/install-broker.sh" \
   | bash -s -- --repo "$AEGL" --projects-root "$(dirname "$AEGL")" --commit "$COMMIT"
 git -C "$AEGL" show "$COMMIT:recovery/install-promote-target-acl.sh" \
   | bash -s -- --repo "$AEGL" --project "$AEGL" --commit "$COMMIT"
 [ -x "$BROKER_BIN" ] || fail "broker binary missing after install"
 systemctl is-active --quiet aegl-promote-broker || fail "aegl-promote-broker not active"
+runuser -u "$AI_USER" -- test -S "$SOCK" || fail "aegl-ai cannot access $SOCK after install"
 
 say "== E. External candidate + register/record/promote =="
-EXT="$(mktemp -d /var/tmp/aegl-promote-cand-XXXXXX)"
-cleanup_ext(){ git -C "$AEGL" worktree remove --force "$EXT/wt" 2>/dev/null || true; rm -rf "$EXT"; }
-trap cleanup_ext EXIT
-runuser -u zhong -- git -C "$AEGL" worktree add -f "$EXT/wt" "$COMMIT"
-test -z "$(git -C "$EXT/wt" status --porcelain)" || fail "candidate worktree dirty"
+EXT="$(mktemp -d /var/tmp/aegl-promote-cand-XXXXXX)" || fail "mktemp candidate failed"
+chmod 0750 "$EXT"
+chown root:root "$EXT"
+setfacl -m "u:${OP_USER}:rwx" "$EXT"
+runuser -u "$OP_USER" -- git -C "$AEGL" worktree add -f "$EXT/wt" "$COMMIT"
+# aegl-promote must freeze the candidate (service UID); scope ACL to this EXT + wt gitdir.
+setfacl -m "u:${BROKER_USER}:--x" "$EXT"
+setfacl -R -m "u:${BROKER_USER}:r-X" "$EXT/wt"
+WT_GITDIR="$(runuser -u "$OP_USER" -- git -c "safe.directory=$EXT/wt" -C "$EXT/wt" rev-parse --absolute-git-dir)"
+[ -n "$WT_GITDIR" ] && [ -d "$WT_GITDIR" ] || fail "candidate gitdir missing"
+setfacl -R -m "u:${BROKER_USER}:r-X" "$WT_GITDIR"
+# aegl-ai: socket only — no grant on EXT.
+if runuser -u "$AI_USER" -- touch "$EXT/wt/.ai-probe" 2>/dev/null; then
+  rm -f "$EXT/wt/.ai-probe"
+  fail "aegl-ai can write candidate worktree — ACL too broad"
+fi
+ST_RC=0
+ST_OUT="$(runuser -u "$OP_USER" -- git -c "safe.directory=$EXT/wt" -C "$EXT/wt" status --porcelain 2>/dev/null)" || ST_RC=$?
+[ "$ST_RC" = 0 ] || fail "candidate git status failed (rc=$ST_RC); refusing to treat as clean"
+[ -z "$ST_OUT" ] || fail "candidate worktree dirty"
 BASE="$(git -C "$AEGL" merge-base refs/heads/main "$COMMIT")"
 REG_JSON="$(python3 -c 'import json,sys;print(json.dumps({"op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":"plan/capture-hook-classfix","target_ref":"refs/heads/main"}))' \
   "$TASK_ID" "$AEGL" "$BASE" "$EXT/wt")"
@@ -125,35 +227,23 @@ echo "$REG_OUT" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.ge
 REC_OUT="$("$BROKER_BIN" client --socket "$SOCK" --request "{\"op\":\"record\",\"task_id\":\"$TASK_ID\",\"verify_result\":\"PASS\"}")"
 echo "$REC_OUT" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("decision")=="RECORDED",d'
 APPROVED="$(echo "$REC_OUT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["approved_commit"])')"
-test "$APPROVED" = "$COMMIT" || fail "approved_commit $APPROVED != tip $COMMIT"
+test "$APPROVED" = "$COMMIT" || fail "approved_commit $APPROVED != --commit $COMMIT"
 
-# Mint controller token for any aegl-task wrapper path; inject only into aegl-ai env.
-TOKEN_FILE="$(mktemp /run/aegl-promote/controller.XXXXXX)"
-chmod 600 "$TOKEN_FILE"
-TOKEN="$(openssl rand -hex 32)"
-printf '%s' "$TOKEN" > "$TOKEN_FILE"
-chown aegl-ai:aegl-ai "$TOKEN_FILE"
-PROM_OUT="$(runuser -u aegl-ai -- env \
-  AEGL_BROKER_SOCKET="$SOCK" \
-  AEGL_CONTROLLER_TOKEN_FILE="$TOKEN_FILE" \
-  AEGL_CONTROLLER_TOKEN="$TOKEN" \
+# Promote as aegl-ai via SO_PEERCRED only — no controller token on this path.
+PROM_OUT="$(runuser -u "$AI_USER" -- env AEGL_BROKER_SOCKET="$SOCK" \
   "$BROKER_BIN" client --socket "$SOCK" --request "{\"op\":\"promote\",\"task_id\":\"$TASK_ID\"}")"
-# Scrub token from memory surfaces we control; never echo TOKEN.
-TOKEN=""
-rm -f "$TOKEN_FILE"
 echo "$PROM_OUT" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("decision")=="APPLIED",d'
 test "$(git -C "$AEGL" rev-parse refs/heads/main)" = "$COMMIT" \
-  || fail "main is not tip after promote"
+  || fail "main is not --commit after promote"
 git -C "$AEGL" merge-base --is-ancestor "$COMMIT" refs/heads/main \
-  || fail "tip not ancestor of main after promote"
+  || fail "--commit not ancestor of main after promote"
 say "  promote APPLIED main=$COMMIT"
 
 say "== F. Close formal workspace onto main =="
-runuser -u zhong -- bash -c "
+runuser -u "$OP_USER" -- bash -c "
   set -euo pipefail
   cd '$AEGL'
   test -z \"\$(git -C '$GA' status --porcelain)\"
-  # Allow only clean or empty porcelain on formal tree before switch.
   porcelain=\"\$(git status --porcelain)\"
   if [ -n \"\$porcelain\" ]; then
     echo \"STACK_ERROR: formal tree dirty before switch:\" >&2
@@ -171,6 +261,8 @@ runuser -u zhong -- bash -c "
 "
 say "  formal HEAD=main @$COMMIT clean"
 
-cleanup_ext
+# Success cleanup (trap also covers failure paths).
+cleanup_all
 trap - EXIT
+EXT=""; PRE=""
 say "STACK_RESULT=OK commit=$COMMIT main=$(git -C "$AEGL" rev-parse refs/heads/main)"

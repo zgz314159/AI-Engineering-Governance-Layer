@@ -102,8 +102,14 @@ if [ -e "$GIT/logs/refs/heads/main" ]; then
 fi
 
 # Bounded check: broker can resolve main; cannot write project worktree files.
-MAIN_OID="$(runuser -u "$BROKER_USER" -- git -C "$PROJ" rev-parse --verify refs/heads/main 2>/dev/null)" \
-  || fail "aegl-promote cannot rev-parse refs/heads/main (traverse/read ACL incomplete)"
+# Command-level safe.directory for this exact project only (no glob, no global config).
+MAIN_OID="$(runuser -u "$BROKER_USER" -- git \
+  -c "safe.directory=$PROJ" \
+  -c "core.hooksPath=/dev/null" \
+  -c "core.fsmonitor=false" \
+  -c "core.attributesFile=/dev/null" \
+  -C "$PROJ" rev-parse --verify refs/heads/main 2>/dev/null)" \
+  || fail "aegl-promote cannot rev-parse refs/heads/main (traverse/read ACL or safe.directory incomplete)"
 [ "${#MAIN_OID}" -eq 40 ] || fail "unexpected main oid"
 # Must NOT be able to create a file in the project worktree as aegl-promote.
 if runuser -u "$BROKER_USER" -- test -w "$PROJ"; then
