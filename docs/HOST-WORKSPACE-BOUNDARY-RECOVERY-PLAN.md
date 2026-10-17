@@ -2966,3 +2966,21 @@ PARENT_RENAME_PROTECTION=UNRESOLVED
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 54: ACL mask replay fix (project normalize + post-owner traverse)
+
+Authorized ACL fix only — **no sudo, no formal chown, no delete, no push**.
+
+| Item | Behavior |
+|---|---|
+| `_switch_tree` | `_normalize_project_acl`: `setfacl -b`/`-k` on the controlled project tree only (not home / Projects / AppProjects) |
+| Post-owner ACL | no named-user ACL on broker-owned `PROJ`/`.git`; ancestor `--x` via `setfacl -n` (no mask union replay); skip home/Projects/AppProjects |
+| Preflight | keep inherited default-ACL scenario; assert identity after switch, after post-owner ACL, after broker sync; dump getfacl on fail |
+| Stamp | P1 still NOT_RUN without root — do not fake PASS |
+
+```text
+HOST_IDENTITY=ACL_MASK_REPLAY_FIXED_PREP
+SWITCH_PREFLIGHT=NOT_RUN_WITHOUT_ROOT
+PARENT_RENAME_PROTECTION=UNRESOLVED
+AI_BOUNDARY=BLOCKED
+```
+

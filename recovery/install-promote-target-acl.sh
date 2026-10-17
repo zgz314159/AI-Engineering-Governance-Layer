@@ -59,6 +59,10 @@ command -v setfacl >/dev/null 2>&1 || fail "setfacl required (acl package)"
 
 PROOT="$(cd "$(dirname "$REPO")" && pwd)"
 [ -n "$BUSINESS_ROOT" ] || BUSINESS_ROOT="$(cd "$PROOT/.." && pwd)/AppProjects"
+HOME_DIR="$(getent passwd "$OPERATOR_USER" 2>/dev/null | cut -d: -f6)"
+[ -n "$HOME_DIR" ] || HOME_DIR="/home/zhong"
+PROJECTS_PARENT="$HOME_DIR/Projects"
+# BUSINESS_ROOT already set; treat AppProjects parent path as skip root when equal.
 
 # Resolve project path: absolute, system under Projects, or business under AppProjects.
 case "$PROJECT" in
@@ -92,25 +96,59 @@ case "$TARGET_REF" in
 esac
 BRANCH_NAME="${TARGET_REF#refs/heads/}"
 
-say "AEGL promote target ACL   project=$PROJ target_ref=$TARGET_REF commit=$COMMIT user=$BROKER_USER"
+say "AEGL promote target ACL   project=$PROJ target_ref=$TARGET_REF commit=$COMMIT user=$BROKER_USER post_owner=$POST_OWNER_SWITCH"
 
-grant_x(){
+# Paths this installer must never alter (host-identity scope: project trees only).
+_skip_acl_root(){
+  case "$1" in
+    "$HOME_DIR"|"$PROJECTS_PARENT"|"$BUSINESS_ROOT"|"/"|"/home"|"/var"|"/var/tmp"|"/tmp") return 0 ;;
+  esac
+  return 1
+}
+
+# Traverse grant for broker on ancestors ABOVE the project.
+# -n/--no-mask: do not union-recalculate mask (would unmask residual named-user
+# write that chmod or prior policy had masked — ACL mask replay).
+grant_traverse_ancestor(){
   local p="$1"
   [ -e "$p" ] || fail "missing path for traverse: $p"
-  setfacl -m "u:${BROKER_USER}:--x" "$p" || fail "setfacl traverse failed: $p"
+  if _skip_acl_root "$p"; then
+    say "  SKIP_ACL_ROOT $p"
+    return 0
+  fi
+  setfacl -n -m "u:${BROKER_USER}:--x" "$p" \
+    || fail "setfacl traverse failed: $p"
 }
-cur="$PROJ"
-while [ "$cur" != "/" ]; do
-  grant_x "$cur"
-  cur="$(dirname "$cur")"
-done
+
+if [ "$POST_OWNER_SWITCH" = 1 ]; then
+  # Broker already owns PROJ — do not add named-user ACL on the project node
+  # (redundant and can trigger mask recalculation that restores foreign write).
+  say "ACL post-owner-switch: no named-user ACL on project root (owner bits apply)"
+  cur="$(dirname "$PROJ")"
+  while [ "$cur" != "/" ]; do
+    if _skip_acl_root "$cur"; then
+      say "  SKIP_ACL_ROOT $cur (stop ancestor walk)"
+      break
+    fi
+    grant_traverse_ancestor "$cur"
+    cur="$(dirname "$cur")"
+  done
+else
+  cur="$PROJ"
+  while [ "$cur" != "/" ]; do
+    if _skip_acl_root "$cur"; then
+      say "  SKIP_ACL_ROOT $cur (stop ancestor walk)"
+      break
+    fi
+    grant_traverse_ancestor "$cur"
+    cur="$(dirname "$cur")"
+  done
+fi
 
 GIT="$PROJ/.git"
 if [ "$POST_OWNER_SWITCH" = 1 ]; then
-  # Broker already owns .git via host-identity switch. Do not apply named-user
-  # r-X on objects (would fight owner write needed for sync/object access).
-  # Parent traverse grants above still apply for absolute-path access.
-  say "ACL post-owner-switch: skip restrictive named-user ACL on .git (owner bits apply)"
+  # Broker already owns .git. Do not apply named-user ACL on .git/objects/worktree.
+  say "ACL post-owner-switch: skip named-user ACL under .git (owner bits apply)"
 else
   # Non-recursive rwx on .git directory only: create/remove HEAD.lock when the
   # target branch is the current checkout. Do NOT -R write the whole .git tree.
@@ -155,18 +193,17 @@ TIP_OID="$(runuser -u "$BROKER_USER" -- git \
 # Never create/remove HEAD.lock here — preserve any existing lock; fail closed.
 [ ! -e "$GIT/HEAD.lock" ] \
   || fail "HEAD.lock already present; refusing to disturb it: $GIT/HEAD.lock"
-# Non-destructive permission checks only. Lock creation is proven by throwaway
-# cross-UID CAS (exec step 0b), not by probing formal repos.
-runuser -u "$BROKER_USER" -- bash --noprofile --norc \
-  -c 'builtin test -w "$1"' _ "$GIT" \
-  || fail "aegl-promote cannot write .git directory (required for HEAD.lock)"
-runuser -u "$BROKER_USER" -- bash --noprofile --norc \
-  -c 'builtin test -w "$1"' _ "$GIT/logs/HEAD" \
-  || fail "aegl-promote cannot write logs/HEAD"
 
 if [ "$POST_OWNER_SWITCH" = 1 ]; then
-  # Owner-switch world: broker may write body/objects (needed for formal sync).
-  # Non-privileged identities must still be denied write.
+  # Owner bits: broker can write .git / worktree; non-priv must not.
+  runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+    -c 'builtin test -w "$1"' _ "$GIT" \
+    || fail "aegl-promote cannot write .git directory after owner switch"
+  if [ -e "$GIT/logs/HEAD" ]; then
+    runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+      -c 'builtin test -w "$1"' _ "$GIT/logs/HEAD" \
+      || fail "aegl-promote cannot write logs/HEAD after owner switch"
+  fi
   if runuser -u "$OPERATOR_USER" -- bash --noprofile --norc \
        -c 'builtin test -w "$1"' _ "$PROJ" 2>/dev/null; then
     fail "operator can write project root after post-owner-switch ACL"
@@ -178,8 +215,19 @@ if [ "$POST_OWNER_SWITCH" = 1 ]; then
   runuser -u "$BROKER_USER" -- bash --noprofile --norc \
     -c 'builtin test -w "$1"' _ "$PROJ" \
     || fail "aegl-promote cannot write project root after owner switch (sync requires it)"
-  say "ACL_RESULT=OK mode=post-owner-switch project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=perm_ok broker_worktree_write=expected"
+  # Operator read (group aegl-ro / design) — still required.
+  if ! runuser -u "$OPERATOR_USER" -- bash --noprofile --norc \
+       -c 'builtin test -r "$1"' _ "$PROJ" 2>/dev/null; then
+    fail "operator cannot read project root after post-owner-switch (aegl-ro read required)"
+  fi
+  say "ACL_RESULT=OK mode=post-owner-switch project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER broker_worktree_write=expected"
 else
+  runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+    -c 'builtin test -w "$1"' _ "$GIT" \
+    || fail "aegl-promote cannot write .git directory (required for HEAD.lock)"
+  runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+    -c 'builtin test -w "$1"' _ "$GIT/logs/HEAD" \
+    || fail "aegl-promote cannot write logs/HEAD"
   if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
     rm -f "$PROJ/.aegl-acl-probe"
     fail "aegl-promote can write project worktree — ACL too broad (use --post-owner-switch after identity switch)"

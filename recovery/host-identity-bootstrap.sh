@@ -716,6 +716,17 @@ scan_unhandled_hardlinks(){
 # --------------------------------------------------------------------------- #
 # switch tree apply (production function — also used by preflight on throwaway)
 # --------------------------------------------------------------------------- #
+# Strip extended/default ACLs inside a controlled project tree only.
+# chmod alone only shrinks the ACL mask; inherited named-user write (e.g. default
+# ACL from a parent temp dir) remains and can be unmasked by a later setfacl -m.
+_normalize_project_acl(){
+  local p="$1"
+  # -b: drop named user/group + mask (base owner/group/other from mode remain)
+  # -k: drop default ACL so new children do not re-inherit foreign write
+  run find -P "$p" \( -type f -o -type d \) -exec setfacl -b {} +
+  run find -P "$p" -type d -exec setfacl -k {} +
+}
+
 _switch_tree(){
   local p="$1"
   say "  --- tree $p"
@@ -741,6 +752,8 @@ _switch_tree(){
       run chmod 0600 "$f"
     done < <(find -P "$p/.git" -type f -print0 2>/dev/null)
   fi
+  # ACL normalize scoped to this project tree only (not home / Projects / AppProjects).
+  _normalize_project_acl "$p"
 }
 
 _install_post_switch_acl(){
@@ -763,6 +776,60 @@ _install_post_switch_acl(){
 # --------------------------------------------------------------------------- #
 # switch-preflight — one throwaway repo: real _switch_tree + CAS + broker sync
 # --------------------------------------------------------------------------- #
+_pf_dump_identity(){
+  local grepo="$1" label="$2"
+  local n u w r parent
+  parent="$(dirname "$grepo")"
+  say "  --- dump identity @ $label ---"
+  for n in "$grepo" "$grepo/body.txt" "$grepo/sub/f.txt" "$grepo/.git" "$grepo/.git/config" "$parent"; do
+    [ -e "$n" ] || continue
+    say "  getfacl $n"
+    getfacl -p "$n" 2>/dev/null | sed 's/^/    /' || true
+    for u in "$OPERATOR_USER" "$AI_USER" "$BROKER_USER"; do
+      w=0; r=0
+      as_user_test_w "$u" "$n" && w=1 || true
+      as_user_test_r "$u" "$n" && r=1 || true
+      say "    user=$u write=$w read=$r path=$n"
+    done
+  done
+}
+
+# zhong/aegl-ai cannot write; broker can operate; operator retains designed read.
+_pf_assert_identity_model(){
+  local grepo="$1" label="$2"
+  local ok=1
+  if as_user_test_w "$OPERATOR_USER" "$grepo/body.txt"; then
+    say "  FAIL@$label operator write body"; ok=0
+  fi
+  if as_user_test_w "$OPERATOR_USER" "$grepo/sub/f.txt"; then
+    say "  FAIL@$label operator write nested"; ok=0
+  fi
+  if as_user_test_w "$OPERATOR_USER" "$grepo/.git/config"; then
+    say "  FAIL@$label operator write .git/config"; ok=0
+  fi
+  if as_user_test_w "$AI_USER" "$grepo/body.txt"; then
+    say "  FAIL@$label aegl-ai write body"; ok=0
+  fi
+  if as_user_test_w "$AI_USER" "$grepo/.git/config"; then
+    say "  FAIL@$label aegl-ai write .git/config"; ok=0
+  fi
+  if ! as_user_test_w "$BROKER_USER" "$grepo"; then
+    say "  FAIL@$label broker cannot write project root"; ok=0
+  fi
+  if ! as_user_test_w "$BROKER_USER" "$grepo/body.txt"; then
+    say "  FAIL@$label broker cannot write body"; ok=0
+  fi
+  if ! as_user_test_r "$OPERATOR_USER" "$grepo/body.txt"; then
+    say "  FAIL@$label operator cannot read body (aegl-ro design)"; ok=0
+  fi
+  if [ "$ok" = 1 ]; then
+    say "  IDENTITY_MODEL@$label=OK"
+    return 0
+  fi
+  _pf_dump_identity "$grepo" "$label"
+  return 1
+}
+
 _cleanup_pf(){
   local st="${PF_ST:-}"
   if [ -n "$st" ] && [ -d "$st" ]; then
@@ -798,11 +865,14 @@ switch_preflight(){
   PF_ST="$(mktemp -d /var/tmp/aegl-host-switch-pf-XXXXXX)" || stop mktemp_failed "mktemp"
   trap _cleanup_pf EXIT
   chmod 0755 "$PF_ST"
+  # Inherited ACL scenario (keep): default u:zhong:rwx on parent so children
+  # receive named-user write that chmod-mask alone must NOT be trusted to remove.
   setfacl -m "u:${OPERATOR_USER}:rwx" "$PF_ST"
   setfacl -m "u:${BROKER_USER}:rwx" "$PF_ST"
   setfacl -m "u:${AI_USER}:r-x" "$PF_ST"
   setfacl -d -m "u:${OPERATOR_USER}:rwx" "$PF_ST" 2>/dev/null || true
   setfacl -d -m "u:${BROKER_USER}:rwx" "$PF_ST" 2>/dev/null || true
+  say "  INHERITED_ACL_SCENARIO=default u:${OPERATOR_USER}:rwx on $PF_ST (intentionally retained)"
 
   # Single allowlisted throwaway git repo (same tree for switch + CAS + sync).
   local GREPO="$PF_ST/AI-Engineering-Governance-Layer"
@@ -828,41 +898,29 @@ switch_preflight(){
   as_user_test_w "$OPERATOR_USER" "$GREPO/body.txt" \
     || stop preflight_before "operator should write before switch"
   say "  BEFORE_WRITE=ok"
+  # Prove inheritance landed named-user write on a child (scenario under test).
+  if getfacl -p "$GREPO/body.txt" 2>/dev/null | grep -q "user:${OPERATOR_USER}:rwx"; then
+    say "  INHERITED_NAMED_WRITE_PRESENT=yes (chmod-mask alone is insufficient)"
+  else
+    say "  INHERITED_NAMED_WRITE_PRESENT=no (getfacl dump for diagnosis)"
+    getfacl -p "$GREPO/body.txt" 2>/dev/null | sed 's/^/    /' || true
+  fi
 
   _switch_tree "$GREPO"
-
-  if as_user_test_w "$OPERATOR_USER" "$GREPO/body.txt"; then
-    stop preflight_after_zhong "zhong still can write body after _switch_tree"
-  fi
-  if as_user_test_w "$OPERATOR_USER" "$GREPO/sub/f.txt"; then
-    stop preflight_after_zhong_nested "zhong still can write nested after _switch_tree"
-  fi
-  if as_user_test_w "$OPERATOR_USER" "$GREPO/.git/config"; then
-    stop preflight_after_zhong_git "zhong still can write .git/config"
-  fi
-  say "  AFTER_ZHONG_WRITE=denied"
-  if as_user_test_w "$AI_USER" "$GREPO/body.txt"; then
-    stop preflight_after_ai "aegl-ai can write body after _switch_tree"
-  fi
-  if as_user_test_w "$AI_USER" "$GREPO/.git/config"; then
-    stop preflight_after_ai_git "aegl-ai can write .git/config"
-  fi
-  say "  AFTER_AI_WRITE=denied"
-  as_user_test_w "$BROKER_USER" "$GREPO" \
-    || stop preflight_broker_root "broker cannot write project root after _switch_tree"
-  as_user_test_w "$BROKER_USER" "$GREPO/body.txt" \
-    || stop preflight_broker_body "broker cannot write body after _switch_tree"
-  say "  AFTER_BROKER_WRITE=ok"
+  _pf_assert_identity_model "$GREPO" "after_switch_tree" \
+    || stop preflight_after_switch "identity model failed after _switch_tree"
 
   # Post-switch: root `git show` without safe.directory must not be the delivery path.
   if git -C "$GREPO" show "$TIP_BLOB:recovery/install-promote-target-acl.sh" >/dev/null 2>&1; then
-    say "  WARN: root git show unexpectedly worked without safe.directory (ownership may still be permissive)"
+    say "  WARN: root git show unexpectedly worked without safe.directory"
   else
     say "  POST_CHOWN_GIT_SHOW_AS_ROOT=blocked_or_failed (expected under dubious ownership)"
   fi
-  # Delivery path after chown: materialized script file (not git show | bash).
+  # Delivery path after chown: materialized script (not git show | bash).
   _install_post_switch_acl "$GREPO" "refs/heads/main"
   say "  ACL_FROM_MATERIALIZED_SCRIPT=ok"
+  _pf_assert_identity_model "$GREPO" "after_post_owner_acl" \
+    || stop preflight_after_acl "identity model failed after post-owner ACL"
 
   local body_before body_after
   body_before="$(runuser -u "$BROKER_USER" -- cat "$GREPO/body.txt")"
@@ -878,7 +936,9 @@ switch_preflight(){
     || stop preflight_sync "broker restore/sync failed"
   [ "$(runuser -u "$BROKER_USER" -- cat "$GREPO/body.txt")" = "b" ] \
     || stop preflight_sync_body "broker sync did not land tip body"
-  say "  POST_SWITCH_ORDER=materialize→_switch_tree→materialized_ACL→broker_CAS→broker_sync OK"
+  _pf_assert_identity_model "$GREPO" "after_broker_sync" \
+    || stop preflight_after_sync "identity model failed after broker sync"
+  say "  POST_SWITCH_ORDER=switch→post_owner_ACL→broker_CAS→broker_sync OK"
 
   mkdir -p "$HOST_IDENTITY_STATE"
   printf 'commit=%s preflight=OK ts=%s script_cache=%s\n' \
