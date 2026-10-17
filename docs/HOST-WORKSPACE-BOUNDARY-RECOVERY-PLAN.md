@@ -2889,12 +2889,12 @@ plan mode → PREP_READY_NOT_SWITCHED; PARENT_RENAME_PROTECTION=UNRESOLVED
 4. **`broker-verified` absent** — write only via `broker-bind --write-marker` after match (not a bare touch).
 5. **Cross-UID switch-preflight** — requires root; run before any formal chown.
 
-### Trusted commands (substitute TIP = this Round 51 commit full SHA)
+### Trusted commands (fixed SHA)
 
 ```bash
 set -euo pipefail
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=<FULL_SHA_THIS_COMMIT>
+TIP=23b2aceb634a7cafb5d9cdf021ee9fb656854c03
 
 # Dry review (no host change):
 git -C "$AEGL" show "$TIP:recovery/host-identity-bootstrap.sh" \
