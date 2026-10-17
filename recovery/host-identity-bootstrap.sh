@@ -532,7 +532,7 @@ verify_target(){
     if as_user_test_r "$OPERATOR_USER" "$p"; then say "  zhong can read project root: ok"
     else say "  zhong can read project root: FAIL"; VFAIL=$((VFAIL+1)); fi
   fi
-  say "    PARENT_RENAME_PROTECTION=UNRESOLVED"
+  say "    PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED"
 }
 do_verify(){
   phase "verify"
@@ -1004,6 +1004,22 @@ switch_preconditions(){
   fi
   say "  broker marker: $(cat "$BROKER_MARKER")"
   say "  preflight stamp: $(cat "$PREFLIGHT_STAMP")"
+  # Entry-bind pack: enforce live mounts only when policy installed (not marker-alone).
+  if [ -f /etc/aegl/entry-bind/policy ]; then
+    local eb_checker=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
+    [ -f "$eb_checker" ] || eb_checker="$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh"
+    if [ ! -f "$eb_checker" ]; then
+      say "  REFUSE: entry-bind policy present but require-entry-binds.sh missing"
+      return 1
+    fi
+    if ! bash "$eb_checker"; then
+      say "  REFUSE: entry-bind policy present but live findmnt mounts incomplete"
+      return 1
+    fi
+    say "  ENTRY_BIND=live_ok (policy+findmnt)"
+  else
+    say "  ENTRY_BIND=pack_not_installed (policy absent; not claiming protection)"
+  fi
   return 0
 }
 
@@ -1013,7 +1029,7 @@ switch(){
     say "  (plan) switch would require:"
     switch_preconditions || true
     say "  SCOPE=only three formal trees"
-    say "  PARENT_RENAME_PROTECTION=UNRESOLVED"
+    say "  PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED"
     say "  -> apply is NOT runnable from plan mode."
     return 0
   fi
@@ -1047,7 +1063,7 @@ switch(){
 
   say "  HOME traverse for broker: setfacl -n --x on $HOME_DIR (no mask replay)"
   run setfacl -n -m "u:$BROKER_USER:--x" "$HOME_DIR"
-  say "  PARENT_RENAME_PROTECTION=UNRESOLVED"
+  say "  PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED (install-parent-entry-bind.sh --apply after promote)"
   say "  LOGIN_GROUP_NOTE: refresh zhong session for $HUMAN_GROUP"
   say "SWITCH_RESULT=OK"
 }
@@ -1093,7 +1109,7 @@ main(){
       switch
       say ""
       say "NOTE: use prepare / cleanup / switch-apply packs separately."
-      say "PARENT_RENAME_PROTECTION=UNRESOLVED"
+      say "PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED"
       say "AI_BOUNDARY=PREP_READY_NOT_SWITCHED"
       ;;
     prepare) prepare ;;

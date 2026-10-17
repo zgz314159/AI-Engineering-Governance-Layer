@@ -57,6 +57,6 @@ say "== S2 verify =="
 boot verify
 
 say "HOST_IDENTITY_SWITCH_APPLY_RESULT=OK"
-say "PARENT_RENAME_PROTECTION=UNRESOLVED"
+say "PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED"
 say "AI_BOUNDARY=BLOCKED until parent rename addressed separately"
 say "STOP_AT=complete"

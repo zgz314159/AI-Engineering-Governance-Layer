@@ -1,0 +1,9 @@
+[Unit]
+Description=AEGL five entry-point RW self-binds (parents then projects)
+Documentation=file:///usr/local/lib/aegl-entry-bind/PARENT-ENTRY-BIND.md
+DefaultDependencies=no
+Requires=home-zhong-Projects.mount home-zhong-AppProjects.mount home-zhong-Projects-AI\x2dEngineering\x2dGovernance\x2dLayer.mount home-zhong-Projects-Google\x2dAndroid\x2dAgent\x2dDevelopment\x2dStack.mount home-zhong-AppProjects-KeepLab\x2dRelay.mount
+After=home-zhong-Projects.mount home-zhong-AppProjects.mount home-zhong-Projects-AI\x2dEngineering\x2dGovernance\x2dLayer.mount home-zhong-Projects-Google\x2dAndroid\x2dAgent\x2dDevelopment\x2dStack.mount home-zhong-AppProjects-KeepLab\x2dRelay.mount
+
+[Install]
+WantedBy=multi-user.target

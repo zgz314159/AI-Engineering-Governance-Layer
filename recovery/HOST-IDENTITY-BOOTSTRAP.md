@@ -27,4 +27,4 @@ Scripts are materialized to `/var/lib/aegl/host-identity/scripts/<TIP>/` **befor
 
 ## Gaps
 
-`PARENT_RENAME_PROTECTION=UNRESOLVED` · `AI_BOUNDARY=BLOCKED`
+`PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED` (units + installer in tip; formal `--apply` / live mounts after promote — see `recovery/parent-entry-bind/`) · `AI_BOUNDARY=BLOCKED` · `FORMAL_DEPLOY=NOT_DONE`

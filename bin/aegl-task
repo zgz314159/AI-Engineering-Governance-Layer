@@ -315,6 +315,20 @@ require_broker() {
   identity_probe >&2 || die "promotion requires a VERIFIED independent broker (socket path/owner is not authorization; no env bypass)"
 }
 
+# When entry-bind pack policy is installed, refuse unless live findmnt mountpoints match.
+# No policy ⇒ no-op (pack not deployed). Never treats marker/policy alone as protection.
+require_parent_entry_binds() {
+  local checker=""
+  if [ -f /usr/local/lib/aegl-entry-bind/require-entry-binds.sh ]; then
+    checker=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
+  elif [ -f "$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh" ]; then
+    checker="$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh"
+  else
+    return 0
+  fi
+  bash "$checker" || die "parent entry binds required (live findmnt) but missing or incomplete"
+}
+
 # trusted-controller primitive: run an arbitrary command in the sandbox for a task.
 # It is NOT an AI entry (`bin/aegl-ai` is) and requires token authentication.
 controller_probe() {
@@ -350,6 +364,7 @@ broker_call() { # <request-json>
 task_register() {
   local id="${1:?task register <id>}" td wt proj branch base req
   _verify_paths "$id"
+  require_parent_entry_binds
   branch="$(task_field "$td/task.json" branch)"; base="$(task_field "$td/task.json" base)"
   # Exact target_ref per project (AEGL=main, Stack/KeepLab=master). Never rename branches.
   req="$(python3 -c 'import json,os,sys;sys.path.insert(0,os.path.join(sys.argv[6],"recovery"));import promotion_core as c;ref=c.target_ref_for(os.path.basename(sys.argv[2]));print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":sys.argv[5],"target_ref":ref}))' \
@@ -360,6 +375,7 @@ task_register() {
 task_record() {
   local id="${1:?task record <id>}" req
   _verify_paths "$id"
+  require_parent_entry_binds
   req="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"record","task_id":sys.argv[1],"verify_result":"PASS"}))' "$id")"
   broker_call "$req"
 }
@@ -372,6 +388,7 @@ task_promote() {
   controller_auth || die "task promote authentication failed"
   _verify_paths "$id"
   require_broker   # default-deny: a verified independent broker is mandatory
+  require_parent_entry_binds
   local reply rc
   reply="$(broker_call "{\"protocol\":\"AEGL-BROKER/1\",\"op\":\"promote\",\"task_id\":\"$id\"}")"; rc=$?
   say "BROKER_REPLY=$reply"

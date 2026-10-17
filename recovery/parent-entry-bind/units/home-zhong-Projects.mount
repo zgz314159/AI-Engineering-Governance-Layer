@@ -1,0 +1,16 @@
+[Unit]
+Description=AEGL entry RW self-bind /home/zhong/Projects
+Documentation=file:///usr/local/lib/aegl-entry-bind/PARENT-ENTRY-BIND.md
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target aegl-entry-bind.target
+After=local-fs-pre.target
+
+[Mount]
+What=/home/zhong/Projects
+Where=/home/zhong/Projects
+Type=none
+Options=bind,rw
+
+[Install]
+WantedBy=aegl-entry-bind.target

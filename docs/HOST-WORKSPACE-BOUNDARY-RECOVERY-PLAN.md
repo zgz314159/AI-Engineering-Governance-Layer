@@ -2984,3 +2984,24 @@ PARENT_RENAME_PROTECTION=UNRESOLVED
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 55: parent-entry RW self-bind pack (source only; not installed)
+
+Authorized packaging only — **no sudo, no formal mount install, no promote, no push**.
+
+Independent checkout work (not claimed on older baselines):
+
+| Item | Behavior |
+|---|---|
+| Trial script | `recovery/parent-rename-bind-mount-trial.sh` incorporated byte-identical to out-of-tree PASS (`sha256=90c91f26963a3a98c5f9daceccf580b1ede82f1ef176a040f54606f0e6b2f0a1`); not re-run |
+| Units | five RW self-bind `.mount` + `aegl-entry-bind.target`; parents before children; names via `systemd-escape -p --suffix=mount` |
+| Installer | `recovery/install-parent-entry-bind.sh` default plan; `--apply` / `--remove`; conflict stop (fstab / foreign unit / foreign live mount) |
+| Enforce | `require-entry-binds.sh` — policy present ⇒ live `findmnt --mountpoint` required; wired into `aegl-task` register/record/promote + host-identity `switch_preconditions` |
+| Formal | `FORMAL_DEPLOY=NOT_DONE`; reboot/live proof `NOT_RUN` |
+
+```text
+PARENT_RENAME_PROTECTION=PACK_IN_TIP_NOT_INSTALLED
+FORMAL_DEPLOY=NOT_DONE
+AI_BOUNDARY=BLOCKED
+LIVE_MOUNT_AFTER_APPLY=NOT_RUN
+```
+
