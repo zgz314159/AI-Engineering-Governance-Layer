@@ -2836,3 +2836,90 @@ PUSH=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 51: host-identity switch prep (fail-stop + three-tree scope)
+
+Authorized preparation only — **no sudo, no formal permission switch, no
+node_modules delete, no broker-verified write, no Cursor rules, no push**.
+
+### Migration status (reuse; do not re-run)
+
+KeepLab → AppProjects migrate and three-repo promote **completed** on the host.
+Formal tips (read-only reference this round):
+
+| Repo | Branch | Full SHA | Path |
+|---|---|---|---|
+| AEGL | main | `c12c9b9cac7fa1b5b7e288293e87dc75a159b29c` | `/home/zhong/Projects/AI-Engineering-Governance-Layer` |
+| Stack | master | `064fd9ea04171cc2e0aaecd7db0ffe936a209894` | `/home/zhong/Projects/Google-Android-Agent-Development-Stack` |
+| KeepLab | master | `626ce29bbf95d94f55a34c4d630a87492f44a47b` | `/home/zhong/AppProjects/KeepLab-Relay` |
+
+Installed promote broker tip-file SHA256 **matches** formal main for
+`aegl-promote-broker` / `promotion_broker.py` / `promotion_core.py`; unit
+**active**; `/etc/aegl/broker-verified` **absent**. Do not reinstall or re-run
+broker/model acceptance.
+
+### Bootstrap / exec changes (isolation branch `plan/host-identity-switch`)
+
+| Item | Behavior |
+|---|---|
+| Fail-stop | `set -euo pipefail`; `run` stops with `STOP_AT=run_failed_<phase>`; no success after mid-failure |
+| Write checks | `runuser` + `bash -c 'builtin test -w'` (never `/usr/bin/test`) |
+| Delivery | `--commit <40-hex>` + optional `--aegl`; piped `git show TIP:script \| bash -s` (no `BASH_SOURCE` dependency) |
+| Scope | chown/chmod only the three formal trees; skip `nlink>1` files; `find -P`; no Projects/AppProjects chattr |
+| deps-plan | freeze exact two `node_modules`; declare `/var/lib/aegl/rebuildable-deps/...`; no delete |
+| broker-bind | tip/file match + active unit + `AEGL_BUSINESS_ROOT`; marker only with `--write-marker` + evidence line |
+| switch-preflight | throwaway writable→deny + broker CAS; without root → `NOT_RUN` (not fake PASS) |
+| exec pack | `recovery/host-identity-exec.sh`: preflight → broker-bind → deps-plan → prepare; `--apply-switch` gated |
+
+### Checks this round
+
+```text
+bash -n host-identity-bootstrap.sh / host-identity-exec.sh → OK
+deps-plan → DEPS_PLAN_OK (both node_modules PRESENT; tracked=0)
+selftest → SELFTEST_RESULT=OK
+switch-preflight → NOT_RUN need_root (expected without sudo)
+broker tip/file match → yes×3; unit=active; marker=absent
+plan mode → PREP_READY_NOT_SWITCHED; PARENT_RENAME_PROTECTION=UNRESOLVED
+```
+
+### Gaps (honest; not closed by this tip)
+
+1. **PARENT_RENAME_PROTECTION=UNRESOLVED** — parent dir replace/rename not protected; do not treat file non-write as full isolation.
+2. **`aegl-ro` group absent** until `prepare` (needs root); operator must refresh login group after add.
+3. **Two `node_modules` still present** — wire `EXTERNAL_*` + `NODE_PATH` before operator delete; this tip does not delete.
+4. **`broker-verified` absent** — write only via `broker-bind --write-marker` after match (not a bare touch).
+5. **Cross-UID switch-preflight** — requires root; run before any formal chown.
+
+### Trusted commands (substitute TIP = this Round 51 commit full SHA)
+
+```bash
+set -euo pipefail
+AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
+TIP=<FULL_SHA_THIS_COMMIT>
+
+# Dry review (no host change):
+git -C "$AEGL" show "$TIP:recovery/host-identity-bootstrap.sh" \
+  | bash -s -- --commit "$TIP" --aegl "$AEGL" plan
+git -C "$AEGL" show "$TIP:recovery/host-identity-bootstrap.sh" \
+  | bash -s -- --commit "$TIP" --aegl "$AEGL" deps-plan
+git -C "$AEGL" show "$TIP:recovery/host-identity-exec.sh" \
+  | sudo bash -s -- --commit "$TIP" --dry-run
+
+# Later (separate approval): bind marker, then apply switch after deps removed:
+git -C "$AEGL" show "$TIP:recovery/host-identity-exec.sh" \
+  | sudo bash -s -- --commit "$TIP" --write-marker
+# after EXTERNAL_* rebuild + operator remove of the two frozen paths:
+git -C "$AEGL" show "$TIP:recovery/host-identity-exec.sh" \
+  | sudo bash -s -- --commit "$TIP" --write-marker --apply-switch
+```
+
+```text
+KEEPLAB_MIGRATE=DONE formal_main=c12c9b9 stack=064fd9ea keeplab=626ce29
+HOST_IDENTITY=PREP_READY_NOT_SWITCHED
+BROKER=INSTALLED_ACTIVE tip_match=yes marker=absent
+DEPS=PRESENT_WIRED_NOT_DELETED
+PARENT_RENAME_PROTECTION=UNRESOLVED
+SWITCH=NOT_THIS_ROUND
+PUSH=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+
