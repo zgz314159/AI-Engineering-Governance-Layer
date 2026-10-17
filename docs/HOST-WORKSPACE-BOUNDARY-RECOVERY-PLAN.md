@@ -3039,3 +3039,25 @@ LIVE_MOUNT_AFTER_APPLY=NOT_RUN
 HERMES_BROKER_HOST_ENTRY=NOT_RUN
 ```
 
+## Round update 57: self-bind mountinfo gate + foreign unit scan + formal sync delivery
+
+Authorized source fix only — **no sudo, no promote, no install, no push**.
+
+| Item | Change |
+|---|---|
+| Mount gate | Drop findmnt OPTIONS bind/rbind; require unit What=Where, exact TARGET, FSROOT==path, mountinfo root==mnt==path + rw |
+| Ownership | Scan all unit search paths + FragmentPath/DropInPaths before write; absent `/etc` file must not hide foreign config |
+| Formal sync | Delivery binds main baseline (`formal_pre_cas_check`); after APPLIED run `sync_formal_to_tip` as `aegl-promote` (BEGIN_FORMAL_SYNC); check main/HEAD/index/worktree |
+| Delivery | `trusted-delivery.sh`: one root mktemp, three installers + helpers extracted+hashed, EXIT cleanup, no worktree `--force`, broker `decision` must match |
+
+Parse-only: `mountinfo-samples.txt` — **not** host mount acceptance. Root live verify: `NOT_RUN`.
+
+```text
+PARENT_RENAME_PROTECTION=PACK_IN_TIP_GATES_WIRED_NOT_INSTALLED
+FORMAL_DEPLOY=NOT_DONE
+AI_BOUNDARY=BLOCKED
+LIVE_MOUNT_AFTER_APPLY=NOT_RUN
+HERMES_BROKER_HOST_ENTRY=NOT_RUN
+FORMAL_SYNC_AFTER_PROMOTE=IN_DELIVERY_SCRIPT_NOT_RUN
+```
+

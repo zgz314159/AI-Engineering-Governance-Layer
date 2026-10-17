@@ -13,80 +13,52 @@ making each path a RW self-bind mountpoint (`mount --bind PATH PATH`).
 | 4 | `…/Google-Android-Agent-Development-Stack` | `home-zhong-Projects-Google\x2dAndroid\x2dAgent\x2dDevelopment\x2dStack.mount` |
 | 5 | `…/KeepLab-Relay` | `home-zhong-AppProjects-KeepLab\x2dRelay.mount` |
 
-Parents start before children (`Requires=` / `After=` on child units). Stop uses
-**explicit reverse order** (children → parents → target); active unit name alone
-is not pack ownership.
-
-## What this does / does not
-
-- **Does:** block rename/exchange of those five entry names (mountpoint → typically `EBUSY`).
-- **Does not:** block writes inside project trees by the broker owner; siblings under Projects/AppProjects remain normal directories; no chattr; no fstab edits; no agent-instruction overwrite.
-
-## Evidence (trial)
-
-`recovery/parent-rename-bind-mount-trial.sh` was validated out-of-tree (private mountns)
-before this tip. Incorporating the file into source does **not** claim older baselines
-contained it. Do not re-run that trial as part of install.
-
 ## Production gate (`require-entry-binds.sh`)
 
-Fixed policy path (no environment override):
-
-- `/etc/aegl/entry-bind/policy`
+Fixed policy: `/etc/aegl/entry-bind/policy` (no env override).
 
 | State | Behavior |
 |---|---|
-| Policy absent | `ENTRY_BIND_STATE=NOT_DEPLOYED` — exit 0; **not** “protection OK” |
-| Policy present | Installed checker must exist; policy must list exactly the five paths; each must be an exact `findmnt --mountpoint` with **bind/rbind + rw** (not arbitrary mountpoint, not RO bind). Fail closed on missing checker, corrupt policy, or missing mounts. |
+| Policy absent | `NOT_DEPLOYED` / `not_claimed` — not “protection OK” |
+| Policy present | Installed checker + exact five paths; each verified as RW **self-bind** |
 
-Installed checker path: `/usr/local/lib/aegl-entry-bind/require-entry-binds.sh`
+Self-bind verification (no `findmnt OPTIONS` bind/rbind token):
 
-## Enforcement wiring (host entry ≠ tip source)
+1. Trusted unit at `/etc/systemd/system/<unit>`: `What=Where=<path>`, Options include `rw`; not a symlink; no drop-ins; `FragmentPath` match
+2. Exact `findmnt --mountpoint` TARGET
+3. `FSROOT` == path; SOURCE bracket form if present must equal path
+4. `/proc/self/mountinfo` root == mountpoint == path with explicit `rw` (not `ro`)
 
-Same checker is called from:
+Parse-only samples: `mountinfo-samples.txt` via
+`require-entry-binds.sh --check-mountinfo-sample …` (**not** host mount acceptance).
+
+## Ownership / uninstall
+
+- Active unit name ≠ ownership.
+- Scan all systemd unit search paths; foreign same-name unit/drop-in/`FragmentPath` ⇒ refuse **before write** (even if `/etc/systemd/system` lacks the file).
+- `--remove`: ownership first; reverse stop; verify unmounted; keep policy/units on failure; exact-file delete only.
+
+## Host entry wiring
 
 | Host entry | When | How tip reaches host |
 |---|---|---|
-| `/usr/local/lib/aegl-model/aegl-hermes-sandbox` | Before sandbox prepare | `recovery/install-model-broker.sh --commit <TIP>` |
-| `/usr/local/lib/aegl-promote/promotion_broker.py` | Before `apply_to_ref` | `recovery/install-broker.sh --commit <TIP>` + `systemctl restart aegl-promote-broker` |
-| `bin/aegl-task` / host-identity switch | Defense-in-depth | Task binary from tip or PATH; **not** a substitute for broker/Hermes gates |
-
-**Source tip alone does not update installed launcher/broker.** After promote, reinstall
-model + promote broker from the fixed SHA for those gates to take effect on the host.
-
-## Install / remove
-
-See `recovery/install-parent-entry-bind.sh` (default `--plan`; explicit `--apply` / `--remove`).
-
-Installed artifacts:
-
-- `/etc/systemd/system/aegl-entry-bind.target`
-- `/etc/systemd/system/home-zhong-*.mount` (five units)
-- `/usr/local/lib/aegl-entry-bind/require-entry-binds.sh`
-- `/usr/local/lib/aegl-entry-bind/PARENT-ENTRY-BIND.md`
-- `/etc/aegl/entry-bind/policy` (lists paths + commit; **not** sufficient alone)
-
-### Ownership / uninstall
-
-- Same-named active mount unit ≠ owned by this pack.
-- Ownership requires: unit file at `/etc/systemd/system/<unit>` (not symlink), content
-  hash match to tip, no `.d` drop-ins, `FragmentPath` match, empty `DropInPaths`.
-- Unknown/foreign/symlink/drop-in → refuse (no overwrite, no stack).
-- `--remove`: ownership check first; reverse stop; verify unmounted; on failure keep
-  policy+units and exit non-zero; delete only hash-matched exact files (no `rm -rf` LIBDIR).
+| `/usr/local/lib/aegl-model/aegl-hermes-sandbox` | Before sandbox prepare | `install-model-broker.sh` |
+| `/usr/local/lib/aegl-promote/promotion_broker.py` | Before `apply_to_ref` | `install-broker.sh` + restart |
+| `aegl-task` / host-identity | Defense-in-depth | Not a substitute for broker/Hermes |
 
 ## Trusted delivery
 
-zhong must not read formal `.git` after host-identity switch. Use:
+Use `trusted-delivery.sh` (extract from fixed TIP into root-only mktemp, hash-verify, run):
 
-1. Trusted import of tip objects into formal AEGL (`git fetch` with command-level
-   `safe.directory=<exact path>` only — never `*`).
-2. Normal broker register/record/promote onto `refs/heads/main`.
-3. Root extracts installer from fixed SHA into a root-only directory, verifies
-   sha256, then runs that copy — never `sudo` a user-writable tree script.
+1. Import objects (`safe.directory=<exact>` only)
+2. `formal_pre_cas_check` (bind real main baseline; refuse real dirty)
+3. Broker register/record/promote with JSON `decision` checks
+4. `sync_formal_to_tip` as `aegl-promote` (reuse `BEGIN_FORMAL_SYNC`; main/HEAD/index/worktree)
+5. Install entry-bind + reinstall promote/model brokers from the same root-only dir
+6. EXIT cleans only this delivery’s explicit paths; candidate `worktree remove` without `--force`
 
-## Status labels
+## Status
 
-- `FORMAL_DEPLOY=NOT_DONE` until a trusted terminal runs `--apply` after promote
-- Live mount / broker+Hermes reinstall proof: `NOT_RUN` until observed
+- `FORMAL_DEPLOY=NOT_DONE` until trusted terminal runs delivery `--apply` path
+- Live host mount proof: `NOT_RUN` until observed
 - `AI_BOUNDARY=BLOCKED`
