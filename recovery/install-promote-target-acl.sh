@@ -15,6 +15,7 @@
 set -uo pipefail
 
 REPO=""; PROJECT=""; COMMIT=""; TARGET_REF=""; BUSINESS_ROOT=""
+POST_OWNER_SWITCH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
@@ -22,11 +23,17 @@ while [ $# -gt 0 ]; do
     --commit) COMMIT="${2:-}"; shift 2 ;;
     --target-ref) TARGET_REF="${2:-}"; shift 2 ;;
     --business-root) BUSINESS_ROOT="${2:-}"; shift 2 ;;
+    # After host-identity switch, aegl-promote owns the tree and must sync the
+    # worktree; do not require "broker cannot write body/objects".
+    --post-owner-switch) POST_OWNER_SWITCH=1; shift ;;
     *) printf 'ACL_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 
 BROKER_USER="aegl-promote"
+OPERATOR_USER="${SUDO_USER:-zhong}"
+[ "$OPERATOR_USER" = root ] && OPERATOR_USER=zhong
+AI_USER="aegl-ai"
 # Exact project basenames that may receive promote ACL (not a home-wide root).
 ALLOWED_SYSTEM='AI-Engineering-Governance-Layer Google-Android-Agent-Development-Stack'
 ALLOWED_BUSINESS='KeepLab-Relay'
@@ -99,34 +106,41 @@ while [ "$cur" != "/" ]; do
 done
 
 GIT="$PROJ/.git"
-# Non-recursive rwx on .git directory only: create/remove HEAD.lock when the
-# target branch is the current checkout. Do NOT -R write the whole .git tree.
-setfacl -m "u:${BROKER_USER}:rwx" "$GIT" || fail "setfacl .git dir (HEAD.lock)"
-if [ -d "$GIT/objects" ]; then
-  setfacl -R -m "u:${BROKER_USER}:r-X" "$GIT/objects" || fail "setfacl objects"
-fi
-for f in config packed-refs; do
-  [ -e "$GIT/$f" ] || continue
-  setfacl -m "u:${BROKER_USER}:r--" "$GIT/$f" || fail "setfacl $f"
-done
-# HEAD + HEAD reflog: checked-out update-ref locks HEAD and appends logs/HEAD.
-setfacl -m "u:${BROKER_USER}:rw-" "$GIT/HEAD" || fail "setfacl HEAD"
-mkdir -p "$GIT/logs" "$GIT/refs/heads" "$GIT/logs/refs/heads" || fail "mkdir refs/logs"
-if [ ! -e "$GIT/logs/HEAD" ]; then
-  touch "$GIT/logs/HEAD" || fail "touch logs/HEAD"
-  chown --reference="$GIT" "$GIT/logs/HEAD" 2>/dev/null || true
-fi
-setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs" || fail "setfacl logs"
-setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/HEAD" || fail "setfacl logs/HEAD"
-setfacl -m "u:${BROKER_USER}:r-x" "$GIT/refs" || fail "setfacl refs"
-setfacl -m "u:${BROKER_USER}:rwx" "$GIT/refs/heads" || fail "setfacl refs/heads"
-setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs/refs" 2>/dev/null || true
-setfacl -m "u:${BROKER_USER}:rwx" "$GIT/logs/refs/heads" || fail "setfacl logs/refs/heads"
-if [ -e "$GIT/refs/heads/$BRANCH_NAME" ]; then
-  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/refs/heads/$BRANCH_NAME" || fail "setfacl refs/heads/$BRANCH_NAME"
-fi
-if [ -e "$GIT/logs/refs/heads/$BRANCH_NAME" ]; then
-  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/refs/heads/$BRANCH_NAME" || fail "setfacl logs/$BRANCH_NAME"
+if [ "$POST_OWNER_SWITCH" = 1 ]; then
+  # Broker already owns .git via host-identity switch. Do not apply named-user
+  # r-X on objects (would fight owner write needed for sync/object access).
+  # Parent traverse grants above still apply for absolute-path access.
+  say "ACL post-owner-switch: skip restrictive named-user ACL on .git (owner bits apply)"
+else
+  # Non-recursive rwx on .git directory only: create/remove HEAD.lock when the
+  # target branch is the current checkout. Do NOT -R write the whole .git tree.
+  setfacl -m "u:${BROKER_USER}:rwx" "$GIT" || fail "setfacl .git dir (HEAD.lock)"
+  if [ -d "$GIT/objects" ]; then
+    setfacl -R -m "u:${BROKER_USER}:r-X" "$GIT/objects" || fail "setfacl objects"
+  fi
+  for f in config packed-refs; do
+    [ -e "$GIT/$f" ] || continue
+    setfacl -m "u:${BROKER_USER}:r--" "$GIT/$f" || fail "setfacl $f"
+  done
+  # HEAD + HEAD reflog: checked-out update-ref locks HEAD and appends logs/HEAD.
+  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/HEAD" || fail "setfacl HEAD"
+  mkdir -p "$GIT/logs" "$GIT/refs/heads" "$GIT/logs/refs/heads" || fail "mkdir refs/logs"
+  if [ ! -e "$GIT/logs/HEAD" ]; then
+    touch "$GIT/logs/HEAD" || fail "touch logs/HEAD"
+    chown --reference="$GIT" "$GIT/logs/HEAD" 2>/dev/null || true
+  fi
+  setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs" || fail "setfacl logs"
+  setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/HEAD" || fail "setfacl logs/HEAD"
+  setfacl -m "u:${BROKER_USER}:r-x" "$GIT/refs" || fail "setfacl refs"
+  setfacl -m "u:${BROKER_USER}:rwx" "$GIT/refs/heads" || fail "setfacl refs/heads"
+  setfacl -m "u:${BROKER_USER}:r-x" "$GIT/logs/refs" 2>/dev/null || true
+  setfacl -m "u:${BROKER_USER}:rwx" "$GIT/logs/refs/heads" || fail "setfacl logs/refs/heads"
+  if [ -e "$GIT/refs/heads/$BRANCH_NAME" ]; then
+    setfacl -m "u:${BROKER_USER}:rw-" "$GIT/refs/heads/$BRANCH_NAME" || fail "setfacl refs/heads/$BRANCH_NAME"
+  fi
+  if [ -e "$GIT/logs/refs/heads/$BRANCH_NAME" ]; then
+    setfacl -m "u:${BROKER_USER}:rw-" "$GIT/logs/refs/heads/$BRANCH_NAME" || fail "setfacl logs/$BRANCH_NAME"
+  fi
 fi
 
 TIP_OID="$(runuser -u "$BROKER_USER" -- git \
@@ -149,14 +163,30 @@ runuser -u "$BROKER_USER" -- bash --noprofile --norc \
 runuser -u "$BROKER_USER" -- bash --noprofile --norc \
   -c 'builtin test -w "$1"' _ "$GIT/logs/HEAD" \
   || fail "aegl-promote cannot write logs/HEAD"
-if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
-  rm -f "$PROJ/.aegl-acl-probe"
-  fail "aegl-promote can write project worktree — ACL too broad"
-fi
-# Recursive write must remain absent on objects (spot-check: cannot create under objects).
-if runuser -u "$BROKER_USER" -- touch "$GIT/objects/.aegl-acl-probe" 2>/dev/null; then
-  rm -f "$GIT/objects/.aegl-acl-probe"
-  fail "aegl-promote can write .git/objects — ACL too broad"
-fi
 
-say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=perm_ok head_reflog=perm_ok"
+if [ "$POST_OWNER_SWITCH" = 1 ]; then
+  # Owner-switch world: broker may write body/objects (needed for formal sync).
+  # Non-privileged identities must still be denied write.
+  if runuser -u "$OPERATOR_USER" -- bash --noprofile --norc \
+       -c 'builtin test -w "$1"' _ "$PROJ" 2>/dev/null; then
+    fail "operator can write project root after post-owner-switch ACL"
+  fi
+  if runuser -u "$AI_USER" -- bash --noprofile --norc \
+       -c 'builtin test -w "$1"' _ "$PROJ" 2>/dev/null; then
+    fail "aegl-ai can write project root after post-owner-switch ACL"
+  fi
+  runuser -u "$BROKER_USER" -- bash --noprofile --norc \
+    -c 'builtin test -w "$1"' _ "$PROJ" \
+    || fail "aegl-promote cannot write project root after owner switch (sync requires it)"
+  say "ACL_RESULT=OK mode=post-owner-switch project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=perm_ok broker_worktree_write=expected"
+else
+  if runuser -u "$BROKER_USER" -- touch "$PROJ/.aegl-acl-probe" 2>/dev/null; then
+    rm -f "$PROJ/.aegl-acl-probe"
+    fail "aegl-promote can write project worktree — ACL too broad (use --post-owner-switch after identity switch)"
+  fi
+  if runuser -u "$BROKER_USER" -- touch "$GIT/objects/.aegl-acl-probe" 2>/dev/null; then
+    rm -f "$GIT/objects/.aegl-acl-probe"
+    fail "aegl-promote can write .git/objects — ACL too broad"
+  fi
+  say "ACL_RESULT=OK project=$BASE target_ref=$TARGET_REF tip=$TIP_OID user=$BROKER_USER head_lock=perm_ok head_reflog=perm_ok"
+fi

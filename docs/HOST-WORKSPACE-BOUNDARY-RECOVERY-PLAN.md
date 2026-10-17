@@ -2923,3 +2923,27 @@ PUSH=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 52: host-identity gap close (preflight/deps/hardlink/broker evidence)
+
+Authorized prep only — **no sudo, no formal switch, no in-tree delete, no push**.
+
+### Fixes on tip `e4fda24…`
+
+| Gap | Fix |
+|---|---|
+| Preflight order | root creates `PF_ST` (global cleanup); ACL grants zhong/broker/ai; `aegl-ro` via explicit host prep before formal chown; no use of missing group; `--skip-preflight` for same-exec switch |
+| Real post-switch path | one throwaway allowlisted git repo → production `_switch_tree` → deny zhong+aegl-ai → ACL `--post-owner-switch` → broker CAS → **broker** `git restore` sync |
+| Broker vs ACL | `--post-owner-switch` expects broker body write; still denies zhong/aegl-ai; pre-switch ACL unchanged |
+| External deps | `deps-wire`: rsync+lock+`pnpm install --frozen-lockfile` → wrappers + generate/--help checks; owning-repo `ls-files`; delete prep printed only |
+| Hardlinks | pre-chown scan refuses any `nlink>1`; no silent SKIP→OK |
+| Verify | zhong **and** aegl-ai on root/nested/.git; hermes guard readability note |
+| Broker marker | registry entries with project/ref/approved_commit + LANDED_* vs tip; not entry counts alone |
+
+```text
+HOST_IDENTITY=GAPS_CLOSED_PREP_NOT_SWITCHED
+SWITCH_PREFLIGHT=NOT_RUN_WITHOUT_ROOT
+DEPS_WIRE=operator_or_root_stage
+PARENT_RENAME_PROTECTION=UNRESOLVED
+AI_BOUNDARY=BLOCKED
+```
+

@@ -238,8 +238,9 @@ test_all() {
       && grep -q 'RESULT: PASS' "$WS/aegl-continuity.log" && say "  continuity: PASS" || { say "  continuity: FAIL"; fails=$((fails+1)); }
     ( cd "$A" && timeout 300 mise exec -- python3 scripts/memory-smoke.py --no-real ) >"$WS/aegl-memory.log" 2>&1 \
       && grep -q 'RESULT: PASS' "$WS/aegl-memory.log" && say "  memory: PASS" || { say "  memory: FAIL"; fails=$((fails+1)); }
-    # RuleSync freshness: run the same `generate --check` AEGL uses, from the fixture dir.
-    ( cd "$A/fixture" && timeout 300 mise exec -- node "$A/upstream/rulesync/dist/cli/index.js" generate --targets claudecode --features rules --check ) >"$WS/aegl-rulesync.log" 2>&1 \
+    # RuleSync freshness: prefer AEGL_RULESYNC_CLI (external rebuildable deps) when set.
+    RULESYNC_CLI="${AEGL_RULESYNC_CLI:-$A/upstream/rulesync/dist/cli/index.js}"
+    ( cd "$A/fixture" && timeout 300 mise exec -- node "$RULESYNC_CLI" generate --targets claudecode --features rules --check ) >"$WS/aegl-rulesync.log" 2>&1 \
       && say "  rulesync-freshness: PASS" || { say "  rulesync-freshness: FAIL"; fails=$((fails+1)); }
     # supported adapter smoke (read-only inspection)
     ( cd "$A" && timeout 300 mise exec -- bash -c './bin/aegl inspect fixtures/target-kotlin-good && ./bin/aegl inspect fixtures/android-good' ) >"$WS/aegl-adapter.log" 2>&1 \

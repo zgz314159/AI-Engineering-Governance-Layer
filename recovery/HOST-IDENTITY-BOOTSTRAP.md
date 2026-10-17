@@ -1,10 +1,9 @@
-# Host identity bootstrap — Plan A execution prep (post KeepLab migrate)
+# Host identity bootstrap — Plan A (post-migrate execution prep)
 
-Preparation wiring for the three formal trees only. **This tip does not** run
-`sudo`/`prepare`/`switch`/`verify` as delivered; no formal permission change, no
-`node_modules` delete, no push, no Cursor rules deploy.
+Preparation for the three formal trees only. **This tip does not** run formal
+`switch`, delete in-tree `node_modules`, push, or deploy Cursor rules.
 
-## Scope (permission switch — when later approved)
+## Scope
 
 | Tree | Path |
 |---|---|
@@ -12,64 +11,44 @@ Preparation wiring for the three formal trees only. **This tip does not** run
 | Stack | `/home/zhong/Projects/Google-Android-Agent-Development-Stack` |
 | KeepLab | `/home/zhong/AppProjects/KeepLab-Relay` |
 
-- Target: `zhong` and `aegl-ai` cannot write formal source or `.git` metadata; `aegl-promote` still can promote; operator retains read via group `aegl-ro` (refresh login / `newgrp` after first `usermod -aG`).
-- **No** recursive `chattr`/`chown` of whole `/home/zhong/Projects` or `/home/zhong/AppProjects`.
-- **PARENT_RENAME_PROTECTION=UNRESOLVED** — parent replace/rename is not closed this round; file non-write ≠ complete isolation.
+- `zhong` / `aegl-ai`: no write to formal source or `.git`; `aegl-promote` owns trees and can CAS + sync.
+- Operator read via `aegl-ro` (refresh login after first `usermod -aG`).
+- Hermes/guard: sandbox root bind-mounts `contract_guard.py`; verifier checks source readable.
+- **PARENT_RENAME_PROTECTION=UNRESOLVED** — no Projects/AppProjects chattr.
+- Hardlinks: scanned and **refused** before any formal chown (no silent SKIP→OK).
 
 ## Modes
 
 | Mode | Effect |
 |---|---|
-| `plan` | print; change nothing |
-| `prepare` | accounts/groups/`/var/lib/aegl-ai` only |
-| `deps-plan` | freeze the two listed `node_modules` + external rebuild wiring; **no delete** |
-| `broker-bind` | match installed broker files to `--commit` tip; optional `--write-marker` with evidence (not a bare touch) |
-| `switch-preflight` | throwaway cross-UID + broker CAS; **NOT_RUN** without root |
-| `switch` | three trees only; gated on marker + deps absent; runs preflight first |
-| `verify` | non-mutating `builtin test -w` as target identities |
-| `selftest` | destructive probes only under `/var/tmp` |
-| `broker-plan` | print handoff; does not install |
+| `plan` | print only |
+| `prepare` / host prep | accounts/groups (may create `aegl-ro`) — not claimed as zero host change |
+| `deps-plan` | freeze two paths; owning-repo `ls-files` (not parent alone) |
+| `deps-wire` | rsync package+lock → external root; `pnpm install --frozen-lockfile`; entry wrappers + checks; delete prep printed only |
+| `broker-bind` | tip/file match + registry landed promote evidence; `--write-marker` only then |
+| `switch-preflight` | root: host prep → one throwaway repo → `_switch_tree` → deny zhong/aegl-ai → broker CAS + broker sync; non-root `NOT_RUN` |
+| `switch` | hardlink scan → three trees → ACL `--post-owner-switch`; `--skip-preflight` if already run |
+| `verify` | zhong **and** aegl-ai write denies; broker write; operator read |
 
-Failures print `STOP_AT=<phase>` and exit non-zero. Write checks use Bash builtin under `runuser`, never `/usr/bin/test`.
-
-## Trusted delivery (fixed full SHA; piped OK)
-
-`--commit <40-hex>` is required for `broker-bind` / `switch-preflight` / `switch`. Path resolution does not depend on `BASH_SOURCE` when piped:
+## Trusted delivery
 
 ```bash
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=<FULL_40_HEX_OF_THIS_COMMIT>
+TIP=<FULL_40_HEX>
 git -C "$AEGL" show "$TIP:recovery/host-identity-bootstrap.sh" \
   | sudo bash -s -- --commit "$TIP" --aegl "$AEGL" <mode>
-# Or the exec pack (preflight → broker-bind → deps-plan → prepare; switch gated):
 git -C "$AEGL" show "$TIP:recovery/host-identity-exec.sh" \
   | sudo bash -s -- --commit "$TIP"
 ```
 
-## Generated deps (exact two; wiring only this round)
+## External deps
 
-| path | role |
-|---|---|
-| `…/fixture/.specify/extensions/architecture-guard/node_modules` | tests/dev packages |
-| `…/upstream/rulesync/node_modules` | pnpm tree (many hardlinks) |
+- Production: `/var/lib/aegl/rebuildable-deps` + `/etc/aegl/rebuildable-deps.env`
+- Non-root wire: `~/.local/state/aegl/rebuildable-deps-stage`
+- Entries: `$ROOT/bin/rulesync`, `$ROOT/bin/architecture-guard`; `AEGL_RULESYNC_CLI` consumed by `bin/aegl-recovery`
+- Formal in-tree delete is operator-gated after wire checks; this tip does not delete
 
-External rebuild roots (declared, not created here):
+## Post-owner ACL
 
-- `/var/lib/aegl/rebuildable-deps/rulesync/node_modules`
-- `/var/lib/aegl/rebuildable-deps/architecture-guard/node_modules`
-
-`bin/aegl-recovery` RuleSync freshness uses `upstream/rulesync/dist/cli` (prebuilt). Populate `EXTERNAL_*` + `NODE_PATH` **before** any formal in-tree delete. This tip does not delete.
-
-## Hardlinks / symlinks
-
-- `find -P` (no symlink follow).
-- Files with `nlink>1` are **skipped** for bulk `chown` (not retargeted outside the tree).
-- Executable bit preserved (0750 vs 0640).
-
-## Remaining gates before formal `switch`
-
-1. `broker-bind --write-marker` after tip/file match (reuse installed broker; do not reinstall).
-2. Operator removes the two frozen `node_modules` **after** external rebuild wiring.
-3. Root runs `switch-preflight` (must PASS) then `switch` (or `host-identity-exec.sh --write-marker --apply-switch`).
-
-`AI_BOUNDARY` stays blocked until switch lands. Parent rename protection remains a separate gap.
+`install-promote-target-acl.sh --post-owner-switch`: broker may write body (sync);
+zhong/aegl-ai still denied. Pre-switch ACL still forbids broker worktree write.

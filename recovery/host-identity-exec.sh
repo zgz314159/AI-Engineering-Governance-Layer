@@ -5,13 +5,13 @@
 #     | sudo bash -s -- --commit "$TIP"
 #
 # Order (fail-stop; STOP_AT on error):
-#   0  switch-preflight (throwaway cross-UID; before any formal permission change)
-#   1  broker-bind (match installed broker to tip; optional --write-marker)
-#   2  deps-plan (freeze two node_modules + external rebuild wiring; no delete)
-#   3  prepare (accounts/groups; no project chown)
-#   4  stop here unless --apply-switch (formal switch is gated and destructive)
+#   0  switch-preflight once (host identity prep + throwaway real switch/CAS/sync)
+#   1  broker-bind (registry evidence; optional --write-marker)
+#   2  deps-wire (external install + entry checks; no in-tree delete)
+#   3  prepare (idempotent; overlaps host prep from step 0)
+#   4  switch only with --apply-switch (uses --skip-preflight; hardlink scan first)
 #
-# Does NOT push, does not Cursor-rules deploy, does not chattr Projects/AppProjects.
+# Does NOT push, Cursor-rules deploy, or chattr Projects/AppProjects.
 set -euo pipefail
 
 COMMIT=""; AEGL="/home/zhong/Projects/AI-Engineering-Governance-Layer"
@@ -53,7 +53,7 @@ fi
 
 [ "$(id -u)" = 0 ] || stop need_root "full host-identity exec requires root"
 
-say "== 0. switch-preflight (throwaway; before formal perms) =="
+say "== 0. switch-preflight (once; before formal perms) =="
 boot switch-preflight
 
 say "== 1. broker-bind (no reinstall) =="
@@ -63,21 +63,21 @@ else
   boot broker-bind
 fi
 
-say "== 2. deps-plan (no delete) =="
-boot deps-plan
+say "== 2. deps-wire (external install; no in-tree delete) =="
+boot deps-wire
 
 say "== 3. prepare =="
 boot prepare
 
 if [ "$APPLY_SWITCH" = 1 ]; then
-  say "== 4. switch (three formal trees only) =="
-  boot switch
+  say "== 4. switch (skip duplicate preflight) =="
+  boot switch --skip-preflight
   say "== 5. verify =="
   boot verify
   say "HOST_IDENTITY_EXEC_RESULT=OK switched=1"
 else
-  say "== 4. switch = SKIPPED (pass --apply-switch after deps removed + marker written) =="
+  say "== 4. switch = SKIPPED (pass --apply-switch after in-tree node_modules removed) =="
   say "HOST_IDENTITY_EXEC_RESULT=OK switched=0"
-  say "NEXT=remove frozen node_modules after external rebuild wiring; then re-run with --write-marker --apply-switch"
+  say "NEXT=source /etc/aegl/rebuildable-deps.env; remove two FREEZE_PATH trees; re-run with --write-marker --apply-switch"
 fi
 say "STOP_AT=complete"
