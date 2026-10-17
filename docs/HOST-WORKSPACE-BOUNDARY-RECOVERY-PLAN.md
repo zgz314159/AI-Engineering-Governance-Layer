@@ -2947,3 +2947,22 @@ PARENT_RENAME_PROTECTION=UNRESOLVED
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 53: prepare/cleanup/switch packs + operator env + archguard ownership
+
+Authorized wiring only — **no sudo, no delete, no switch, no push**.
+
+| Item | Behavior |
+|---|---|
+| Operator env | `OPERATOR_HOME`/`pnpm`/`node`/store from operator identity; `--pnpm`/`--node`/… overrides; not sudo HOME |
+| Script cache | `materialize` → `/var/lib/aegl/host-identity/scripts/<TIP>/` before chown |
+| Preflight order | materialize → `_switch_tree` → ACL from cache (not `git show\|bash`) → broker CAS/sync; stamp file |
+| Packs | **separate**: `prepare.sh` / `cleanup.sh` / `switch-apply.sh` (exec chained pack retired) |
+| Archguard fixture | broken gitfile; canonical module=`upstream/architecture-guard`; delete cleared only via parent-ignore untracked copy (not upstream ls-files) |
+| Entries | `AEGL_RULESYNC_CLI` in `50-positive-test.sh` + `test_all`; doctor unchanged; tip must be on `main` before switch-apply |
+
+```text
+HOST_IDENTITY=PACKS_WIRED_NOT_EXECUTED
+PARENT_RENAME_PROTECTION=UNRESOLVED
+AI_BOUNDARY=BLOCKED
+```
+

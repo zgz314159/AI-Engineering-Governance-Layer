@@ -10,7 +10,7 @@
 # Failures stop immediately with STOP_AT=<phase>.
 set -euo pipefail
 
-COMMIT=""; AEGL_ARG=""; MODE=""; WRITE_MARKER=0; SKIP_PREFLIGHT=0
+COMMIT=""; AEGL_ARG=""; MODE=""; WRITE_MARKER=0; SKIP_PREFLIGHT=0; REUSE_DEPS=1; FORCE_DEPS_REINSTALL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -18,7 +18,14 @@ while [ $# -gt 0 ]; do
     --aegl) AEGL_ARG="${2:-}"; shift 2 ;;
     --write-marker) WRITE_MARKER=1; shift ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
-    plan|prepare|switch|verify|selftest|broker-plan|broker-bind|deps-plan|deps-wire|switch-preflight)
+    --reuse-deps) REUSE_DEPS=1; shift ;;
+    --force-deps-reinstall) FORCE_DEPS_REINSTALL=1; REUSE_DEPS=0; shift ;;
+    --pnpm) PNPM_BIN_OVERRIDE="${2:-}"; shift 2 ;;
+    --node) NODE_BIN_OVERRIDE="${2:-}"; shift 2 ;;
+    --pnpm-store) PNPM_STORE_OVERRIDE="${2:-}"; shift 2 ;;
+    --deps-stage) DEPS_STAGE_OVERRIDE="${2:-}"; shift 2 ;;
+    --operator-home) OPERATOR_HOME_OVERRIDE="${2:-}"; shift 2 ;;
+    plan|prepare|switch|verify|selftest|broker-plan|broker-bind|deps-plan|deps-wire|switch-preflight|materialize|cleanup-plan)
       MODE="$1"; shift ;;
     --plan) MODE=plan; shift ;;
     *) printf 'STOP_AT=bad_option\nHOST_ERROR: unknown option %s\n' "$1" >&2; exit 2 ;;
@@ -31,13 +38,17 @@ BROKER_USER="aegl-promote"; BROKER_GROUP="aegl-broker"
 HUMAN_GROUP="aegl-ro"
 OPERATOR_USER="${SUDO_USER:-zhong}"
 [ "$OPERATOR_USER" = root ] && OPERATOR_USER=zhong
+# Operator identity — never trust sudo HOME/PATH.
+OPERATOR_HOME="${OPERATOR_HOME_OVERRIDE:-$(getent passwd "$OPERATOR_USER" 2>/dev/null | cut -d: -f6)}"
+[ -n "$OPERATOR_HOME" ] || OPERATOR_HOME="/home/zhong"
 AI_STATE_ROOT="/var/lib/aegl-ai"
 BROKER_MARKER="/etc/aegl/broker-verified"
 BROKER_LIBDIR="/usr/local/lib/aegl-promote"
 BROKER_UNIT="/etc/systemd/system/aegl-promote-broker.service"
 BROKER_REG="/var/lib/aegl-promote/registry.json"
+HOST_IDENTITY_STATE="/var/lib/aegl/host-identity"
 
-HOME_DIR="/home/zhong"
+HOME_DIR="$OPERATOR_HOME"
 PROJECTS_PARENT="/home/zhong/Projects"
 BUSINESS_PARENT="/home/zhong/AppProjects"
 AEGL_DEFAULT="$PROJECTS_PARENT/AI-Engineering-Governance-Layer"
@@ -62,17 +73,45 @@ GENERATED_DEPS=(
 )
 RULESYNC_PKG="$AEGL_DEFAULT/upstream/rulesync"
 ARCHGUARD_PKG="$AEGL_DEFAULT/fixture/.specify/extensions/architecture-guard"
+ARCHGUARD_UPSTREAM_PKG="$AEGL_DEFAULT/upstream/architecture-guard"
+ARCHGUARD_GIT_MODULE="$AEGL_DEFAULT/.git/modules/upstream/architecture-guard"
 
 # Production root (root-owned). Non-root deps-wire uses operator stage.
 EXTERNAL_DEP_ROOT="/var/lib/aegl/rebuildable-deps"
-DEPS_STAGE_DEFAULT="/home/zhong/.local/state/aegl/rebuildable-deps-stage"
+DEPS_STAGE_DEFAULT="${DEPS_STAGE_OVERRIDE:-$OPERATOR_HOME/.local/state/aegl/rebuildable-deps-stage}"
 DEPS_ENV_PROD="/etc/aegl/rebuildable-deps.env"
-PNPM_STORE_DEFAULT="${PNPM_STORE:-$HOME/.local/share/pnpm/store/v11}"
+# Resolve pnpm/node from operator identity (not sudo HOME/PATH). Explicit flags win.
+_op_cmd(){
+  local c="$1"
+  if [ "$(id -u)" = 0 ]; then
+    runuser -u "$OPERATOR_USER" -- env HOME="$OPERATOR_HOME" \
+      PATH="${OPERATOR_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+      bash --noprofile --norc -c "command -v \"$c\"" 2>/dev/null || true
+  else
+    env HOME="$OPERATOR_HOME" PATH="${OPERATOR_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}" \
+      bash --noprofile --norc -c "command -v \"$c\"" 2>/dev/null || true
+  fi
+}
+PNPM_BIN="${PNPM_BIN_OVERRIDE:-$(_op_cmd pnpm)}"
+NODE_BIN="${NODE_BIN_OVERRIDE:-$(_op_cmd node)}"
+# Prefer operator-local nvm node if bare command -v missed it.
+if [ -z "$NODE_BIN" ]; then
+  NODE_BIN="$(ls -1 "$OPERATOR_HOME"/.nvm/versions/node/*/bin/node 2>/dev/null | sort | tail -1 || true)"
+fi
+if [ -z "$PNPM_BIN" ] && [ -n "$NODE_BIN" ]; then
+  PNPM_BIN="$(dirname "$NODE_BIN")/pnpm"
+  [ -x "$PNPM_BIN" ] || PNPM_BIN=""
+fi
+PNPM_STORE_DEFAULT="${PNPM_STORE_OVERRIDE:-${PNPM_STORE:-$OPERATOR_HOME/.local/share/pnpm/store/v11}}"
+SCRIPT_CACHE=""   # set by materialize_scripts
+PREFLIGHT_STAMP=""
 
 PHASE="init"
 SWITCH_PREFLIGHT_DONE=0
 # Global for EXIT cleanup (must not close over function locals).
 PF_ST=""
+# Paths cleared for delete (filled by deps ownership resolution).
+DELETE_CLEARED_PATHS=()
 
 say(){ printf '%s\n' "$*"; }
 phase(){ PHASE="$1"; printf '\n== %s ==\n' "$1"; }
@@ -86,6 +125,42 @@ require_commit(){
     || stop commit_missing "$COMMIT not in $AEGL_ROOT"
   git -C "$AEGL_ROOT" cat-file -e "$COMMIT:recovery/host-identity-bootstrap.sh" 2>/dev/null \
     || stop tip_missing_script "host-identity-bootstrap.sh missing in $COMMIT"
+  SCRIPT_CACHE="${HOST_IDENTITY_STATE}/scripts/${COMMIT}"
+  PREFLIGHT_STAMP="${HOST_IDENTITY_STATE}/preflight-${COMMIT}.ok"
+}
+
+# Extract fixed-SHA scripts before any formal chown (post-chown root git may hit dubious ownership).
+materialize_scripts(){
+  phase "materialize-scripts (before formal chown)"
+  require_commit
+  local dest="$SCRIPT_CACHE"
+  mkdir -p "$dest"
+  local f
+  for f in \
+    recovery/host-identity-bootstrap.sh \
+    recovery/host-identity-prepare.sh \
+    recovery/host-identity-cleanup.sh \
+    recovery/host-identity-switch-apply.sh \
+    recovery/install-promote-target-acl.sh
+  do
+    git -C "$AEGL_ROOT" show "$COMMIT:$f" > "$dest/$(basename "$f")" \
+      || stop materialize_missing "$f missing in $COMMIT"
+    chmod 0755 "$dest/$(basename "$f")"
+  done
+  printf 'commit=%s materialized_at=%s\n' "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dest/MANIFEST"
+  say "  SCRIPT_CACHE=$dest"
+  say "MATERIALIZE_RESULT=OK"
+}
+
+git_as_broker(){
+  # Command-level exact safe.directory only — no global config, no globs.
+  local repo="$1"; shift
+  runuser -u "$BROKER_USER" -- git \
+    -c "safe.directory=$repo" \
+    -c "core.hooksPath=/dev/null" \
+    -c "core.fsmonitor=false" \
+    -c "core.attributesFile=/dev/null" \
+    -C "$repo" "$@"
 }
 
 # Live execute for prepare / switch / switch-preflight / deps-wire
@@ -157,11 +232,13 @@ _owning_repo_tracked_under(){
   # Args: package_dir relative_path_inside — check owning git repo, not parent AEGL.
   # stdout = count only (or -1); diagnostics on stderr.
   local pkg="$1" rel="${2:-.}"
-  local git_dir
+  local git_dir resolved
   if [ -f "$pkg/.git" ]; then
     git_dir="$(sed -n 's/^gitdir: //p' "$pkg/.git")"
-    if [ -n "$git_dir" ] && [ ! -d "$pkg/$git_dir" ] && [ ! -d "$git_dir" ]; then
-      printf '    OWNING_GIT=broken_gitfile path=%s/.git -> %s\n' "$pkg" "$git_dir" >&2
+    resolved="$(cd "$pkg" && realpath -m "$git_dir" 2>/dev/null || true)"
+    if [ -z "$resolved" ] || [ ! -d "$resolved" ]; then
+      printf '    OWNING_GIT=broken_gitfile path=%s/.git gitdir=%s resolved=%s\n' \
+        "$pkg" "$git_dir" "${resolved:-none}" >&2
       printf '%s\n' "-1"
       return 0
     fi
@@ -171,6 +248,66 @@ _owning_repo_tracked_under(){
   else
     printf '    OWNING_GIT=not_a_repo path=%s\n' "$pkg" >&2
     printf '%s\n' "-1"
+  fi
+}
+
+# Resolve fixture architecture-guard ownership without using upstream ls-files as a substitute.
+# Diagnostics on stderr; stdout is exactly "cleared" or "unknown".
+_resolve_archguard_fixture(){
+  local pkg="$ARCHGUARD_PKG" nm="$ARCHGUARD_PKG/node_modules"
+  local gitfile_raw resolved module_wt parent_tracked parent_ignored
+  printf '%s\n' "  ARCHGUARD_FIXTURE path=$pkg" >&2
+  if [ -f "$pkg/.git" ]; then
+    gitfile_raw="$(sed -n 's/^gitdir: //p' "$pkg/.git")"
+    resolved="$(cd "$pkg" && realpath -m "$gitfile_raw" 2>/dev/null || true)"
+    printf '%s\n' "    gitfile=$gitfile_raw resolved=${resolved:-NONE}" >&2
+  else
+    gitfile_raw=""; resolved=""
+    printf '%s\n' "    gitfile=absent" >&2
+  fi
+  module_wt=""
+  if [ -f "$ARCHGUARD_GIT_MODULE/config" ]; then
+    module_wt="$(git config -f "$ARCHGUARD_GIT_MODULE/config" --get core.worktree 2>/dev/null || true)"
+    printf '%s\n' "    canonical_git_module=$ARCHGUARD_GIT_MODULE core.worktree=$module_wt" >&2
+    printf '%s\n' "    canonical_worktree_abs=$ARCHGUARD_UPSTREAM_PKG" >&2
+  fi
+  if [ -n "$resolved" ] && [ -d "$resolved" ] \
+     && [ "$(realpath -m "$resolved")" = "$(realpath -m "$ARCHGUARD_GIT_MODULE")" ]; then
+    printf '%s\n' "    gitfile_points_at_canonical_module=yes" >&2
+  else
+    printf '%s\n' "    gitfile_points_at_canonical_module=no (stale/broken relative gitdir from specify --dev install)" >&2
+  fi
+  parent_tracked="$(git -C "$AEGL_DEFAULT" ls-files -- "${pkg#"$AEGL_DEFAULT/"}" 2>/dev/null | wc -l)"
+  printf '%s\n' "    parent_ls_files_pkg=$parent_tracked" >&2
+  if git -C "$AEGL_DEFAULT" check-ignore -q "$nm" 2>/dev/null; then
+    parent_ignored=yes
+  else
+    parent_ignored=no
+  fi
+  printf '%s\n' "    parent_ignores_node_modules=$parent_ignored" >&2
+  # Clearance: untracked parent-ignored copy (specify --dev), NOT upstream submodule ls-files.
+  if [ "$parent_tracked" = "0" ] && [ "$parent_ignored" = "yes" ]; then
+    printf '%s\n' "    DELETE_CLEARED=yes reason=parent_ignored_untracked_dev_copy (not upstream ls-files)" >&2
+    printf '%s\n' "cleared"
+  else
+    printf '%s\n' "    DELETE_CLEARED=no reason=UNKNOWN_or_tracked — no executable delete step" >&2
+    printf '%s\n' "unknown"
+  fi
+}
+
+_resolve_delete_cleared(){
+  DELETE_CLEARED_PATHS=()
+  local own_rs ag_status
+  own_rs="$(_owning_repo_tracked_under "$RULESYNC_PKG" "node_modules")"
+  if [ "$own_rs" = "0" ]; then
+    DELETE_CLEARED_PATHS+=("$AEGL_DEFAULT/upstream/rulesync/node_modules")
+    say "  DELETE_CLEARED rulesync/node_modules (owning submodule ls-files=0)"
+  else
+    say "  DELETE_NOT_CLEARED rulesync/node_modules owning_ls_files=$own_rs"
+  fi
+  ag_status="$(_resolve_archguard_fixture)"
+  if [ "$ag_status" = "cleared" ]; then
+    DELETE_CLEARED_PATHS+=("$AEGL_DEFAULT/fixture/.specify/extensions/architecture-guard/node_modules")
   fi
 }
 
@@ -195,23 +332,28 @@ list_generated_deps(){
     if [ "$tracked_own" = "0" ]; then
       say "    unique_source_in_node_modules=no (owning repo ignores regenerable deps)"
     elif [ "$tracked_own" = "-1" ]; then
-      say "    unique_source=UNKNOWN (owning git unavailable — do not claim zero unique source from parent alone)"
+      say "    unique_source=UNKNOWN pending fixture ownership resolve (see below)"
     else
       say "    unique_source=YES count=$tracked_own — REFUSE delete until reviewed"
     fi
   done
+  _resolve_delete_cleared
   say "  EXTERNAL_DEP_ROOT=$EXTERNAL_DEP_ROOT"
   say "  DEPS_STAGE_DEFAULT=$DEPS_STAGE_DEFAULT"
-  say "  NEXT=deps-wire (install+entry checks); formal delete NOT this mode"
+  say "  OPERATOR_HOME=$OPERATOR_HOME PNPM_BIN=${PNPM_BIN:-missing} NODE_BIN=${NODE_BIN:-missing}"
+  say "  NEXT=deps-wire (reuse stage if present); formal delete NOT this mode"
   say "  DEPS_PLAN_OK=1"
 }
 
 deps_wire(){
-  phase "deps-wire (external install + entry checks; no in-tree delete)"
-  local root store lock_rs lock_ag ver_rs ver_ag
+  phase "deps-wire (external install or reuse; entry checks; no in-tree delete)"
+  local root store lock_rs lock_ag ver_rs ver_ag envfile manifest reused=0
   root="$(_deps_root)"
   store="$PNPM_STORE_DEFAULT"
-  command -v pnpm >/dev/null 2>&1 || stop deps_no_pnpm "pnpm required for deps-wire"
+  say "  OPERATOR_HOME=$OPERATOR_HOME"
+  say "  PNPM_BIN=${PNPM_BIN:-missing} NODE_BIN=${NODE_BIN:-missing} PNPM_STORE=$store"
+  [ -n "$PNPM_BIN" ] && [ -x "$PNPM_BIN" ] || stop deps_no_pnpm "pnpm not found for operator $OPERATOR_USER (set --pnpm)"
+  [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN" ] || stop deps_no_node "node not found for operator $OPERATOR_USER (set --node)"
   command -v rsync >/dev/null 2>&1 || stop deps_no_rsync "rsync required for deps-wire"
   [ -f "$RULESYNC_PKG/pnpm-lock.yaml" ] || stop deps_lock_missing "rulesync lock missing"
   [ -f "$ARCHGUARD_PKG/pnpm-lock.yaml" ] || stop deps_lock_missing "architecture-guard lock missing"
@@ -221,90 +363,92 @@ deps_wire(){
   ver_ag="$(python3 -c 'import json;print(json.load(open("'"$ARCHGUARD_PKG"'/package.json"))["version"])')"
   lock_rs="$(sha256sum "$RULESYNC_PKG/pnpm-lock.yaml" | awk '{print $1}')"
   lock_ag="$(sha256sum "$ARCHGUARD_PKG/pnpm-lock.yaml" | awk '{print $1}')"
-  say "  DEPS_ROOT=$root (root→$EXTERNAL_DEP_ROOT; non-root→stage)"
+  say "  DEPS_ROOT=$root"
   say "  RULESYNC version=$ver_rs lock_sha256=$lock_rs"
   say "  ARCHGUARD version=$ver_ag lock_sha256=$lock_ag"
 
-  local own_rs own_ag
+  _resolve_delete_cleared
+  local own_rs
   own_rs="$(_owning_repo_tracked_under "$RULESYNC_PKG" "node_modules")"
-  own_ag="$(_owning_repo_tracked_under "$ARCHGUARD_PKG" "node_modules")"
   [ "$own_rs" = "0" ] || stop deps_unique_rulesync "rulesync owning-repo tracks node_modules files=$own_rs"
-  # fixture architecture-guard may have a broken gitfile; require upstream submodule = 0.
-  if [ "$own_ag" != "0" ] && [ "$own_ag" != "-1" ]; then
-    stop deps_unique_archguard "architecture-guard owning-repo tracks node_modules files=$own_ag"
+
+  manifest="$root/wire-manifest.txt"
+  if [ "$FORCE_DEPS_REINSTALL" != 1 ] && [ "$REUSE_DEPS" = 1 ] \
+     && [ -f "$manifest" ] && [ -x "$root/bin/rulesync" ] && [ -x "$root/bin/architecture-guard" ] \
+     && [ -d "$root/rulesync/node_modules" ] && [ -d "$root/architecture-guard/node_modules" ]; then
+    if grep -q "rulesync_lock_sha256=$lock_rs" "$manifest" \
+       && grep -q "architecture_guard_lock_sha256=$lock_ag" "$manifest"; then
+      reused=1
+      say "  REUSE_STAGE=yes manifest+locks match — skip pnpm reinstall and skip re-entry-verify"
+    fi
   fi
-  if [ ! -d "$AEGL_DEFAULT/upstream/architecture-guard" ]; then
-    stop deps_archguard_upstream "upstream/architecture-guard missing for owning-repo check"
-  fi
-  local own_uag
-  own_uag="$(_owning_repo_tracked_under "$AEGL_DEFAULT/upstream/architecture-guard" "node_modules")"
-  say "  UPSTREAM_ARCHGUARD_node_modules_ls_files=$own_uag"
-  [ "$own_uag" = "0" ] || stop deps_unique_archguard_upstream "upstream architecture-guard tracks node_modules files=$own_uag"
 
-  run mkdir -p "$root/rulesync" "$root/architecture-guard" "$root/bin"
-  run rsync -a --delete --exclude node_modules --exclude .git \
-    "$RULESYNC_PKG/" "$root/rulesync/"
-  run rsync -a --delete --exclude node_modules --exclude .git \
-    "$ARCHGUARD_PKG/" "$root/architecture-guard/"
-
-  export CI=1
-  (
-    cd "$root/rulesync"
-    pnpm install --frozen-lockfile --ignore-scripts --store-dir "$store" --prefer-offline
-  ) || stop deps_install_rulesync "rulesync external pnpm install failed"
-  (
-    cd "$root/architecture-guard"
-    pnpm install --frozen-lockfile --ignore-scripts --store-dir "$store" --prefer-offline
-  ) || stop deps_install_archguard "architecture-guard external pnpm install failed"
-
-  [ "$(sha256sum "$root/rulesync/pnpm-lock.yaml" | awk '{print $1}')" = "$lock_rs" ] \
-    || stop deps_lock_drift_rulesync "staged rulesync lock drifted"
-  [ "$(sha256sum "$root/architecture-guard/pnpm-lock.yaml" | awk '{print $1}')" = "$lock_ag" ] \
-    || stop deps_lock_drift_archguard "staged architecture-guard lock drifted"
-
-  [ -f "$root/rulesync/dist/cli/index.js" ] || stop deps_rulesync_dist "rulesync dist missing in external root"
-  if [ ! -f "$root/architecture-guard/dist/bin/cli.js" ]; then
-    ( cd "$root/architecture-guard" && pnpm exec tsc ) \
-      || stop deps_archguard_build "architecture-guard tsc failed in external root"
-  fi
-  [ -f "$root/architecture-guard/dist/bin/cli.js" ] || stop deps_archguard_dist "architecture-guard dist missing"
-
-  # Entry wrappers (real paths — not NODE_PATH-only).
-  cat > "$root/bin/rulesync" <<EOF
+  if [ "$reused" != 1 ]; then
+    run mkdir -p "$root/rulesync" "$root/architecture-guard" "$root/bin"
+    run rsync -a --delete --exclude node_modules --exclude .git \
+      "$RULESYNC_PKG/" "$root/rulesync/"
+    run rsync -a --delete --exclude node_modules --exclude .git \
+      "$ARCHGUARD_PKG/" "$root/architecture-guard/"
+    export CI=1
+    (
+      cd "$root/rulesync"
+      env HOME="$OPERATOR_HOME" "$PNPM_BIN" install --frozen-lockfile --ignore-scripts \
+        --store-dir "$store" --prefer-offline
+    ) || stop deps_install_rulesync "rulesync external pnpm install failed"
+    (
+      cd "$root/architecture-guard"
+      env HOME="$OPERATOR_HOME" "$PNPM_BIN" install --frozen-lockfile --ignore-scripts \
+        --store-dir "$store" --prefer-offline
+    ) || stop deps_install_archguard "architecture-guard external pnpm install failed"
+    [ "$(sha256sum "$root/rulesync/pnpm-lock.yaml" | awk '{print $1}')" = "$lock_rs" ] \
+      || stop deps_lock_drift_rulesync "staged rulesync lock drifted"
+    [ "$(sha256sum "$root/architecture-guard/pnpm-lock.yaml" | awk '{print $1}')" = "$lock_ag" ] \
+      || stop deps_lock_drift_archguard "staged architecture-guard lock drifted"
+    [ -f "$root/rulesync/dist/cli/index.js" ] || stop deps_rulesync_dist "rulesync dist missing"
+    if [ ! -f "$root/architecture-guard/dist/bin/cli.js" ]; then
+      ( cd "$root/architecture-guard" && env HOME="$OPERATOR_HOME" "$PNPM_BIN" exec tsc ) \
+        || stop deps_archguard_build "architecture-guard tsc failed"
+    fi
+    cat > "$root/bin/rulesync" <<EOF
 #!/usr/bin/env bash
-exec node "$root/rulesync/dist/cli/index.js" "\$@"
+exec "$NODE_BIN" "$root/rulesync/dist/cli/index.js" "\$@"
 EOF
-  cat > "$root/bin/architecture-guard" <<EOF
+    cat > "$root/bin/architecture-guard" <<EOF
 #!/usr/bin/env bash
-exec node "$root/architecture-guard/dist/bin/cli.js" "\$@"
+exec "$NODE_BIN" "$root/architecture-guard/dist/bin/cli.js" "\$@"
 EOF
-  chmod 0755 "$root/bin/rulesync" "$root/bin/architecture-guard"
+    chmod 0755 "$root/bin/rulesync" "$root/bin/architecture-guard"
+    # Point checks via real RuleSync entry contract (--check only; keep user rule files).
+    "$root/bin/rulesync" --help >/dev/null \
+      || stop deps_entry_rulesync_help "external rulesync --help failed"
+    ( cd "$AEGL_DEFAULT/fixture" && "$root/bin/rulesync" generate --targets claudecode --features rules --check ) \
+      || stop deps_entry_rulesync_generate "external rulesync generate --check failed"
+    "$root/bin/architecture-guard" --help >/dev/null \
+      || stop deps_entry_archguard_help "external architecture-guard --help failed"
+    say "  ENTRY_CHECK rulesync=OK architecture-guard=OK (fresh install)"
+  fi
 
-  # Point entry checks from external tree
-  "$root/bin/rulesync" --help >/dev/null \
-    || stop deps_entry_rulesync_help "external rulesync --help failed"
-  ( cd "$AEGL_DEFAULT/fixture" && "$root/bin/rulesync" generate --targets claudecode --features rules --check ) \
-    || stop deps_entry_rulesync_generate "external rulesync generate --check failed"
-  "$root/bin/architecture-guard" --help >/dev/null \
-    || stop deps_entry_archguard_help "external architecture-guard --help failed"
-  say "  ENTRY_CHECK rulesync=OK architecture-guard=OK"
-
-  local envfile manifest
   if [ "$(id -u)" = 0 ]; then
     envfile="$DEPS_ENV_PROD"
     mkdir -p "$(dirname "$envfile")"
+    # Promote stage → production root when root and stage was reused.
+    if [ "$root" = "$EXTERNAL_DEP_ROOT" ] && [ ! -x "$root/bin/rulesync" ] \
+       && [ -x "$DEPS_STAGE_DEFAULT/bin/rulesync" ]; then
+      stop deps_prod_empty "production deps root empty; copy/reuse stage first"
+    fi
   else
     envfile="$root/rebuildable-deps.env"
   fi
   cat > "$envfile" <<EOF
-# Generated by host-identity deps-wire — source before doctor/rulesync entries.
+# Generated by host-identity deps-wire. Source before RuleSync entries that honor AEGL_RULESYNC_CLI.
+# Note: formal bin/aegl-recovery doctor does NOT use RuleSync; test_all / bridge 50-positive-test do after promote.
 AEGL_REBUILDABLE_DEPS_ROOT=$root
 AEGL_RULESYNC_CLI=$root/rulesync/dist/cli/index.js
 AEGL_ARCHITECTURE_GUARD_CLI=$root/architecture-guard/dist/bin/cli.js
 PATH=$root/bin:\$PATH
 EOF
-  manifest="$root/wire-manifest.txt"
-  cat > "$manifest" <<EOF
+  if [ "$reused" != 1 ]; then
+    cat > "$manifest" <<EOF
 rulesync_version=$ver_rs
 rulesync_lock_sha256=$lock_rs
 rulesync_cli=$root/rulesync/dist/cli/index.js
@@ -313,20 +457,47 @@ architecture_guard_lock_sha256=$lock_ag
 architecture_guard_cli=$root/architecture-guard/dist/bin/cli.js
 env_file=$envfile
 EOF
-  say "  WROTE_ENV=$envfile"
-  say "  WROTE_MANIFEST=$manifest"
-  say "  DOCTOR_HINT=set -a; source $envfile; set +a; then bin/aegl-recovery doctor (uses AEGL_RULESYNC_CLI)"
+  fi
+  say "  WROTE_ENV=$envfile reused=$reused"
+  say "  ENTRY_NOTE=bridge/linux/50-positive-test.sh and aegl-recovery test_all honor AEGL_RULESYNC_CLI after this tip is promoted to main; isolation branch ≠ formal entry"
+  say "  FORMAL_ENTRY_CHECK=use AEGL_RULESYNC_CLI with generate --check (below) — not doctor"
 
-  say "  DELETE_PREP (NOT executed this round; no backup; no old-path symlink):"
-  say "    test -d $root/rulesync/node_modules && test -x $root/bin/rulesync"
-  say "    test -d $root/architecture-guard/node_modules && test -x $root/bin/architecture-guard"
-  say "    source $envfile && (cd $AEGL_DEFAULT/fixture && node \"\$AEGL_RULESYNC_CLI\" generate --targets claudecode --features rules --check)"
-  for d in "${GENERATED_DEPS[@]}"; do
-    say "    # only after checks above:"
-    say "    rm -rf -- $(printf '%q' "$d")"
-  done
+  # Actual entry-shaped check (same args as 50-positive-test RuleSync step); --check keeps projections.
+  (
+    set -a
+    # shellcheck disable=SC1090
+    source "$envfile"
+    set +a
+    cd "$AEGL_DEFAULT/fixture"
+    "$NODE_BIN" "$AEGL_RULESYNC_CLI" generate --targets claudecode --features rules --check
+  ) || stop deps_entry_positive_shape "AEGL_RULESYNC_CLI generate --check failed"
+  say "  ENTRY_CHECK_POSITIVE_SHAPE=OK (claudecode --check; user rule files preserved)"
+
+  say "  DELETE_PREP executable steps ONLY for DELETE_CLEARED paths (NOT executed here):"
+  if [ "${#DELETE_CLEARED_PATHS[@]}" -eq 0 ]; then
+    say "    (none — ownership UNKNOWN or not cleared)"
+  else
+    local d
+    for d in "${DELETE_CLEARED_PATHS[@]}"; do
+      say "    rm -rf -- $(printf '%q' "$d")"
+    done
+  fi
   say "  THIS_ROUND=no formal delete"
-  say "DEPS_WIRE_RESULT=OK root=$root"
+  say "DEPS_WIRE_RESULT=OK root=$root reused=$reused"
+}
+
+cleanup_plan(){
+  phase "cleanup-plan (print cleared deletes only; execute nothing)"
+  _resolve_delete_cleared
+  if [ "${#DELETE_CLEARED_PATHS[@]}" -eq 0 ]; then
+    stop cleanup_none_cleared "no DELETE_CLEARED paths — refuse to print executable deletes"
+  fi
+  local d
+  for d in "${DELETE_CLEARED_PATHS[@]}"; do
+    [ -e "$d" ] || { say "  already_absent $d"; continue; }
+    say "CLEANUP_RM=$(printf '%q' "$d")"
+  done
+  say "CLEANUP_PLAN_OK=1 count=${#DELETE_CLEARED_PATHS[@]}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -574,13 +745,18 @@ _switch_tree(){
 
 _install_post_switch_acl(){
   local proj="$1" target_ref="$2"
-  local extra=()
+  local extra=() acl_script
   if [ "$proj" = "$KEEPLAB_DEFAULT" ]; then
     extra=(--business-root "$BUSINESS_PARENT")
   fi
-  git -C "$AEGL_ROOT" show "$COMMIT:recovery/install-promote-target-acl.sh" \
-    | bash -s -- --repo "$AEGL_ROOT" --project "$proj" --commit "$COMMIT" \
-         --target-ref "$target_ref" --post-owner-switch "${extra[@]}" \
+  # Prefer materialized script (works after formal chown without git show as root).
+  if [ -n "$SCRIPT_CACHE" ] && [ -f "$SCRIPT_CACHE/install-promote-target-acl.sh" ]; then
+    acl_script="$SCRIPT_CACHE/install-promote-target-acl.sh"
+  else
+    stop acl_not_materialized "run materialize before ACL install (SCRIPT_CACHE missing)"
+  fi
+  bash "$acl_script" --repo "$AEGL_ROOT" --project "$proj" --commit "$COMMIT" \
+       --target-ref "$target_ref" --post-owner-switch "${extra[@]}" \
     || stop switch_acl "ACL post-owner-switch failed for $proj"
 }
 
@@ -609,6 +785,9 @@ switch_preflight(){
   require_commit
   command -v setfacl >/dev/null 2>&1 || stop missing_setfacl "setfacl required"
 
+  # Fixed-SHA scripts on disk BEFORE any ownership change (formal or throwaway).
+  materialize_scripts
+
   # May create aegl-ro — explicit host prep before any formal project chown.
   prepare_host_identities
   id "$BROKER_USER" >/dev/null 2>&1 || stop missing_broker_user "$BROKER_USER"
@@ -619,7 +798,6 @@ switch_preflight(){
   PF_ST="$(mktemp -d /var/tmp/aegl-host-switch-pf-XXXXXX)" || stop mktemp_failed "mktemp"
   trap _cleanup_pf EXIT
   chmod 0755 "$PF_ST"
-  # Exact access for test identities (root-created dir).
   setfacl -m "u:${OPERATOR_USER}:rwx" "$PF_ST"
   setfacl -m "u:${BROKER_USER}:rwx" "$PF_ST"
   setfacl -m "u:${AI_USER}:r-x" "$PF_ST"
@@ -629,12 +807,17 @@ switch_preflight(){
   # Single allowlisted throwaway git repo (same tree for switch + CAS + sync).
   local GREPO="$PF_ST/AI-Engineering-Governance-Layer"
   runuser -u "$OPERATOR_USER" -- git init -q "$GREPO"
+  # Embed a recovery script blob so post-switch "git show TIP:path" call order is real.
+  runuser -u "$OPERATOR_USER" -- mkdir -p "$GREPO/recovery"
+  runuser -u "$OPERATOR_USER" -- cp -a "$SCRIPT_CACHE/install-promote-target-acl.sh" \
+    "$GREPO/recovery/install-promote-target-acl.sh"
   runuser -u "$OPERATOR_USER" -- bash -c "printf 'a\n' > '$GREPO/body.txt'; mkdir -p '$GREPO/sub'; printf 's\n' > '$GREPO/sub/f.txt'"
   runuser -u "$OPERATOR_USER" -- git -C "$GREPO" add -A
   runuser -u "$OPERATOR_USER" -- git -C "$GREPO" -c user.email=t@t -c user.name=t commit -qm a
   runuser -u "$OPERATOR_USER" -- git -C "$GREPO" branch -M main
-  local V1 V2
+  local V1 V2 TIP_BLOB
   V1="$(runuser -u "$OPERATOR_USER" -- git -C "$GREPO" rev-parse HEAD)"
+  TIP_BLOB="$V1"
   runuser -u "$OPERATOR_USER" -- git -C "$GREPO" checkout -q -b cand
   runuser -u "$OPERATOR_USER" -- bash -c "printf 'b\n' > '$GREPO/body.txt'"
   runuser -u "$OPERATOR_USER" -- git -C "$GREPO" add -A
@@ -646,7 +829,6 @@ switch_preflight(){
     || stop preflight_before "operator should write before switch"
   say "  BEFORE_WRITE=ok"
 
-  # Production switch function on this same repo.
   _switch_tree "$GREPO"
 
   if as_user_test_w "$OPERATOR_USER" "$GREPO/body.txt"; then
@@ -669,33 +851,40 @@ switch_preflight(){
   as_user_test_w "$BROKER_USER" "$GREPO" \
     || stop preflight_broker_root "broker cannot write project root after _switch_tree"
   as_user_test_w "$BROKER_USER" "$GREPO/body.txt" \
-    || stop preflight_broker_body "broker cannot write body after _switch_tree (sync needs owner write)"
+    || stop preflight_broker_body "broker cannot write body after _switch_tree"
   say "  AFTER_BROKER_WRITE=ok"
 
-  # Post-owner ACL (does not forbid broker body write).
+  # Post-switch: root `git show` without safe.directory must not be the delivery path.
+  if git -C "$GREPO" show "$TIP_BLOB:recovery/install-promote-target-acl.sh" >/dev/null 2>&1; then
+    say "  WARN: root git show unexpectedly worked without safe.directory (ownership may still be permissive)"
+  else
+    say "  POST_CHOWN_GIT_SHOW_AS_ROOT=blocked_or_failed (expected under dubious ownership)"
+  fi
+  # Delivery path after chown: materialized script file (not git show | bash).
   _install_post_switch_acl "$GREPO" "refs/heads/main"
+  say "  ACL_FROM_MATERIALIZED_SCRIPT=ok"
 
   local body_before body_after
   body_before="$(runuser -u "$BROKER_USER" -- cat "$GREPO/body.txt")"
   [ "$body_before" = "a" ] || stop preflight_body "expected body a before CAS"
-  runuser -u "$BROKER_USER" -- git \
-    -c "safe.directory=$GREPO" -c "core.hooksPath=/dev/null" \
-    -c "core.fsmonitor=false" -c "core.attributesFile=/dev/null" \
-    -C "$GREPO" update-ref refs/heads/main "$V2" "$V1" \
+  git_as_broker "$GREPO" update-ref refs/heads/main "$V2" "$V1" \
     || stop preflight_cas "broker update-ref CAS failed"
-  [ "$(runuser -u "$BROKER_USER" -- git -c "safe.directory=$GREPO" -C "$GREPO" rev-parse refs/heads/main)" = "$V2" ] \
+  [ "$(git_as_broker "$GREPO" rev-parse refs/heads/main)" = "$V2" ] \
     || stop preflight_ref "ref not at V2"
   body_after="$(runuser -u "$BROKER_USER" -- cat "$GREPO/body.txt")"
   [ "$body_after" = "a" ] || stop preflight_cas_body "CAS unexpectedly changed worktree"
 
-  # Sync as broker (trusted identity) — not zhong (lost git write).
-  runuser -u "$BROKER_USER" -- git \
-    -c "safe.directory=$GREPO" -c "core.hooksPath=/dev/null" \
-    -c "core.fsmonitor=false" -c "core.attributesFile=/dev/null" \
-    -C "$GREPO" restore --source=HEAD --staged --worktree -- . \
+  git_as_broker "$GREPO" restore --source=HEAD --staged --worktree -- . \
     || stop preflight_sync "broker restore/sync failed"
   [ "$(runuser -u "$BROKER_USER" -- cat "$GREPO/body.txt")" = "b" ] \
     || stop preflight_sync_body "broker sync did not land tip body"
+  say "  POST_SWITCH_ORDER=materialize→_switch_tree→materialized_ACL→broker_CAS→broker_sync OK"
+
+  mkdir -p "$HOST_IDENTITY_STATE"
+  printf 'commit=%s preflight=OK ts=%s script_cache=%s\n' \
+    "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SCRIPT_CACHE" > "$PREFLIGHT_STAMP"
+  chmod 0644 "$PREFLIGHT_STAMP"
+  say "  WROTE_STAMP=$PREFLIGHT_STAMP"
 
   _cleanup_pf
   trap - EXIT
@@ -708,21 +897,53 @@ switch_preconditions(){
     say "  REFUSE: broker not verified ($BROKER_MARKER absent)"
     return 1
   }
+  require_commit
+  [ -f "$PREFLIGHT_STAMP" ] || {
+    say "  REFUSE: preflight stamp missing ($PREFLIGHT_STAMP) — run prepare pack first (do not re-run preflight here)"
+    return 1
+  }
+  grep -q "commit=$COMMIT" "$PREFLIGHT_STAMP" || {
+    say "  REFUSE: preflight stamp commit mismatch"
+    return 1
+  }
+  [ -f "$SCRIPT_CACHE/install-promote-target-acl.sh" ] || {
+    say "  REFUSE: SCRIPT_CACHE incomplete ($SCRIPT_CACHE)"
+    return 1
+  }
+  _resolve_delete_cleared
   local d
+  for d in "${DELETE_CLEARED_PATHS[@]}"; do
+    if [ -e "$d" ]; then
+      say "  REFUSE: DELETE_CLEARED path still present: $d"
+      return 1
+    fi
+  done
+  # Any GENERATED_DEPS not cleared still block if present (UNKNOWN ownership).
   for d in "${GENERATED_DEPS[@]}"; do
     if [ -e "$d" ]; then
-      say "  REFUSE: generated dependency still present: $d"
-      return 1
+      local cleared=0
+      local c
+      for c in "${DELETE_CLEARED_PATHS[@]}"; do [ "$c" = "$d" ] && cleared=1; done
+      if [ "$cleared" != 1 ]; then
+        say "  REFUSE: uncleared generated dep still present (ownership UNKNOWN): $d"
+        return 1
+      fi
     fi
   done
   local root envf
   root="$EXTERNAL_DEP_ROOT"
   envf="$DEPS_ENV_PROD"
   if [ ! -f "$envf" ] || [ ! -x "$root/bin/rulesync" ]; then
-    say "  REFUSE: external deps not wired at $root (run deps-wire as root first)"
+    say "  REFUSE: external deps not at $root (prepare pack deps-wire as root)"
+    return 1
+  fi
+  # Necessary source tip must be on formal main (promoted).
+  if ! git -C "$AEGL_DEFAULT" merge-base --is-ancestor "$COMMIT" refs/heads/main 2>/dev/null; then
+    say "  REFUSE: commit $COMMIT not on refs/heads/main — promote host-identity tip first"
     return 1
   fi
   say "  broker marker: $(cat "$BROKER_MARKER")"
+  say "  preflight stamp: $(cat "$PREFLIGHT_STAMP")"
   return 0
 }
 
@@ -738,17 +959,14 @@ switch(){
   fi
   [ "$(id -u)" = 0 ] || stop need_root "switch requires root"
   require_commit
-  if [ "$SKIP_PREFLIGHT" = 1 ]; then
-    say "  switch-preflight skipped (--skip-preflight; already run this exec)"
-    SWITCH_PREFLIGHT_DONE=1
-  elif [ "$SWITCH_PREFLIGHT_DONE" = 1 ]; then
-    say "  switch-preflight skipped (already_done_this_process)"
-  else
-    switch_preflight || stop switch_preflight_failed "throwaway preflight failed"
+  # Switch pack never re-runs preflight — requires stamp from prepare pack.
+  if [ "$SKIP_PREFLIGHT" != 1 ] && [ "$SWITCH_PREFLIGHT_DONE" != 1 ]; then
+    stop switch_needs_prepare "run host-identity-prepare.sh first; switch pack uses --skip-preflight + stamp"
   fi
+  SWITCH_PREFLIGHT_DONE=1
+  [ -f "$SCRIPT_CACHE/install-promote-target-acl.sh" ] || materialize_scripts
   switch_preconditions || stop switch_preconditions "preconditions unmet"
   scan_unhandled_hardlinks
-
   local p
   for p in "${PROJECTS[@]}"; do
     PHASE="switch_tree:$(basename "$p")"
@@ -804,7 +1022,8 @@ broker_install_plan(){
 }
 
 main(){
-  say "AEGL host identity bootstrap  [mode=$MODE aegl=$AEGL_ROOT commit=${COMMIT:-none}]"
+  say "AEGL host identity bootstrap  [mode=$MODE aegl=$AEGL_ROOT commit=${COMMIT:-none} operator=$OPERATOR_USER home=$OPERATOR_HOME]"
+  say "  PNPM_BIN=${PNPM_BIN:-missing} NODE_BIN=${NODE_BIN:-missing} STORE=$PNPM_STORE_DEFAULT"
   case "$MODE" in
     plan)
       preflight_paths
@@ -813,13 +1032,15 @@ main(){
       prepare
       switch
       say ""
-      say "NOTE: switch refuses until broker-bind marker + deps-wire + deps removed."
+      say "NOTE: use prepare / cleanup / switch-apply packs separately."
       say "PARENT_RENAME_PROTECTION=UNRESOLVED"
       say "AI_BOUNDARY=PREP_READY_NOT_SWITCHED"
       ;;
     prepare) prepare ;;
     deps-plan) list_generated_deps ;;
     deps-wire) deps_wire ;;
+    cleanup-plan) cleanup_plan ;;
+    materialize) materialize_scripts ;;
     broker-bind) broker_bind ;;
     switch-preflight) require_commit; switch_preflight ;;
     switch) switch ;;

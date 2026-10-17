@@ -8,7 +8,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE="$ROOT/fixture"
 SPEC_KIT="$ROOT/upstream/spec-kit"
-RULESYNC_CLI="$ROOT/upstream/rulesync/dist/cli/index.js"
+# Prefer external rebuildable CLI when set (host-identity deps-wire); else in-tree dist.
+RULESYNC_CLI="${AEGL_RULESYNC_CLI:-$ROOT/upstream/rulesync/dist/cli/index.js}"
 export PATH="$HOME/.local/bin:$PATH"
 
 cd "$FIXTURE"

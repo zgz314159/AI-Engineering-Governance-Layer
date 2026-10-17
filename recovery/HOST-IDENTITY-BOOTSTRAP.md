@@ -1,54 +1,30 @@
-# Host identity bootstrap — Plan A (post-migrate execution prep)
+# Host identity — Plan A packs (post-migrate)
 
-Preparation for the three formal trees only. **This tip does not** run formal
-`switch`, delete in-tree `node_modules`, push, or deploy Cursor rules.
+Three **separate** trusted packs (do not chain prepare→switch in one session):
 
-## Scope
+1. `host-identity-prepare.sh` — materialize scripts, preflight once (stamp), broker-bind, deps-wire (reuse), prepare
+2. `host-identity-cleanup.sh` — delete only `DELETE_CLEARED` `node_modules` paths (`--apply`)
+3. `host-identity-switch-apply.sh` — after tip on `main`; uses stamp + `--skip-preflight`; switch + verify
 
-| Tree | Path |
-|---|---|
-| AEGL | `/home/zhong/Projects/AI-Engineering-Governance-Layer` |
-| Stack | `/home/zhong/Projects/Google-Android-Agent-Development-Stack` |
-| KeepLab | `/home/zhong/AppProjects/KeepLab-Relay` |
+`host-identity-exec.sh` is retired as a chained pack.
 
-- `zhong` / `aegl-ai`: no write to formal source or `.git`; `aegl-promote` owns trees and can CAS + sync.
-- Operator read via `aegl-ro` (refresh login after first `usermod -aG`).
-- Hermes/guard: sandbox root bind-mounts `contract_guard.py`; verifier checks source readable.
-- **PARENT_RENAME_PROTECTION=UNRESOLVED** — no Projects/AppProjects chattr.
-- Hardlinks: scanned and **refused** before any formal chown (no silent SKIP→OK).
+## Operator env (sudo-safe)
 
-## Modes
+Resolves `OPERATOR_HOME`, `pnpm`, `node`, store from the operator identity (`SUDO_USER`), not sudo `HOME`/`PATH`. Overrides: `--pnpm`, `--node`, `--pnpm-store`, `--deps-stage`, `--operator-home`.
 
-| Mode | Effect |
-|---|---|
-| `plan` | print only |
-| `prepare` / host prep | accounts/groups (may create `aegl-ro`) — not claimed as zero host change |
-| `deps-plan` | freeze two paths; owning-repo `ls-files` (not parent alone) |
-| `deps-wire` | rsync package+lock → external root; `pnpm install --frozen-lockfile`; entry wrappers + checks; delete prep printed only |
-| `broker-bind` | tip/file match + registry landed promote evidence; `--write-marker` only then |
-| `switch-preflight` | root: host prep → one throwaway repo → `_switch_tree` → deny zhong/aegl-ai → broker CAS + broker sync; non-root `NOT_RUN` |
-| `switch` | hardlink scan → three trees → ACL `--post-owner-switch`; `--skip-preflight` if already run |
-| `verify` | zhong **and** aegl-ai write denies; broker write; operator read |
+## Post-switch Git
 
-## Trusted delivery
+Scripts are materialized to `/var/lib/aegl/host-identity/scripts/<TIP>/` **before** chown. Later ACL/git use that cache or broker + command-level `safe.directory=<exact path>` (no global/`*`).
 
-```bash
-AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-TIP=<FULL_40_HEX>
-git -C "$AEGL" show "$TIP:recovery/host-identity-bootstrap.sh" \
-  | sudo bash -s -- --commit "$TIP" --aegl "$AEGL" <mode>
-git -C "$AEGL" show "$TIP:recovery/host-identity-exec.sh" \
-  | sudo bash -s -- --commit "$TIP"
-```
+## Architecture-guard fixture
 
-## External deps
+- Stale `.git` gitfile (wrong relative `gitdir`); canonical module worktree = `upstream/architecture-guard`
+- Delete cleared only as parent-ignored untracked specify `--dev` copy — **not** via upstream `ls-files=0`
 
-- Production: `/var/lib/aegl/rebuildable-deps` + `/etc/aegl/rebuildable-deps.env`
-- Non-root wire: `~/.local/state/aegl/rebuildable-deps-stage`
-- Entries: `$ROOT/bin/rulesync`, `$ROOT/bin/architecture-guard`; `AEGL_RULESYNC_CLI` consumed by `bin/aegl-recovery`
-- Formal in-tree delete is operator-gated after wire checks; this tip does not delete
+## RuleSync entry
 
-## Post-owner ACL
+`AEGL_RULESYNC_CLI` honored by `bridge/linux/50-positive-test.sh` and `aegl-recovery test_all` **after this tip is on main**. `doctor` does not use RuleSync. Isolation branch ≠ formal entry.
 
-`install-promote-target-acl.sh --post-owner-switch`: broker may write body (sync);
-zhong/aegl-ai still denied. Pre-switch ACL still forbids broker worktree write.
+## Gaps
+
+`PARENT_RENAME_PROTECTION=UNRESOLVED` · `AI_BOUNDARY=BLOCKED`
