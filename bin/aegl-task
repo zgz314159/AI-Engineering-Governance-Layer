@@ -315,18 +315,16 @@ require_broker() {
   identity_probe >&2 || die "promotion requires a VERIFIED independent broker (socket path/owner is not authorization; no env bypass)"
 }
 
-# When entry-bind pack policy is installed, refuse unless live findmnt mountpoints match.
-# No policy ⇒ no-op (pack not deployed). Never treats marker/policy alone as protection.
+# Production gate: fixed installed checker + /etc/aegl/entry-bind/policy (no env, no source fallback).
+# No policy ⇒ not deployed (do not claim protection). Policy ⇒ checker must exist and pass.
 require_parent_entry_binds() {
-  local checker=""
-  if [ -f /usr/local/lib/aegl-entry-bind/require-entry-binds.sh ]; then
-    checker=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
-  elif [ -f "$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh" ]; then
-    checker="$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh"
-  else
+  local policy=/etc/aegl/entry-bind/policy
+  local checker=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
+  if [ ! -e "$policy" ]; then
     return 0
   fi
-  bash "$checker" || die "parent entry binds required (live findmnt) but missing or incomplete"
+  [ -x "$checker" ] || die "entry-bind policy present but installed checker missing: $checker"
+  bash "$checker" || die "parent entry binds required (live RW self-bind) but missing or incomplete"
 }
 
 # trusted-controller primitive: run an arbitrary command in the sandbox for a task.

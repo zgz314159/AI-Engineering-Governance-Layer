@@ -3005,3 +3005,37 @@ AI_BOUNDARY=BLOCKED
 LIVE_MOUNT_AFTER_APPLY=NOT_RUN
 ```
 
+## Round update 56: entry-bind gate harden + Hermes/broker wire + ownership/uninstall + delivery
+
+Authorized source fix only in independent checkout — **no sudo, no formal install, no promote, no push**.
+No re-run of mount trial / recovery / model acceptance / P1–P3.
+
+### Fixes (four groups)
+
+| Group | Change |
+|---|---|
+| Production gate | Fixed `/etc/aegl/entry-bind/policy` (no `AEGL_ENTRY_BIND_POLICY`); deployed ⇒ installed checker + exact five paths + RW bind/rbind via `findmnt --mountpoint`; absent ⇒ `NOT_DEPLOYED` / `not_claimed` (never protection pass) |
+| Trusted execution sites | Same checker before Hermes sandbox prepare (`bin/aegl-hermes-sandbox`) and before broker `apply_to_ref` (`promotion_broker.py`); aegl-task/host-identity defense-in-depth only; **host entry updates require** `install-model-broker` + `install-broker`+restart after tip is on main |
+| Mount ownership / uninstall | FragmentPath + content hash + no drop-ins/symlinks; active name alone ≠ owned; reverse stop; stop/unmount failure keeps policy/units + non-zero; exact-file delete only (no `rm -rf` LIBDIR) |
+| Trusted delivery | zhong does not read formal `.git`; controller/root import with command-level exact `safe.directory`; broker promote; root extract+sha256 into `/var/tmp/aegl-entry-bind-root-*` then run that copy |
+
+### Point checks (this round)
+
+See tip commit message / operator return block. Root live verify: `NOT_RUN`.
+
+### Host impact after promote (precise)
+
+| Path | Updated by |
+|---|---|
+| `/usr/local/lib/aegl-entry-bind/*` + units + policy | `install-parent-entry-bind.sh --apply` |
+| `/usr/local/lib/aegl-model/aegl-hermes-sandbox` | `install-model-broker.sh --commit <TIP>` |
+| `/usr/local/lib/aegl-promote/promotion_broker.py` | `install-broker.sh --commit <TIP>` then `systemctl restart aegl-promote-broker` |
+
+```text
+PARENT_RENAME_PROTECTION=PACK_IN_TIP_GATES_WIRED_NOT_INSTALLED
+FORMAL_DEPLOY=NOT_DONE
+AI_BOUNDARY=BLOCKED
+LIVE_MOUNT_AFTER_APPLY=NOT_RUN
+HERMES_BROKER_HOST_ENTRY=NOT_RUN
+```
+

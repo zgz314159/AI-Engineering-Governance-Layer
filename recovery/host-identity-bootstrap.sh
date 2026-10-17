@@ -1004,21 +1004,20 @@ switch_preconditions(){
   fi
   say "  broker marker: $(cat "$BROKER_MARKER")"
   say "  preflight stamp: $(cat "$PREFLIGHT_STAMP")"
-  # Entry-bind pack: enforce live mounts only when policy installed (not marker-alone).
-  if [ -f /etc/aegl/entry-bind/policy ]; then
+  # Entry-bind pack: fixed installed checker only (no source fallback, no env policy).
+  if [ -e /etc/aegl/entry-bind/policy ]; then
     local eb_checker=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
-    [ -f "$eb_checker" ] || eb_checker="$AEGL_ROOT/recovery/parent-entry-bind/require-entry-binds.sh"
-    if [ ! -f "$eb_checker" ]; then
-      say "  REFUSE: entry-bind policy present but require-entry-binds.sh missing"
+    if [ ! -x "$eb_checker" ]; then
+      say "  REFUSE: entry-bind policy present but installed checker missing: $eb_checker"
       return 1
     fi
     if ! bash "$eb_checker"; then
-      say "  REFUSE: entry-bind policy present but live findmnt mounts incomplete"
+      say "  REFUSE: entry-bind policy present but live RW self-binds incomplete"
       return 1
     fi
-    say "  ENTRY_BIND=live_ok (policy+findmnt)"
+    say "  ENTRY_BIND=live_ok (policy+findmnt RW bind)"
   else
-    say "  ENTRY_BIND=pack_not_installed (policy absent; not claiming protection)"
+    say "  ENTRY_BIND=NOT_DEPLOYED (policy absent; not claiming protection)"
   fi
   return 0
 }

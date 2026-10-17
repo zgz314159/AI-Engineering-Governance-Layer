@@ -30,6 +30,7 @@ import os
 import re
 import socket
 import struct
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +42,51 @@ OPS = frozenset({"register", "record", "validate", "promote", "status"})
 
 DEFAULT_REGISTRY_DIR = "/var/lib/aegl-promote"
 REGISTRY_FILE = "registry.json"
+
+# Same production gate as require-entry-binds.sh / aegl-hermes-sandbox.
+# Host entry is /usr/local/lib/aegl-promote/promotion_broker.py after install-broker + restart;
+# tip source alone does not update the running broker.
+ENTRY_BIND_POLICY = "/etc/aegl/entry-bind/policy"
+ENTRY_BIND_CHECKER = "/usr/local/lib/aegl-entry-bind/require-entry-binds.sh"
+
+
+def require_entry_binds_before_apply() -> dict | None:
+    """Refuse formal apply when pack is deployed but live RW self-binds are not OK.
+
+    Returns None when allowed (not deployed, or deployed+live OK).
+    Returns a REJECTED decision dict when the gate fails.
+    """
+    if not os.path.exists(ENTRY_BIND_POLICY):
+        return None
+    if not os.path.isfile(ENTRY_BIND_CHECKER) or not os.access(ENTRY_BIND_CHECKER, os.X_OK):
+        return {
+            "decision": "REJECTED",
+            "reason": "entry_bind_checker_missing",
+            "checker": ENTRY_BIND_CHECKER,
+        }
+    try:
+        proc = subprocess.run(
+            [ENTRY_BIND_CHECKER],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {
+            "decision": "REJECTED",
+            "reason": "entry_bind_checker_exec_failed",
+            "detail": str(exc),
+        }
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if len(detail) > 500:
+            detail = detail[-500:]
+        return {
+            "decision": "REJECTED",
+            "reason": "entry_bind_not_live",
+            "detail": detail,
+        }
+    return None
 
 
 def _split_ids(raw: str) -> set:
@@ -255,6 +301,11 @@ def handle_request(request: dict, peer_uid: int, regdir: str, lock_fd: int) -> d
         target_oid = entry.get("target_oid")
         if not target_ref or not target_oid:
             return {"decision": "REJECTED", "reason": "target_not_bound", "task_id": task_id}
+        # Production entry-bind gate (server-side; not only aegl-task client).
+        gate = require_entry_binds_before_apply()
+        if gate is not None:
+            gate["task_id"] = task_id
+            return gate
         # Apply the EXACT approved commit onto the bound ref — no worktree re-read,
         # no branch name, no checkout of the formal tree.
         applied = promotion_core.apply_to_ref(

@@ -44,6 +44,17 @@ done
 [ "$(id -u)" = 0 ] || die "must run as root (to prepare mounts and drop to $AI_USER)"
 case "$TASK" in ""|*[!A-Za-z0-9._-]*) die "restricted task_id required" ;; esac
 [ "${#TASK}" -le 64 ] || die "task_id too long"
+# Entry-bind production gate (same checker as broker): before any sandbox prepare.
+# Installed launcher only — tip source under AEGL does not affect this path until
+# recovery/install-model-broker.sh reinstalls /usr/local/lib/aegl-model/aegl-hermes-sandbox.
+ENTRY_BIND_POLICY=/etc/aegl/entry-bind/policy
+ENTRY_BIND_CHECKER=/usr/local/lib/aegl-entry-bind/require-entry-binds.sh
+if [ -e "$ENTRY_BIND_POLICY" ]; then
+  [ -x "$ENTRY_BIND_CHECKER" ] || die "entry-bind policy present but checker missing: $ENTRY_BIND_CHECKER"
+  bash "$ENTRY_BIND_CHECKER" || die "entry-bind live RW self-binds required before Hermes sandbox"
+else
+  say "ENTRY_BIND_STATE=NOT_DEPLOYED (hermes: not claiming protection)"
+fi
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
 for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
 # shellcheck disable=SC1090
