@@ -98,6 +98,8 @@ pack_paths_in_commit(){
     || fail "$CHECKER_NAME missing in commit"
   git_repo cat-file -e "$COMMIT:recovery/parent-entry-bind/$DOC_NAME" 2>/dev/null \
     || fail "$DOC_NAME missing in commit"
+  git_repo cat-file -e "$COMMIT:recovery/parent-entry-bind/trusted-delivery.sh" 2>/dev/null \
+    || fail "trusted-delivery.sh missing in commit"
 }
 
 # systemd unit search paths (same-name unit/drop-in outside UNITDIR = foreign).
