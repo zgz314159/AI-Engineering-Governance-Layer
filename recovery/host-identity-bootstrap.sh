@@ -1045,8 +1045,8 @@ switch(){
   PHASE="switch_acl_keeplab"
   _install_post_switch_acl "$KEEPLAB_DEFAULT" "refs/heads/master"
 
-  say "  HOME traverse for broker: setfacl --x on $HOME_DIR"
-  run setfacl -m "u:$BROKER_USER:--x" "$HOME_DIR"
+  say "  HOME traverse for broker: setfacl -n --x on $HOME_DIR (no mask replay)"
+  run setfacl -n -m "u:$BROKER_USER:--x" "$HOME_DIR"
   say "  PARENT_RENAME_PROTECTION=UNRESOLVED"
   say "  LOGIN_GROUP_NOTE: refresh zhong session for $HUMAN_GROUP"
   say "SWITCH_RESULT=OK"
