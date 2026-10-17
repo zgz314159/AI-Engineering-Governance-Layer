@@ -48,14 +48,20 @@ Parse-only samples: `mountinfo-samples.txt` via
 
 ## Trusted delivery
 
-Use `trusted-delivery.sh` (extract from fixed TIP into root-only mktemp, hash-verify, run):
+Outer wrap (subshell): extract `trusted-delivery.sh` into **OUTER_RDIR** mode `0700`,
+`GOT=$(sudo sha256sum …)` (do not chmod the directory wider), EXIT deletes only that
+script + `rmdir` OUTER_RDIR, then prints `DELIVERY_EXIT_CODE`.
+
+Inner script creates a separate **inner RDIR** for installers:
 
 1. Import objects (`safe.directory=<exact>` only)
 2. `formal_pre_cas_check` (bind real main baseline; refuse real dirty)
 3. Broker register/record/promote with JSON `decision` checks
 4. `sync_formal_to_tip` as `aegl-promote` (reuse `BEGIN_FORMAL_SYNC`; main/HEAD/index/worktree)
-5. Install entry-bind + reinstall promote/model brokers from the same root-only dir
-6. EXIT cleans only this delivery’s explicit paths; candidate `worktree remove` without `--force`
+5. Install entry-bind + reinstall promote/model brokers from the inner RDIR
+6. Inner EXIT: on worktree remove failure keep EXT + git registration (no `rm -rf EXT`);
+   only `rmdir` empty EXT after successful remove; delete extracted files then `rmdir`
+   inner RDIR; never print `DELIVERY_RESULT=OK` unless cleanup final=0
 
 ## Status
 

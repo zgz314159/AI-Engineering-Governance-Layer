@@ -3061,3 +3061,19 @@ HERMES_BROKER_HOST_ENTRY=NOT_RUN
 FORMAL_SYNC_AFTER_PROMOTE=IN_DELIVERY_SCRIPT_NOT_RUN
 ```
 
+## Round update 58: delivery cleanup wrap (outer sudo sha256sum + EXT preserve)
+
+Delivery-only — **no mount/broker/sync design change; no sudo/promote/install/push**.
+
+| Item | Change |
+|---|---|
+| Outer GOT | `sudo sha256sum` on script; OUTER_RDIR stays mode 0700 |
+| Inner cleanup | worktree remove fail ⇒ keep EXT + registration, no `rm -rf EXT`; success ⇒ `rmdir` empty EXT only |
+| Success print | `DELIVERY_RESULT=OK` only after cleanup final=0; cleanup must not mask original failure |
+| Outer EXIT | subshell deletes only this run’s script + `rmdir` OUTER_RDIR; print `DELIVERY_EXIT_CODE` |
+
+```text
+FORMAL_DEPLOY=NOT_DONE
+AI_BOUNDARY=BLOCKED
+```
+

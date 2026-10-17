@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# trusted-delivery.sh — complete trusted-terminal delivery for parent-entry tip.
-# Extract from fixed SHA into a root-only dir and run THAT copy (never user tree).
+# trusted-delivery.sh — inner delivery (run from outer root-only copy).
 #
-#   TIP=<40-hex> DEV=... AEGL=...
-#   RDIR=$(sudo mktemp -d /var/tmp/aegl-entry-bind-root-XXXXXX)
-#   sudo install -o root -g root -m 0700 -d "$RDIR"
-#   sudo git -C "$AEGL" -c "safe.directory=$AEGL" show \
-#     "$TIP:recovery/parent-entry-bind/trusted-delivery.sh" \
-#     | sudo tee "$RDIR/trusted-delivery.sh" >/dev/null
-#   sudo chmod 0755 "$RDIR/trusted-delivery.sh"
-#   sudo bash "$RDIR/trusted-delivery.sh" --tip "$TIP" --dev "$DEV" --aegl "$AEGL"
+# Outer wrap (subshell; sudo sha256sum; keep outer dir mode 0700; EXIT cleans outer only):
+#   See PARENT-ENTRY-BIND.md / Round 58 terminal block — OUTER_RDIR holds only this
+#   script; this process creates a separate inner RDIR for installers.
 #
+# Inner cleanup: worktree remove failure keeps EXT + git registration (no rm -rf EXT).
 # No safe.directory=*. No worktree remove --force. Broker decision≠expected ⇒ stop.
 set -euo pipefail
 
@@ -41,24 +36,82 @@ BUSINESS_ROOT=/home/zhong/AppProjects
 
 RDIR=""; EXT=""
 CLEAN_PATHS=()
+DELIVERY_SUCCEEDED=0
 
+# Inner EXIT cleanup. Never masks a non-zero incoming status with success.
+# On worktree remove failure: keep EXT + git registration; do not rm -rf EXT.
 cleanup_all(){
-  local p
+  local incoming=$?
+  local final="$incoming"
+  local wt_err="" p
+
   if [ -n "${EXT:-}" ] && [ -d "${EXT}/wt" ]; then
-    git -C "$AEGL" -c "safe.directory=$AEGL" worktree remove "$EXT/wt" 2>/dev/null || true
+    set +e
+    wt_err="$(git -C "$AEGL" -c "safe.directory=$AEGL" worktree remove "$EXT/wt" 2>&1)"
+    local wt_rc=$?
+    set -e
+    if [ "$wt_rc" -ne 0 ]; then
+      printf 'CLEANUP_ERROR: worktree remove failed — keeping candidate and git registration\n' >&2
+      printf 'CLEANUP_ERROR: EXT=%s\n' "$EXT" >&2
+      printf 'CLEANUP_ERROR: wt=%s\n' "$EXT/wt" >&2
+      printf 'CLEANUP_ERROR: reason=%s\n' "${wt_err:-unknown}" >&2
+      printf 'CLEANUP_ERROR: not recursively deleting EXT\n' >&2
+      [ "$final" -eq 0 ] && final=1
+    else
+      if [ -d "$EXT" ]; then
+        if ! rmdir "$EXT" 2>/dev/null; then
+          printf 'CLEANUP_ERROR: EXT not empty after worktree remove: %s (left in place)\n' "$EXT" >&2
+          [ "$final" -eq 0 ] && final=1
+        else
+          EXT=""
+        fi
+      else
+        EXT=""
+      fi
+    fi
+  elif [ -n "${EXT:-}" ] && [ -d "${EXT:-}" ] && [ ! -e "${EXT}/wt" ]; then
+    if ! rmdir "$EXT" 2>/dev/null; then
+      printf 'CLEANUP_ERROR: EXT not empty (no wt): %s (left in place)\n' "$EXT" >&2
+      [ "$final" -eq 0 ] && final=1
+    else
+      EXT=""
+    fi
   fi
-  if [ -n "${EXT:-}" ] && [ -d "${EXT:-}" ]; then
-    rm -rf "$EXT"
-  fi
+
+  # Inner RDIR: delete only this run's extracted files, then rmdir (never rm -rf RDIR).
   for p in ${CLEAN_PATHS[@]+"${CLEAN_PATHS[@]}"}; do
     [ -n "$p" ] || continue
-    if [ -f "$p" ] || [ -d "$p" ]; then
-      rm -rf "$p"
+    if [ -f "$p" ]; then
+      rm -f "$p" || {
+        printf 'CLEANUP_ERROR: failed to remove extracted file %s\n' "$p" >&2
+        [ "$final" -eq 0 ] && final=1
+      }
     fi
   done
   if [ -n "${RDIR:-}" ] && [ -d "${RDIR:-}" ]; then
-    rm -rf "$RDIR"
+    if ! rmdir "$RDIR" 2>/dev/null; then
+      printf 'CLEANUP_ERROR: inner RDIR not empty after file deletes: %s\n' "$RDIR" >&2
+      [ "$final" -eq 0 ] && final=1
+    else
+      RDIR=""
+    fi
   fi
+
+  if [ "$incoming" -ne 0 ]; then
+    final="$incoming"
+  fi
+  if [ "$final" -ne 0 ]; then
+    printf 'DELIVERY_CLEANUP_FINAL=%s (not success; no DELIVERY_RESULT=OK)\n' "$final" >&2
+    exit "$final"
+  fi
+  if [ "$DELIVERY_SUCCEEDED" != 1 ]; then
+    printf 'DELIVERY_CLEANUP_FINAL=1 (exit without DELIVERY_RESULT=OK)\n' >&2
+    exit 1
+  fi
+  # Only print success after cleanup completed with final=0.
+  say "DELIVERY_RESULT=OK tip=$TIP"
+  say "FORMAL_DEPLOY=UNITS_STARTED_AND_BROKERS_REINSTALLED"
+  say "AI_BOUNDARY=BLOCKED"
 }
 trap cleanup_all EXIT
 
@@ -193,7 +246,8 @@ test "$(git_aegl rev-parse refs/heads/main)" = "$TIP"
 # Candidate cleanup WITHOUT --force (unexpected dirty must surface and stop).
 git_aegl worktree remove "$EXT/wt" \
   || stop worktree_remove_failed "worktree remove refused (dirty or unexpected state); not using --force"
-rm -rf "$EXT"
+rmdir "$EXT" \
+  || stop ext_not_empty "EXT not empty after worktree remove: $EXT (kept; not rm -rf)"
 EXT=""
 
 # --- 5) broker-owned formal sync (main/HEAD/index/worktree; no force overwrite) ---
@@ -223,7 +277,5 @@ test -S "$SOCK"
 
 bash "$RDIR/install-model-broker.sh" --repo "$AEGL" --commit "$TIP"
 
-say "DELIVERY_RESULT=OK tip=$TIP"
-say "FORMAL_DEPLOY=UNITS_STARTED_AND_BROKERS_REINSTALLED"
-say "AI_BOUNDARY=BLOCKED"
-# EXIT trap cleans RDIR + extracted paths
+DELIVERY_SUCCEEDED=1
+# EXIT trap prints DELIVERY_RESULT=OK only after inner cleanup succeeds
