@@ -146,6 +146,46 @@ def _git(repo: str, *args, env=None, input_text=None, check=False) -> subprocess
     )
 
 
+def _git_ok(repo: str, *args, env=None, input_text=None) -> subprocess.CompletedProcess:
+    """Run git; non-zero exit is a hard failure (never treated as empty success)."""
+    out = _git(repo, *args, env=env, input_text=input_text)
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout or "").strip()
+        raise RuntimeError("git_failed rc=%s args=%s detail=%s" % (out.returncode, args[:6], detail[:300]))
+    return out
+
+
+def _parse_name_status_z(stdout: str) -> list:
+    """Parse ``git diff --name-status -z --no-renames`` into ``(status, path)``.
+
+    NUL field separators preserve literal path bytes (including ``\\x2d`` in names).
+    Never unquotes C-style display strings from non-``-z`` output.
+    """
+    if not stdout:
+        return []
+    parts = stdout.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    rows = []
+    i = 0
+    while i < len(parts):
+        if i + 1 >= len(parts):
+            raise RuntimeError("name_status_z_truncated")
+        status, path = parts[i], parts[i + 1]
+        if not status or path is None:
+            raise RuntimeError("name_status_z_bad_field")
+        rows.append((status, path))
+        i += 2
+    return rows
+
+
+def _parse_ls_files_z(stdout: str) -> list:
+    """Parse ``git ls-files -z`` paths (literal names; trailing NUL)."""
+    if not stdout:
+        return []
+    return [p for p in stdout.split("\0") if p]
+
+
 def candidate_manifest(wt: str) -> str:
     script = (
         'cd "$1" && find . -name .git -prune -o -type f -print0 2>/dev/null '
@@ -155,18 +195,17 @@ def candidate_manifest(wt: str) -> str:
 
 
 def ignored_files(wt: str) -> list:
-    return [
-        p for p in _git(wt, "ls-files", "--others", "--ignored", "--exclude-standard").stdout.splitlines() if p
-    ]
+    out = _git_ok(wt, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
+    return _parse_ls_files_z(out.stdout)
 
 
 def changes_from_base(wt: str, base: str) -> list:
     rows = {}
-    for line in _git(wt, "diff", "--name-status", "--no-renames", base).stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            rows[parts[-1]] = {"status": parts[0], "path": parts[-1]}
-    for path in _git(wt, "ls-files", "--others", "--exclude-standard").stdout.splitlines():
+    diff = _git_ok(wt, "diff", "--name-status", "--no-renames", "-z", base)
+    for status, path in _parse_name_status_z(diff.stdout):
+        rows[path] = {"status": status, "path": path}
+    untracked = _git_ok(wt, "ls-files", "-z", "--others", "--exclude-standard")
+    for path in _parse_ls_files_z(untracked.stdout):
         rows.setdefault(path, {"status": "??", "path": path})
     for path in ignored_files(wt):
         rows.setdefault(path, {"status": "!!", "path": path})
@@ -228,7 +267,8 @@ def candidate_tree(wt: str, base: str, tmpdir: str | None = None) -> str:
     try:
         if _git(wt, "read-tree", base, env=env).returncode != 0:
             raise RuntimeError("read-tree failed")
-        paths = [p for p in _git(wt, "ls-files", "-co", "--exclude-standard", "-z").stdout.split("\0") if p]
+        ls = _git_ok(wt, "ls-files", "-co", "--exclude-standard", "-z")
+        paths = _parse_ls_files_z(ls.stdout)
         for rel in paths:
             if not os.path.lexists(os.path.join(wt, rel)):
                 _git(wt, "update-index", "--force-remove", "--", rel, env=env)
@@ -250,11 +290,18 @@ def candidate_tree(wt: str, base: str, tmpdir: str | None = None) -> str:
 
 
 def _tree_entry(proj: str, tree: str, path: str):
-    out = _git(proj, "ls-tree", "-z", tree, "--", path).stdout
-    if not out:
+    out = _git_ok(proj, "ls-tree", "-z", tree, "--", path)
+    if not out.stdout:
         return None
-    meta = out.split("\t", 1)[0].split()
-    return meta[0], meta[2]  # mode, sha
+    # ls-tree -z: "<mode> <type> <sha>\\t<path>\\0"
+    record = out.stdout.split("\0", 1)[0]
+    if "\t" not in record:
+        raise RuntimeError("ls_tree_z_bad_record")
+    meta, _name = record.split("\t", 1)
+    fields = meta.split()
+    if len(fields) < 3:
+        raise RuntimeError("ls_tree_z_bad_meta")
+    return fields[0], fields[2]  # mode, sha
 
 
 def classify_tree(proj: str, base: str, tree: str, wt: str | None = None) -> list:
@@ -262,11 +309,8 @@ def classify_tree(proj: str, base: str, tree: str, wt: str | None = None) -> lis
     rejected = []
     if wt is not None and ignored_files(wt):
         rejected.append({"path": "", "status": "!!", "reject": "ignored_file_present"})
-    for line in _git(proj, "diff", "--name-status", "--no-renames", base, tree).stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        status, path = parts[0], parts[-1]
+    diff = _git_ok(proj, "diff", "--name-status", "--no-renames", "-z", base, tree)
+    for status, path in _parse_name_status_z(diff.stdout):
         reason = None
         if path.startswith("/") or ".." in path.split("/"):
             reason = "path_escape"
@@ -281,11 +325,13 @@ def classify_tree(proj: str, base: str, tree: str, wt: str | None = None) -> lis
             else:
                 mode, sha = entry
                 if mode == "120000":
-                    target = _git(proj, "cat-file", "blob", sha).stdout
+                    blob = _git_ok(proj, "cat-file", "blob", sha)
+                    target = blob.stdout
                     if target.startswith("/") or ".." in target.split("/"):
                         reason = "symlink_escape"
                 else:
-                    size = int((_git(proj, "cat-file", "-s", sha).stdout or "0").strip() or 0)
+                    size_out = _git_ok(proj, "cat-file", "-s", sha)
+                    size = int((size_out.stdout or "0").strip() or 0)
                     if size > 5_000_000:
                         reason = "oversize"
         if reason:

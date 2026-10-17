@@ -3077,3 +3077,21 @@ FORMAL_DEPLOY=NOT_DONE
 AI_BOUNDARY=BLOCKED
 ```
 
+## Round update 59: classify_tree NUL path parse + broker-before-promote delivery
+
+Fixes false `path_escape` on literal `\\x2d` unit names (Git C-quote vs `-z`).
+
+| Item | Change |
+|---|---|
+| `classify_tree` / `changes_from_base` / `ignored_files` | `git … -z` + NUL field parse; `_git_ok` refuses non-zero as empty |
+| Regression | `recovery/classify-tree-quote-tests.sh`; reclassify tip `2f2a9bf…` vs `4a714de…` → 0 path_escape |
+| Delivery order | `trusted-delivery.sh` installs/restarts promote broker from tip **before** promote; task_id `parent-entry-bind-r59` (not r57; registry uncleared) |
+
+No `core.quotePath=false`, no classifier disable, no unit rename. Host install/promote: **NOT_RUN**.
+
+```text
+FORMAL_DEPLOY=NOT_DONE
+AI_BOUNDARY=BLOCKED
+CLASSIFY_QUOTE_FIX=IN_TIP_BROKER_HOST_NOT_UPDATED
+```
+

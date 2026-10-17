@@ -25,7 +25,9 @@ case "$TIP" in [0-9a-f]*) ;; *) printf 'DELIVERY_ERROR: --tip must be 40-hex\n' 
 [ -n "$DEV" ] && [ -d "$DEV/.git" ] || { printf 'DELIVERY_ERROR: --dev git checkout required\n' >&2; exit 1; }
 [ -n "$AEGL" ] && [ -d "$AEGL/.git" ] || { printf 'DELIVERY_ERROR: --aegl formal repo required\n' >&2; exit 1; }
 
-TASK_ID=parent-entry-bind-r57
+# Independent new task-id. Do NOT reuse parent-entry-bind-r57 (prior failed record);
+# do NOT clear /var/lib/aegl-promote registry; do NOT treat old registration as approval.
+TASK_ID=parent-entry-bind-r59
 SOCK=/run/aegl-promote/broker.sock
 LIBPROMOTE=/usr/local/lib/aegl-promote
 BROKER_BIN=$LIBPROMOTE/aegl-promote-broker
@@ -201,14 +203,41 @@ OP_USER="$BROKER_USER"
 # shellcheck disable=SC1090
 source "$RDIR/formal-sync-lib.sh"
 
-# --- 3) pre-CAS: bind actual main baseline; refuse real dirty ---
+# Root git in child installers: command-level exact safe.directory via env (never *).
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$AEGL"
+
+# --- 3) Install fixed promotion broker BEFORE promote (running classifier must match tip).
+# This trusted reinstall is NOT promote approval and does not bypass register/record/promote.
+say "== install fixed promotion broker from tip (before promote) =="
+[ -S "$SOCK" ] || die "broker socket missing before reinstall: $SOCK"
+bash "$RDIR/install-broker.sh" \
+  --repo "$AEGL" --projects-root "$PROJECTS_ROOT" --business-root "$BUSINESS_ROOT" --commit "$TIP"
+systemctl restart aegl-promote-broker
+systemctl is-active --quiet aegl-promote-broker
+test -S "$SOCK"
+WANT_CORE=$(git_aegl show "$TIP:recovery/promotion_core.py" | sha256sum | awk '{print $1}')
+GOT_CORE=$(sha256sum "$LIBPROMOTE/promotion_core.py" | awk '{print $1}')
+[ "$WANT_CORE" = "$GOT_CORE" ] \
+  || die "installed promotion_core.py sha mismatch want=$WANT_CORE got=$GOT_CORE"
+grep -q '_parse_name_status_z' "$LIBPROMOTE/promotion_core.py" \
+  || die "installed promotion_core.py missing NUL name-status parser"
+say "BROKER_CORE_INSTALLED sha256=$GOT_CORE (tip match; not yet promoted)"
+
+# Refuse reusing the failed task_id; leave registry intact.
+[ "$TASK_ID" != "parent-entry-bind-r57" ] \
+  || die "refusing task_id=parent-entry-bind-r57 (prior failed candidate registration)"
+say "TASK_ID=$TASK_ID (independent; registry not cleared; r57 not treated as approval)"
+
+# --- 4) pre-CAS: bind actual main baseline; refuse real dirty ---
 FORMAL_BASELINE_OID=""
 formal_pre_cas_check "$AEGL" main
 BASELINE_OID="$FORMAL_BASELINE_OID"
 say "FORMAL_BASELINE_OID=$BASELINE_OID"
 test "$(git_aegl rev-parse refs/heads/main)" = "$BASELINE_OID"
 
-# --- 4) candidate worktree (no --force on later remove) ---
+# --- 5) candidate worktree (no --force on later remove) ---
 EXT="$(mktemp -d /var/tmp/aegl-promote-cand-XXXXXX)" || die "mktemp EXT failed"
 chmod 0750 "$EXT"
 chown root:root "$EXT"
@@ -250,7 +279,7 @@ rmdir "$EXT" \
   || stop ext_not_empty "EXT not empty after worktree remove: $EXT (kept; not rm -rf)"
 EXT=""
 
-# --- 5) broker-owned formal sync (main/HEAD/index/worktree; no force overwrite) ---
+# --- 6) broker-owned formal sync (main/HEAD/index/worktree; no force overwrite) ---
 sync_formal_to_tip "$AEGL" "$TIP" main "$BASELINE_OID"
 test "$(git_aegl rev-parse refs/heads/main)" = "$TIP"
 test "$(git_aegl rev-parse HEAD)" = "$TIP"
@@ -258,24 +287,15 @@ test "$(runuser -u "$BROKER_USER" -- git -c "safe.directory=$AEGL" -C "$AEGL" re
 test -z "$(runuser -u "$BROKER_USER" -- git -c "safe.directory=$AEGL" -C "$AEGL" status --porcelain)"
 say "FORMAL_SYNC_OK main=HEAD=index/worktree @$TIP"
 
-# Root git in child installers: command-level exact safe.directory via env (never *).
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0=safe.directory
-export GIT_CONFIG_VALUE_0="$AEGL"
-
-# --- 6) install entry-bind pack from RDIR copy ---
+# --- 7) install entry-bind pack + model launcher (promote broker already at tip from step 3) ---
 bash "$RDIR/install-parent-entry-bind.sh" --repo "$AEGL" --commit "$TIP"
 bash "$RDIR/install-parent-entry-bind.sh" --repo "$AEGL" --commit "$TIP" --apply
 bash /usr/local/lib/aegl-entry-bind/require-entry-binds.sh
 
-# --- 7) reinstall promote + model brokers from RDIR copies (host entry ≠ tip source) ---
-bash "$RDIR/install-broker.sh" \
-  --repo "$AEGL" --projects-root "$PROJECTS_ROOT" --business-root "$BUSINESS_ROOT" --commit "$TIP"
-systemctl restart aegl-promote-broker
-systemctl is-active --quiet aegl-promote-broker
-test -S "$SOCK"
-
 bash "$RDIR/install-model-broker.sh" --repo "$AEGL" --commit "$TIP"
+# Confirm promote broker still matches tip after promote/sync (no silent downgrade).
+GOT_CORE2=$(sha256sum "$LIBPROMOTE/promotion_core.py" | awk '{print $1}')
+[ "$WANT_CORE" = "$GOT_CORE2" ] || die "promotion_core.py drifted after promote want=$WANT_CORE got=$GOT_CORE2"
 
 DELIVERY_SUCCEEDED=1
 # EXIT trap prints DELIVERY_RESULT=OK only after inner cleanup succeeds

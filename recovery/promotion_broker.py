@@ -247,7 +247,10 @@ def _op_record(request: dict, registry: dict) -> dict:
         return {"decision": "REJECTED", "reason": "base_not_ancestor_of_candidate"}
     if not promotion_core.is_ancestor(proj, entry["target_oid"], commit) and entry["target_oid"] != commit:
         return {"decision": "REJECTED", "reason": "target_not_ancestor_of_candidate"}
-    rejected = promotion_core.classify_tree(proj, base, tree, wt)
+    try:
+        rejected = promotion_core.classify_tree(proj, base, tree, wt)
+    except RuntimeError as exc:
+        return {"decision": "REJECTED", "reason": "classify_failed: %s" % exc}
     if rejected:
         reasons = sorted({r["reject"] for r in rejected})
         return {"decision": "REJECTED", "reason": "rejected_changes: " + ",".join(reasons)}

@@ -55,13 +55,13 @@ script + `rmdir` OUTER_RDIR, then prints `DELIVERY_EXIT_CODE`.
 Inner script creates a separate **inner RDIR** for installers:
 
 1. Import objects (`safe.directory=<exact>` only)
-2. `formal_pre_cas_check` (bind real main baseline; refuse real dirty)
-3. Broker register/record/promote with JSON `decision` checks
-4. `sync_formal_to_tip` as `aegl-promote` (reuse `BEGIN_FORMAL_SYNC`; main/HEAD/index/worktree)
-5. Install entry-bind + reinstall promote/model brokers from the inner RDIR
-6. Inner EXIT: on worktree remove failure keep EXT + git registration (no `rm -rf EXT`);
-   only `rmdir` empty EXT after successful remove; delete extracted files then `rmdir`
-   inner RDIR; never print `DELIVERY_RESULT=OK` unless cleanup final=0
+2. **Install fixed promote broker from tip + restart + sha256 match** (before promote;
+   not promote approval; required so running `classify_tree` sees NUL path parse)
+3. New independent `task_id` (e.g. `parent-entry-bind-r59`); never reuse
+   `parent-entry-bind-r57`; never clear registry
+4. `formal_pre_cas_check` → register/record/promote → `sync_formal_to_tip`
+5. Install entry-bind pack + model broker (promote broker already at tip)
+6. Inner EXIT: preserve EXT on worktree remove failure; `DELIVERY_RESULT=OK` only if cleanup final=0
 
 ## Status
 
