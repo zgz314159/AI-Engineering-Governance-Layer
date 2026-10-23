@@ -3141,5 +3141,13 @@ No remount, reinstall, re-promote, or model reinstall in this round.
 | External staging only | RuleSync generate PASS under `/var/tmp/aegl-cursor-project-rules-task/stack-staging-out/` |
 | KeepLab | Out of scope (AppProjects); no change |
 
-
-
+```text
+PLAN_A_HOST=COMPLETE tip=ae0e9eeb005dbed1a2baf60fec3dcda6eef3f553
+CURSOR_GLOBAL_RULESYNC=UNSUPPORTED_v25
+CURSOR_PROJECT_RULES_AEGL=COMMITTED_ISOLATION_BRANCH
+CURSOR_PROJECT_RULES_STACK=BLOCKED_NO_READABLE_GIT
+CURSOR_SESSION_LOAD=NOT_VERIFIED
+CURSOR_RESTART_PERSISTENCE=NOT_RUN
+FORMAL_PROMOTE_THIS_ROUND=NOT_RUN
+AI_BOUNDARY=BLOCKED
+```
