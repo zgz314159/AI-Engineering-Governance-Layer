@@ -1,8 +1,64 @@
-# Realistic mountinfo lines for parse-only checks (NOT host mount acceptance).
-# Format: EXPECT|path|mountinfo-line
-PASS|/home/zhong/Projects|123 45 259:2 /home/zhong/Projects /home/zhong/Projects rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
-PASS|/home/zhong/AppProjects|200 45 259:2 /home/zhong/AppProjects /home/zhong/AppProjects rw,relatime shared:3 - ext4 /dev/nvme1n1p2 rw,stripe=32
-FAIL|/home/zhong/Projects|124 45 259:2 /home/zhong/Projects /mnt/other rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
-FAIL|/home/zhong/Projects|125 45 259:2 /home/zhong/Projects /home/zhong/Projects ro,relatime shared:1 - ext4 /dev/nvme1n1p2 ro,stripe=32
-FAIL|/home/zhong/Projects|126 45 259:2 / /home/zhong/Projects rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
-FAIL|/home/zhong/Projects|127 45 259:2 /var/tmp/x /home/zhong/Projects rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+# Parse-only samples (NOT host mount acceptance). Multi-block CASE format.
+# Scenario A: single RW self-bind row (parent Projects itself).
+CASE single_projects_rw
+EXPECT=PASS
+PATH=/home/zhong/Projects
+MOUNTINFO
+722 44 259:9 /home/zhong/Projects /home/zhong/Projects rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
+
+CASE single_ro_refuse
+EXPECT=FAIL
+PATH=/home/zhong/Projects
+MOUNTINFO
+125 45 259:2 /home/zhong/Projects /home/zhong/Projects ro,relatime shared:1 - ext4 /dev/nvme1n1p2 ro,stripe=32
+END
+
+CASE fsroot_not_self_refuse
+EXPECT=FAIL
+PATH=/home/zhong/Projects
+MOUNTINFO
+126 45 259:2 / /home/zhong/Projects rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
+
+# Scenario B: live dual mountinfo — visible child under Projects bind (parent=722),
+# shadowed peer under root (parent=44). Must select 1076, not first/last blindly.
+CASE visible_child_under_projects
+EXPECT=PASS
+PATH=/home/zhong/Projects/AI-Engineering-Governance-Layer
+ANCESTOR_PATH=/home/zhong/Projects
+ANCESTOR_MID=722
+MOUNTINFO
+1076 722 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+1077 44 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
+
+CASE visible_child_order_reversed
+EXPECT=PASS
+PATH=/home/zhong/AppProjects/KeepLab-Relay
+ANCESTOR_PATH=/home/zhong/AppProjects
+ANCESTOR_MID=33
+MOUNTINFO
+950 44 259:9 /home/zhong/AppProjects/KeepLab-Relay /home/zhong/AppProjects/KeepLab-Relay rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+949 33 259:9 /home/zhong/AppProjects/KeepLab-Relay /home/zhong/AppProjects/KeepLab-Relay rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
+
+CASE no_parent_match_refuse
+EXPECT=FAIL
+PATH=/home/zhong/Projects/AI-Engineering-Governance-Layer
+ANCESTOR_PATH=/home/zhong/Projects
+ANCESTOR_MID=722
+MOUNTINFO
+1077 44 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+1078 44 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
+
+CASE true_stack_under_parent_refuse
+EXPECT=FAIL
+PATH=/home/zhong/Projects/AI-Engineering-Governance-Layer
+ANCESTOR_PATH=/home/zhong/Projects
+ANCESTOR_MID=722
+MOUNTINFO
+1076 722 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+1079 722 259:9 /home/zhong/Projects/AI-Engineering-Governance-Layer /home/zhong/Projects/AI-Engineering-Governance-Layer rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw,stripe=32
+END
