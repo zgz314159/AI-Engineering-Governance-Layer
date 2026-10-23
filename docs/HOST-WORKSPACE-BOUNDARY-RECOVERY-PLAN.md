@@ -3095,3 +3095,51 @@ AI_BOUNDARY=BLOCKED
 CLASSIFY_QUOTE_FIX=IN_TIP_BROKER_HOST_NOT_UPDATED
 ```
 
+
+## Round update 60: Plan A parent-entry-bind host complete + Cursor project thin rules (AEGL)
+
+### Plan A host (unchanged completion — do not re-run)
+
+| Item | Result |
+|---|---|
+| Formal `main`/`HEAD` | `ae0e9eeb005dbed1a2baf60fec3dcda6eef3f553` |
+| Entry-bind checker | RC=0; five `ENTRY_BIND_OK`; `ENTRY_BIND_STATE=DEPLOYED` |
+| Model broker + guard | Installed; guard sha256 `19f6be638c37b28d401820b7a4562f852a459188cbfa793f757668fe9b330455` |
+| VERIFY_OK | Host verify passed (operator) |
+
+No remount, reinstall, re-promote, or model reinstall in this round.
+
+### Cursor RuleSync — distinguish global vs project
+
+| Surface | State |
+|---|---|
+| Cursor **global** RuleSync (`generate --global --targets cursor`) | **Unsupported** on pinned RuleSync **v25.0.0** (`supportsGlobal: false`). Not a deploy target. |
+| Cursor **project-level** rules (`.cursor/rules/*.mdc`) | **Supported** by the same pin. Thin rules are the only Cursor deploy path. |
+| Ruler | **Not** introduced; pin unchanged. |
+| Session load / restart persistence | **NOT_VERIFIED** / **NOT_RUN** (no Cursor restart; static files ≠ load proof) |
+
+### This round — AEGL thin project rules (isolation branch)
+
+| Item | Result |
+|---|---|
+| Baseline | `ae0e9eeb005dbed1a2baf60fec3dcda6eef3f553` (full SHA; not used as an install pin) |
+| RuleSync CLI | `/var/lib/aegl/rebuildable-deps/bin/rulesync` → **25.0.0** |
+| Source | `.rulesync/rules/aegl-boundary.md` (from `governance/global-agent-policy.md` binding + `bin/aegl-task` entry) |
+| Generated | `.cursor/rules/aegl-boundary.mdc` (`alwaysApply: true`) |
+| Config | `rulesync.jsonc` (cursor rules only; `delete: false`) |
+| `generate --check` / regen identity | PASS / identical |
+| `AGENTS.md` / `CLAUDE.md` | **Not** created or modified (fixture copies untouched) |
+| Formal AEGL tree | **Unchanged** this round (no sudo / no promote) |
+
+### Stack thin rules — BLOCKED this round
+
+| Item | Result |
+|---|---|
+| Formal Stack `.git` | Unreadable by operator (`aegl-promote:aegl-broker`, `group::---`) |
+| `aegl-task start` | Unavailable (needs `git rev-parse` on formal project) |
+| Independent Stack checkout | Absent; this round forbids sudo trusted import |
+| External staging only | RuleSync generate PASS under `/var/tmp/aegl-cursor-project-rules-task/stack-staging-out/` |
+| KeepLab | Out of scope (AppProjects); no change |
+
+
+

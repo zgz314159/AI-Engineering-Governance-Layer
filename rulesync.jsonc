@@ -1,0 +1,10 @@
+{
+  "$schema": "https://github.com/dyoshikawa/rulesync/releases/download/v25.0.0/config-schema.json",
+  "targets": {
+    "cursor": { "rules": true }
+  },
+  "outputRoots": ["."],
+  "delete": false,
+  "verbose": true,
+  "silent": false
+}
