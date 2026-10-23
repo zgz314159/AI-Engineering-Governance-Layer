@@ -111,12 +111,27 @@ GUARD_PATH="$(LOCKC path)"       || fail "guard lock unreadable"
 GUARD_WANT="$(LOCKC sha256)"     || fail "guard lock unreadable"
 [ "$GUARD_PROJECT" = "Google-Android-Agent-Development-Stack" ] || fail "unexpected guard project: $GUARD_PROJECT"
 { [ "${#GUARD_COMMIT}" -eq 40 ] && [ "${#GUARD_WANT}" -eq 64 ]; } || fail "guard lock malformed"
-[ -d "$STACK_REPO/.git" ] || fail "Stack repository not found: $STACK_REPO"
-git -C "$STACK_REPO" cat-file -e "$GUARD_COMMIT^{commit}" 2>/dev/null || fail "guard pin commit not found: $GUARD_COMMIT"
 install -d -o root -g root -m 0755 "$LIBDIR/guard" || fail "mkdir $LIBDIR/guard"
-git -C "$STACK_REPO" show "$GUARD_COMMIT:$GUARD_PATH" > "$STAGE/contract_guard.py" || fail "cannot extract guard from the pinned commit"
+GUARD_SRC=""
+if [ -d "$STACK_REPO/.git" ] \
+  && git -C "$STACK_REPO" cat-file -e "$GUARD_COMMIT^{commit}" 2>/dev/null; then
+  git -C "$STACK_REPO" show "$GUARD_COMMIT:$GUARD_PATH" > "$STAGE/contract_guard.py" \
+    || fail "cannot extract guard from the pinned Stack commit"
+  GUARD_SRC="stack:$GUARD_COMMIT:$GUARD_PATH"
+else
+  # Stack object store may lack the pin (GC/shallow). Fall back to the AEGL-committed
+  # artifact that carries the same bytes; still verify lock sha256. Never use a live
+  # Stack worktree file.
+  AEGL_GUARD_ART="recovery/guard-pin/contract_guard.py"
+  git -C "$REPO" cat-file -e "$COMMIT:$AEGL_GUARD_ART" 2>/dev/null \
+    || fail "guard pin commit not found in Stack ($GUARD_COMMIT) and AEGL artifact missing: $AEGL_GUARD_ART"
+  git -C "$REPO" show "$COMMIT:$AEGL_GUARD_ART" > "$STAGE/contract_guard.py" \
+    || fail "cannot extract AEGL guard-pin artifact"
+  GUARD_SRC="aegl:$COMMIT:$AEGL_GUARD_ART"
+  say "  guard pin: Stack object missing; using AEGL artifact $AEGL_GUARD_ART"
+fi
 GUARD_GOT="$(sha_of < "$STAGE/contract_guard.py")"
-[ "$GUARD_GOT" = "$GUARD_WANT" ] || fail "guard hash mismatch at the pinned commit: want $GUARD_WANT got $GUARD_GOT"
+[ "$GUARD_GOT" = "$GUARD_WANT" ] || fail "guard hash mismatch (src=$GUARD_SRC): want $GUARD_WANT got $GUARD_GOT"
 install -o root -g root -m 0444 "$STAGE/contract_guard.py" "$LIBDIR/guard/contract_guard.py" || fail "guard copy install failed"
 { printf '# project=%s\n' "$GUARD_PROJECT"; printf '# commit=%s\n' "$GUARD_COMMIT";
   printf '# path=%s\n' "$GUARD_PATH"; printf '%s  contract_guard.py\n' "$GUARD_GOT"; } > "$LIBDIR/guard/guard-manifest.sha256"
