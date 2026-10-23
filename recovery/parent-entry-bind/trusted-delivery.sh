@@ -208,27 +208,138 @@ export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=safe.directory
 export GIT_CONFIG_VALUE_0="$AEGL"
 
-# --- 3) Install fixed promotion broker BEFORE promote (running classifier must match tip).
-# This trusted reinstall is NOT promote approval and does not bypass register/record/promote.
-say "== install fixed promotion broker from tip (before promote) =="
-[ -S "$SOCK" ] || die "broker socket missing before reinstall: $SOCK"
-bash "$RDIR/install-broker.sh" \
-  --repo "$AEGL" --projects-root "$PROJECTS_ROOT" --business-root "$BUSINESS_ROOT" --commit "$TIP"
-systemctl restart aegl-promote-broker
-systemctl is-active --quiet aegl-promote-broker
-test -S "$SOCK"
-WANT_CORE=$(git_aegl show "$TIP:recovery/promotion_core.py" | sha256sum | awk '{print $1}')
-GOT_CORE=$(sha256sum "$LIBPROMOTE/promotion_core.py" | awk '{print $1}')
-[ "$WANT_CORE" = "$GOT_CORE" ] \
-  || die "installed promotion_core.py sha mismatch want=$WANT_CORE got=$GOT_CORE"
-grep -q '_parse_name_status_z' "$LIBPROMOTE/promotion_core.py" \
-  || die "installed promotion_core.py missing NUL name-status parser"
-say "BROKER_CORE_INSTALLED sha256=$GOT_CORE (tip match; not yet promoted)"
+# --- 3) Ensure installed promote broker matches tip BEFORE promote.
+# install-broker.sh already restarts and waits for socket — never restart again here.
+# Matching tip + healthy service ⇒ skip install; mismatch ⇒ call installer once.
+# This trusted install is NOT promote approval and does not bypass register/record/promote.
+say "== ensure promotion broker matches tip (before promote) =="
 
-# Refuse reusing the failed task_id; leave registry intact.
-[ "$TASK_ID" != "parent-entry-bind-r57" ] \
-  || die "refusing task_id=parent-entry-bind-r57 (prior failed candidate registration)"
-say "TASK_ID=$TASK_ID (independent; registry not cleared; r57 not treated as approval)"
+broker_tip_sha(){
+  # tip blob sha256 for one recovery/bin path
+  git_aegl show "$TIP:$1" | sha256sum | awk '{print $1}'
+}
+
+broker_files_match_tip(){
+  local want got src dst
+  # Three installed files ↔ tip sources (same set as install-broker.sh FILES).
+  for src_dst in \
+    "bin/aegl-promote-broker:$LIBPROMOTE/aegl-promote-broker" \
+    "recovery/promotion_broker.py:$LIBPROMOTE/promotion_broker.py" \
+    "recovery/promotion_core.py:$LIBPROMOTE/promotion_core.py"
+  do
+    src="${src_dst%%:*}"
+    dst="${src_dst#*:}"
+    if [ ! -f "$dst" ]; then
+      say "  BROKER_FILE_MISSING path=$dst"
+      return 1
+    fi
+    want="$(broker_tip_sha "$src")"
+    got="$(sha256sum "$dst" | awk '{print $1}')"
+    if [ "$want" != "$got" ]; then
+      say "  BROKER_FILE_MISMATCH path=$dst want=$want got=$got"
+      return 1
+    fi
+    say "  BROKER_FILE_MATCH path=$dst sha256=$got"
+  done
+  return 0
+}
+
+wait_broker_socket(){
+  # Bounded wait as broker identity (max 5s). Clear step/rc/reason — no silent test.
+  local step="wait_broker_socket" i=0 rc=0 err=""
+  say "  $step: waiting up to 5s as $BROKER_USER for $SOCK"
+  while [ "$i" -lt 50 ]; do
+    set +e
+    runuser -u "$BROKER_USER" -- test -S "$SOCK"
+    rc=$?
+    set -e
+    if [ "$rc" = 0 ]; then
+      say "  $step: OK socket ready after ${i}00ms"
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  set +e
+  err="$(runuser -u "$BROKER_USER" -- ls -la "$SOCK" 2>&1)"
+  set -e
+  stop "$step" \
+    "socket not usable by $BROKER_USER after 5s path=$SOCK rc=$rc detail=${err:-none}"
+}
+
+check_task_registry(){
+  # Inspect registry only — never clear; never treat old rows as approval of this tip.
+  local reg=/var/lib/aegl-promote/registry.json
+  local step="check_task_registry"
+  [ "$TASK_ID" != "parent-entry-bind-r57" ] \
+    || stop "$step" "refusing task_id=parent-entry-bind-r57 (prior failed candidate)"
+  if [ ! -f "$reg" ]; then
+    say "  $step: registry absent path=$reg (ok; nothing to clear)"
+    return 0
+  fi
+  python3 - "$reg" "$TASK_ID" "$TIP" <<'PY' || stop "$step" "registry inspect failed"
+import json, sys
+reg_path, task_id, tip = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    data = json.load(open(reg_path, encoding="utf-8"))
+except Exception as exc:
+    print("REGISTRY_ERROR parse_failed: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print("REGISTRY_ERROR not_a_object", file=sys.stderr)
+    sys.exit(1)
+old = data.get("parent-entry-bind-r57")
+if old is not None:
+    print("REGISTRY_NOTE leftover_task=parent-entry-bind-r57 present=yes (not approval; left intact)")
+else:
+    print("REGISTRY_NOTE leftover_task=parent-entry-bind-r57 present=no")
+cur = data.get(task_id)
+if cur is None:
+    print("REGISTRY_NOTE task_id=%s present=no (fresh register allowed)" % task_id)
+    sys.exit(0)
+# Existing r59 row: refuse reuse as if it were a new approval of this tip.
+ac = cur.get("approved_commit") if isinstance(cur, dict) else None
+print("REGISTRY_REFUSE task_id=%s already_registered approved_commit=%s tip=%s" % (
+    task_id, ac, tip), file=sys.stderr)
+sys.exit(2)
+PY
+  say "  $step: OK (registry not cleared; r57 not treated as approval)"
+}
+
+WANT_CORE="$(broker_tip_sha recovery/promotion_core.py)"
+if broker_files_match_tip \
+  && systemctl is-active --quiet aegl-promote-broker; then
+  say "  BROKER_ALREADY_MATCHES_TIP commit=$TIP — skip install and restart"
+else
+  say "  BROKER_NEEDS_INSTALL commit=$TIP (mismatch or service not active)"
+  set +e
+  bash "$RDIR/install-broker.sh" \
+    --repo "$AEGL" --projects-root "$PROJECTS_ROOT" --business-root "$BUSINESS_ROOT" --commit "$TIP"
+  inst_rc=$?
+  set -e
+  [ "$inst_rc" = 0 ] \
+    || stop ensure_broker_install \
+      "install-broker.sh failed rc=$inst_rc (installer owns restart; not retrying here)"
+  # No second systemctl restart — installer already restarted and waited.
+  broker_files_match_tip \
+    || stop ensure_broker_verify "installed broker files still mismatch tip after install-broker"
+  set +e
+  systemctl is-active --quiet aegl-promote-broker
+  act_rc=$?
+  set -e
+  [ "$act_rc" = 0 ] \
+    || stop ensure_broker_active "aegl-promote-broker not active after install-broker rc=$act_rc"
+fi
+grep -q '_parse_name_status_z' "$LIBPROMOTE/promotion_core.py" \
+  || stop ensure_broker_parser "installed promotion_core.py missing NUL name-status parser"
+GOT_CORE="$(sha256sum "$LIBPROMOTE/promotion_core.py" | awk '{print $1}')"
+[ "$WANT_CORE" = "$GOT_CORE" ] \
+  || stop ensure_broker_core "promotion_core.py sha mismatch want=$WANT_CORE got=$GOT_CORE"
+say "BROKER_CORE_READY sha256=$GOT_CORE (tip match; not yet promoted)"
+
+wait_broker_socket
+check_task_registry
+say "TASK_ID=$TASK_ID (independent; registry not cleared)"
 
 # --- 4) pre-CAS: bind actual main baseline; refuse real dirty ---
 FORMAL_BASELINE_OID=""
@@ -257,8 +368,17 @@ BASE="$(git_aegl merge-base refs/heads/main "$TIP")"
 REG_JSON="$(python3 -c 'import json,sys;print(json.dumps({"protocol":"AEGL-BROKER/1","op":"register","task_id":sys.argv[1],"project":sys.argv[2],"base":sys.argv[3],"worktree":sys.argv[4],"branch":"plan/parent-entry-bind","target_ref":"refs/heads/main"}))' \
   "$TASK_ID" "$AEGL" "$BASE" "$EXT/wt")"
 
-[ -S "$SOCK" ] || die "broker socket missing: $SOCK"
-[ -x "$BROKER_BIN" ] || die "broker binary missing: $BROKER_BIN"
+if [ ! -x "$BROKER_BIN" ]; then
+  stop broker_bin "broker binary missing or not executable: $BROKER_BIN"
+fi
+# Socket already waited above; re-check once with clear failure (no silent test).
+set +e
+runuser -u "$BROKER_USER" -- test -S "$SOCK"
+sock_rc=$?
+set -e
+[ "$sock_rc" = 0 ] \
+  || stop broker_socket_pre_register \
+    "socket not usable by $BROKER_USER before register path=$SOCK rc=$sock_rc"
 
 broker_client_call REGISTER "$REG_JSON"
 require_decision REGISTER REGISTERED
