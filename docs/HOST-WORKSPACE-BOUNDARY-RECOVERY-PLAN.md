@@ -1,20 +1,25 @@
 # Host Recovery, Historical Cleanup, and AI Boundary Plan
 
-Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `AI_BOUNDARY=BLOCKED` — effective summary (Round 46): real Hermes sandbox trial `1838f28` `TRIAL_GATE=PASS`/`TRIAL_EXIT_CODE=0`; independent-UID promote broker installed and accepted (Round 16); Stage 3 full-stack trusted promote of `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68` → `main` with formal workspace closed clean (`STACK_RESULT=OK`, `STACK_EXIT_CODE=0`); remote push not executed. Remaining blockers: (A) host same-UID editors can still write formal project trees; (B) Cursor has no global RuleSync target (project-level decision pending). Do **not** treat “broker missing” or “stack not on main” as current blockers.
+Status: `SYSTEM_RECOVERED=PASS` · `HISTORY_CLEAN=PASS` · `PLAN_A_HOST=COMPLETE` · `REBOOT_PERSISTENCE=PASS` · `CURSOR_RULE_DEPLOYMENT=PASS` · `CURSOR_RULE_RECOGNITION=PASS` · `CURSOR_SESSION_INJECTION=NOT_VERIFIED` · `AI_BOUNDARY=BLOCKED` — effective summary (Round 61). Formal tips kept: AEGL `main`/`HEAD`=`61d4c99c292b8a85fe645a8119e069f101957964`; Stack `master`/`HEAD`=`3c63b53a3e7acf9893198c616688501190fcda89`. Cursor **global** RuleSync remains unsupported on pin v25.0.0 (not a blocker for project-level deploy). Remaining for not declaring overall `AI_BOUNDARY=PASS`: **session injection observation only** (`CURSOR_SESSION_INJECTION=NOT_VERIFIED`); no further Cursor develop/accept this round. Do **not** treat “broker missing”, “stack not on main”, “rules undeployed”, or “reboot unproven” as current blockers.
 
 
-## Current effective summary (Round 46)
+## Current effective summary (Round 61)
 
 | Outcome | State | Evidence |
 |---|---|---|
 | System recovery | **PASS** (kept) | Stage 1 final clean-copy verification |
 | History cleanup | **PASS** (kept) | Stage 2 recorded result |
-| Real Hermes sandbox + trusted capture | **PASS** | `1838f285ebe79e5fe092223eaee2b87008f302a7`, `TRIAL_GATE=PASS`, `TRIAL_EXIT_CODE=0` |
-| Independent-UID promote broker | **Installed + accepted** | Round 16 self-test; unit `aegl-promote-broker` active |
-| Stage 3 full-stack trusted promote | **PASS** | tip `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68` fast-forwarded to `main`; `BROKER_*_RC=0`, `decision=APPLIED` |
-| Formal AEGL on `main` clean | **PASS** | `HEAD=main` @ tip; empty porcelain; gradle-actions pin `50e97c2…` |
+| Real Hermes sandbox + trusted capture | **PASS** (kept) | `1838f285ebe79e5fe092223eaee2b87008f302a7` |
+| Independent-UID promote broker | **Installed + accepted** (kept) | Round 16; unit `aegl-promote-broker` |
+| Stage 3 / formal promote + sync | **PASS** (kept) | Broker `APPLIED` + formal sync for AEGL/Stack tips above |
+| Plan A parent-entry-bind host | **COMPLETE** | Five RW self-binds; checker `DEPLOYED` / `live_rw_self_bind_ok count=5` |
+| Entry-bind reboot persistence | **PASS** | Operator boot `2026-10-24 18:44:40`; target `active`/`enabled` RC=0; five `ENTRY_BIND_OK`; `CHECK_RC=0` |
+| Cursor project rule deployment | **PASS** | AEGL `.cursor/rules/aegl-boundary.mdc`; Stack `.cursor/rules/stack-boundary.mdc` on formal tips |
+| Cursor Rules UI recognition | **PASS** | Operator screenshots: AEGL lists `aegl-boundary`; Stack lists `stack-boundary` |
+| Cursor session injection | **NOT_VERIFIED** | Rules list recognition ≠ proof the agent session injected rule body; model “收到” is not evidence |
+| Cursor global RuleSync | **Unsupported** (pin v25) | Project-level only; not redefined as global complete |
 | Remote push | **Not executed** | No `git push` / PR in this program |
-| Overall `AI_BOUNDARY` | **BLOCKED** | Host same-UID write surface + Cursor RuleSync scope still open |
+| Overall `AI_BOUNDARY` | **BLOCKED** | Remaining observation: `CURSOR_SESSION_INJECTION=NOT_VERIFIED` only (this round) |
 
 Checkboxes below and historical round notes retain prior FAIL/fix/run-count records.
 
@@ -291,7 +296,7 @@ the projects. This is long-term enforcement, not a prerequisite for recovery.
 - [x] Capture the task baseline and classify every changed, deleted, renamed, ignored, and untracked path before promotion. (`git status --porcelain` in the worktree vs the recorded base commit.)
 - [x] Reject generated artifacts, secrets, binaries, APKs, logs, screenshots, caches, unexpected large files, path escapes, and project-owned source that exists only outside the candidate clean copy. (Verified by N3 symlink/escape, N4/N4b generated+secret, N5 body loss.)
 - [x] Require project tests, layout audit, clean-copy reconstruction, and a reviewable source diff; only the trusted controller may apply the approved diff. (Stage 3 tip promoted via independent-UID broker: root `register`/`record`, `aegl-ai` `promote`, `mode=fast_forward` onto `refs/heads/main` @ `c56425ca1a2ffad4f5d7da1e821a0b1fa6304c68`. Same-UID `AEGL_CONTROLLER_TOKEN` remains defense-in-depth only and is not the kernel identity boundary.)
-- [ ] Extend the existing RuleSync v25 source for installed agents without introducing Ruler. Rules and hooks are defense in depth; the OS sandbox and promotion gate remain authoritative. (Global Claude/Codex rules were created from a separate generic policy using RuleSync v25; Cursor global rules are unsupported by the pinned adapter, so all-target acceptance remains open.)
+- [x] Extend the existing RuleSync v25 source for installed agents without introducing Ruler. Rules and hooks are defense in depth; the OS sandbox and promotion gate remain authoritative. (Global Claude/Codex via RuleSync v25 kept. Cursor **global** unsupported on pin — accepted. Cursor **project-level** thin rules deployed + Rules-UI recognized for AEGL/Stack — Round 61. Session injection remains `NOT_VERIFIED`.)
 
 ## 3.4 Fixed final matrix
 
@@ -411,8 +416,10 @@ record without claiming final acceptance or changing the Stage 1/2 results.
   active, user `aegl-promote`, socket `/run/aegl-promote/broker.sock`,
   recorders=root, requesters=`aegl-ai`. Remaining work is candidate
   register/record/promote for a specific tip — not broker rebuild.)
-- [ ] Resolve Cursor's lack of global rules support without overwriting any
+- [x] Resolve Cursor's lack of global rules support without overwriting any
   existing project instruction file, or explicitly narrow the all-agent target.
+  (Accepted project-scope only; thin `.cursor/rules/*-boundary.mdc` deployed on AEGL+Stack
+  without overwriting `AGENTS.md`/`CLAUDE.md`. Global remains unsupported by pin — Round 61.)
 - [ ] Accept and promote the isolated Stage 3 implementation into the canonical
   AEGL checkout through the trusted path after the required conditions are met.
 
@@ -2480,6 +2487,12 @@ Do not introduce Ruler. Do not redefine “global complete” to mean project fi
 
 **This round:** no rule deploy.
 
+> **Superseded by Round 60–61 (do not erase historical proposal above):** AEGL + Stack
+> project-level thin rules were generated with pinned RuleSync v25, broker-promoted, and
+> formally synced. Operator Rules UI shows `aegl-boundary` / `stack-boundary` recognized.
+> `CURSOR_RULE_DEPLOYMENT=PASS`, `CURSOR_RULE_RECOGNITION=PASS`,
+> `CURSOR_SESSION_INJECTION=NOT_VERIFIED`. KeepLab still out of scope / `AGENTS.md` conflict.
+
 ### Next operator actions (finite)
 
 1. Decide remaining item A option (1 / 2 / 3 above).
@@ -3150,4 +3163,56 @@ CURSOR_SESSION_LOAD=NOT_VERIFIED
 CURSOR_RESTART_PERSISTENCE=NOT_RUN
 FORMAL_PROMOTE_THIS_ROUND=NOT_RUN
 AI_BOUNDARY=BLOCKED
+```
+
+
+## Round update 61: reboot persistence PASS + Cursor Rules UI recognition
+
+Documentation backfill only — **no** remount, reinstall, re-promote, RuleSync regenerate,
+Cursor restart, or session-injection test in this round.
+
+### Plan A host + reboot persistence (operator evidence)
+
+| Item | Result |
+|---|---|
+| Boot (post-deploy) | `2026-10-24 18:44:40` |
+| `systemctl is-active aegl-entry-bind.target` | `active`, `ACTIVE_RC=0` |
+| `systemctl is-enabled aegl-entry-bind.target` | `enabled`, `ENABLED_RC=0` |
+| `require-entry-binds.sh` | `CHECK_RC=0`; five `ENTRY_BIND_OK`; `ENTRY_BIND_STATE=DEPLOYED`; `ENTRY_BIND_PROTECTION=live_rw_self_bind_ok count=5` |
+| `REBOOT_PERSISTENCE` | **PASS** (deployment preceded this boot; live checks after boot) |
+| `PLAN_A_HOST` | **COMPLETE** (kept; not re-run) |
+
+### Formal tips (kept; not re-promoted this round)
+
+| Tree | Tip |
+|---|---|
+| AEGL `main` / worktree | `61d4c99c292b8a85fe645a8119e069f101957964` |
+| Stack `master` / worktree | `3c63b53a3e7acf9893198c616688501190fcda89` |
+
+### Cursor status (accurate distinction)
+
+| Signal | State | Meaning |
+|---|---|---|
+| `CURSOR_RULE_DEPLOYMENT` | **PASS** | Formal trees carry `.cursor/rules/aegl-boundary.mdc` and `stack-boundary.mdc` |
+| `CURSOR_RULE_RECOGNITION` | **PASS** | Operator screenshots: AEGL Rules list shows `aegl-boundary`; Stack shows `stack-boundary` |
+| `CURSOR_SESSION_INJECTION` | **NOT_VERIFIED** | Recognition ≠ session body injection; model “收到” is **not** evidence |
+| Cursor global RuleSync | **Unsupported** (v25) | Unchanged; project-level deploy is not “global complete” |
+
+Do **not** keep writing “rules undeployed” after Round 61. Do **not** declare overall
+`AI_BOUNDARY=PASS` while session injection is unobserved. No further Cursor develop/accept
+this round for the injection item.
+
+```text
+SYSTEM_RECOVERED=PASS
+HISTORY_CLEAN=PASS
+PLAN_A_HOST=COMPLETE
+REBOOT_PERSISTENCE=PASS
+CURSOR_RULE_DEPLOYMENT=PASS
+CURSOR_RULE_RECOGNITION=PASS
+CURSOR_SESSION_INJECTION=NOT_VERIFIED
+CURSOR_GLOBAL_RULESYNC=UNSUPPORTED_v25
+AEGL_TIP=61d4c99c292b8a85fe645a8119e069f101957964
+STACK_TIP=3c63b53a3e7acf9893198c616688501190fcda89
+AI_BOUNDARY=BLOCKED
+REMAINING=CURSOR_SESSION_INJECTION_OBSERVATION_ONLY
 ```
