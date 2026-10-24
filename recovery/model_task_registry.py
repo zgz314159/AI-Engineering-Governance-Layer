@@ -58,12 +58,20 @@ class DurabilityError(RegistryError):
     exit_code = EXIT_DURABILITY
 
 
+class PrecommitIOError(RegistryError):
+    exit_code = EXIT_IO
+
+
 class NotFoundError(RegistryError):
     exit_code = EXIT_NOT_FOUND
 
 
 def _reject(reason: str, message: str) -> None:
     raise ValidationError(reason, message)
+
+
+def _fail(error_cls, reason: str, message: str) -> None:
+    raise error_cls(reason, message)
 
 
 def validate_task_id(task_id: str) -> str:
@@ -113,11 +121,64 @@ def _validate_project(path: str) -> str:
     return real
 
 
-def _read_contract_json(path: str, label: str) -> dict:
+def _check_trusted_dir(path: str, label: str, *, trusted_uid: int) -> None:
     if os.path.islink(path):
         _reject("symlink_path", "%s must not be a symlink" % label)
-    if not os.path.isfile(path):
-        _reject("missing_file", "%s is missing" % label)
+    st = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(st.st_mode):
+        _reject("not_a_directory", "%s is not a directory" % label)
+    if st.st_uid not in (0, trusted_uid):
+        _reject("contract_not_trusted", "%s must be root-controlled" % label)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        _reject("contract_writable", "%s must not be group/other writable" % label)
+
+
+def _check_trusted_file(path: str, label: str, *, trusted_uid: int) -> None:
+    if os.path.islink(path):
+        _reject("symlink_path", "%s must not be a symlink" % label)
+    st = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(st.st_mode):
+        _reject("not_a_regular_file", "%s is not a regular file" % label)
+    if st.st_uid not in (0, trusted_uid):
+        _reject("contract_file_not_trusted", "%s must be root-controlled" % label)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        _reject("contract_file_writable", "%s must not be group/other writable" % label)
+
+
+def _check_trusted_parent_chain(
+    path: str,
+    label: str,
+    *,
+    trusted_uid: int,
+    reason_prefix: str,
+    error_cls,
+) -> None:
+    parent = os.path.dirname(path)
+    while True:
+        if os.path.islink(parent):
+            _fail(error_cls, "symlink_path", "%s parent must not be a symlink: %s" % (label, parent))
+        st = os.stat(parent, follow_symlinks=False)
+        if not stat.S_ISDIR(st.st_mode):
+            _fail(error_cls, "not_a_directory", "%s parent is not a directory: %s" % (label, parent))
+        if st.st_uid not in (0, trusted_uid):
+            _fail(
+                error_cls,
+                reason_prefix + "_parent_not_trusted",
+                "%s parent must be root-controlled: %s" % (label, parent),
+            )
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not (st.st_mode & stat.S_ISVTX):
+            _fail(
+                error_cls,
+                reason_prefix + "_parent_writable",
+                "%s parent is writable by untrusted identities: %s" % (label, parent),
+            )
+        if parent == "/":
+            break
+        parent = os.path.dirname(parent)
+
+
+def _read_contract_json(path: str, label: str, *, trusted_uid: int) -> dict:
+    _check_trusted_file(path, label, trusted_uid=trusted_uid)
     try:
         with open(path, encoding="utf-8") as handle:
             value = json.load(handle)
@@ -128,20 +189,32 @@ def _read_contract_json(path: str, label: str) -> dict:
     return value
 
 
-def _validate_contract(package: str, worktree_real: str) -> str:
+def _validate_contract(package: str, worktree_real: str, *, trusted_uid: int) -> str:
     pkg = _real_existing_dir(package, "contract_package")
+    _check_trusted_dir(pkg, "contract_package", trusted_uid=trusted_uid)
+    _check_trusted_parent_chain(
+        pkg,
+        "contract_package",
+        trusted_uid=trusted_uid,
+        reason_prefix="contract",
+        error_cls=ValidationError,
+    )
     impl = _read_contract_json(
         os.path.join(pkg, "implementation-contract.json"),
         "implementation-contract.json",
+        trusted_uid=trusted_uid,
     )
     ctx = _read_contract_json(
         os.path.join(pkg, "project-context.json"),
         "project-context.json",
+        trusted_uid=trusted_uid,
     )
 
     source_root = ctx.get("source_root")
     if not isinstance(source_root, str) or not os.path.isabs(source_root):
         _reject("bad_source_root", "project-context.json source_root must be absolute")
+    if os.path.islink(source_root):
+        _reject("symlink_path", "project-context.json source_root must not be a symlink")
     try:
         root = os.path.realpath(source_root, strict=True)
     except OSError:
@@ -168,7 +241,9 @@ def _validate_contract(package: str, worktree_real: str) -> str:
     return pkg
 
 
-def validate_entry(entry: dict, *, ai_uid: int) -> dict:
+def validate_entry(entry: dict, *, ai_uid: int, trusted_uid: int | None = None) -> dict:
+    if trusted_uid is None:
+        trusted_uid = os.getuid()
     if not isinstance(entry, dict):
         _reject("invalid_entry", "entry must be an object")
     missing = [field for field in ENTRY_FIELDS if not isinstance(entry.get(field), str) or not entry[field]]
@@ -181,7 +256,7 @@ def validate_entry(entry: dict, *, ai_uid: int) -> dict:
     worktree = _validate_owned_dir(entry["worktree"], "worktree", ai_uid)
     scratch = _validate_owned_dir(entry["scratch"], "scratch", ai_uid)
     project = _validate_project(entry["project"])
-    contract = _validate_contract(entry["contract_package"], worktree)
+    contract = _validate_contract(entry["contract_package"], worktree, trusted_uid=trusted_uid)
     return {
         "worktree": worktree,
         "scratch": scratch,
@@ -200,6 +275,8 @@ def _load_registry(path: str, *, require_root_owner: bool) -> dict:
         raise RegistryInvalid("registry_not_regular", "registry is not a regular file")
     if require_root_owner and st.st_uid != 0:
         raise RegistryInvalid("registry_not_root_owned", "registry must be owned by root")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RegistryInvalid("registry_writable", "registry must not be group/other writable")
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
@@ -222,14 +299,23 @@ def _load_registry(path: str, *, require_root_owner: bool) -> dict:
 
 
 def _check_registry_dir(dirpath: str, *, require_root_owner: bool) -> None:
-    st = os.stat(dirpath)
+    trusted_uid = 0 if require_root_owner else os.getuid()
+    if os.path.islink(dirpath):
+        raise RegistryInvalid("registry_dir_symlink", "registry parent must not be a symlink")
+    st = os.stat(dirpath, follow_symlinks=False)
     if not stat.S_ISDIR(st.st_mode):
         raise RegistryInvalid("registry_dir", "registry parent is not a directory")
-    if require_root_owner:
-        if st.st_uid != 0:
-            raise RegistryInvalid("registry_dir_not_root", "registry parent must be owned by root")
-        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise RegistryInvalid("registry_dir_writable", "registry parent must not be group/other writable")
+    if st.st_uid not in (0, trusted_uid):
+        raise RegistryInvalid("registry_dir_not_root", "registry parent must be root-controlled")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RegistryInvalid("registry_dir_writable", "registry parent must not be group/other writable")
+    _check_trusted_parent_chain(
+        dirpath,
+        "registry_dir",
+        trusted_uid=trusted_uid,
+        reason_prefix="registry",
+        error_cls=RegistryInvalid,
+    )
 
 
 def _open_lock(lock_path: str, *, require_root_owner: bool) -> int:
@@ -245,7 +331,8 @@ def _open_lock(lock_path: str, *, require_root_owner: bool) -> int:
             raise RegistryInvalid("lock_not_regular", "lock file is not a regular file")
         if require_root_owner and st.st_uid != 0:
             raise RegistryInvalid("lock_not_root_owned", "lock file must be owned by root")
-        os.fchmod(fd, 0o600)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RegistryInvalid("lock_writable", "lock file must not be group/other writable")
     except Exception:
         os.close(fd)
         raise
@@ -273,28 +360,45 @@ def _atomic_write(path: str, data: dict, *, require_root_owner: bool) -> None:
             raise RegistryInvalid("registry_not_regular", "registry is not a regular file")
         if require_root_owner and st.st_uid != 0:
             raise RegistryInvalid("registry_not_root_owned", "registry must be owned by root")
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RegistryInvalid("registry_writable", "registry must not be group/other writable")
         mode = stat.S_IMODE(st.st_mode)
         uid, gid = st.st_uid, st.st_gid
     else:
         mode = 0o644
         uid, gid = (0, 0) if require_root_owner else (os.getuid(), os.getgid())
 
-    fd, tmp = tempfile.mkstemp(prefix=".registry.", dir=dirpath)
-    replaced = False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-            os.fchmod(handle.fileno(), mode)
-            if (uid, gid) != (os.getuid(), os.getgid()):
-                os.fchown(handle.fileno(), uid, gid)
+        fd, tmp = tempfile.mkstemp(prefix=".registry.", dir=dirpath)
+    except OSError as exc:
+        raise PrecommitIOError("precommit_io", "temp file creation failed: %s" % exc) from exc
+
+    replaced = False
+    fd_owned = True
+    try:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            fd_owned = False
+            with handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fchmod(handle.fileno(), mode)
+                if (uid, gid) != (os.getuid(), os.getgid()):
+                    os.fchown(handle.fileno(), uid, gid)
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise PrecommitIOError(
+                "precommit_io",
+                "pre-commit write/metadata/fsync failed: %s" % exc,
+            ) from exc
+
         try:
             os.replace(tmp, path)
         except OSError as exc:
-            raise RegistryError("replace_io", "registry replace failed: %s" % exc) from exc
+            raise PrecommitIOError("precommit_io", "registry replace failed: %s" % exc) from exc
         replaced = True
+
         try:
             _fsync_dir(dirpath)
         except OSError as exc:
@@ -303,6 +407,11 @@ def _atomic_write(path: str, data: dict, *, require_root_owner: bool) -> None:
                 "registry was replaced, but directory fsync failed; durability is uncertain",
             ) from exc
     finally:
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if not replaced:
             try:
                 os.unlink(tmp)
@@ -319,8 +428,11 @@ def register(
     project: str,
     contract_package: str,
     ai_uid: int,
+    trusted_uid: int | None = None,
     require_root_owner: bool = False,
 ) -> dict:
+    if trusted_uid is None:
+        trusted_uid = 0 if require_root_owner else os.getuid()
     validate_task_id(task_id)
     entry = validate_entry(
         {
@@ -330,6 +442,7 @@ def register(
             "contract_package": contract_package,
         },
         ai_uid=ai_uid,
+        trusted_uid=trusted_uid,
     )
 
     dirpath = os.path.dirname(registry_path) or "."
@@ -422,6 +535,7 @@ def main(argv=None) -> int:
                 project=args.project,
                 contract_package=args.contract_package,
                 ai_uid=_ai_uid(),
+                trusted_uid=0,
                 require_root_owner=True,
             )
         except RegistryError as exc:

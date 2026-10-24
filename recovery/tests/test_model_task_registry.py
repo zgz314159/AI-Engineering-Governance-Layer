@@ -19,16 +19,22 @@ TEST_BASE = "/var/tmp"
 
 def make_tree(base: Path, name: str) -> dict:
     root = base / name
-    (root / "project").mkdir(parents=True)
-    (root / "scratch").mkdir()
-    (root / "contract").mkdir()
-    (root / "formal" / ".git").mkdir(parents=True)
-    (root / "contract" / "project-context.json").write_text(
-        json.dumps({"source_root": str(root)}), encoding="utf-8"
-    )
-    (root / "contract" / "implementation-contract.json").write_text(
-        json.dumps({"allowed_paths": ["project/"]}), encoding="utf-8"
-    )
+    for path in (
+        root,
+        root / "project",
+        root / "scratch",
+        root / "contract",
+        root / "formal",
+        root / "formal" / ".git",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o755)
+    ctx = root / "contract" / "project-context.json"
+    impl = root / "contract" / "implementation-contract.json"
+    ctx.write_text(json.dumps({"source_root": str(root)}), encoding="utf-8")
+    impl.write_text(json.dumps({"allowed_paths": ["project/"]}), encoding="utf-8")
+    os.chmod(ctx, 0o644)
+    os.chmod(impl, 0o644)
     return {
         "worktree": str(root / "project"),
         "scratch": str(root / "scratch"),
@@ -47,6 +53,7 @@ def _worker(registry: str, task_id: str, tree: dict, ai_uid: int, queue) -> None
             project=tree["project"],
             contract_package=tree["contract_package"],
             ai_uid=ai_uid,
+            trusted_uid=ai_uid,
             require_root_owner=False,
         )
         queue.put(("ok", task_id))
@@ -60,12 +67,15 @@ class RegistryTests(unittest.TestCase):
         self.base = Path(self.tmp.name)
         self.registry = self.base / "registry.json"
         self.registry.write_text("{}\n", encoding="utf-8")
+        os.chmod(self.registry, 0o644)
         self.ai_uid = os.getuid()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def register(self, task_id: str, tree: dict) -> dict:
+    def register(self, task_id: str, tree: dict, *, trusted_uid=None) -> dict:
+        if trusted_uid is None:
+            trusted_uid = self.ai_uid
         return mtr.register(
             str(self.registry),
             task_id,
@@ -74,6 +84,7 @@ class RegistryTests(unittest.TestCase):
             project=tree["project"],
             contract_package=tree["contract_package"],
             ai_uid=self.ai_uid,
+            trusted_uid=trusted_uid,
             require_root_owner=False,
         )
 
@@ -119,7 +130,7 @@ class RegistryTests(unittest.TestCase):
             "contract_package": tree["contract_package"],
         }
         with self.assertRaises(mtr.ValidationError) as ctx:
-            mtr.validate_entry(entry, ai_uid=self.ai_uid)
+            mtr.validate_entry(entry, ai_uid=self.ai_uid, trusted_uid=self.ai_uid)
         self.assertEqual(ctx.exception.reason, "missing_field")
 
     def test_path_outside_allowed_base_rejected(self):
@@ -149,19 +160,119 @@ class RegistryTests(unittest.TestCase):
             self.register("badroot", tree)
         self.assertEqual(ctx.exception.reason, "worktree_outside_source_root")
 
+    def test_contract_dir_writable_rejected(self):
+        tree = make_tree(self.base, "contractwritable")
+        contract = Path(tree["contract_package"])
+        os.chmod(contract, 0o777)
+        try:
+            with self.assertRaises(mtr.ValidationError) as ctx:
+                self.register("contractwritable", tree)
+            self.assertEqual(ctx.exception.reason, "contract_writable")
+        finally:
+            os.chmod(contract, 0o755)
+
+    def test_contract_file_writable_rejected(self):
+        tree = make_tree(self.base, "contractfilewritable")
+        target = Path(tree["contract_package"]) / "implementation-contract.json"
+        os.chmod(target, 0o666)
+        try:
+            with self.assertRaises(mtr.ValidationError) as ctx:
+                self.register("contractfilewritable", tree)
+            self.assertEqual(ctx.exception.reason, "contract_file_writable")
+        finally:
+            os.chmod(target, 0o644)
+
+    def test_contract_parent_writable_rejected(self):
+        tree = make_tree(self.base, "contractparent")
+        root = Path(tree["worktree"]).parent
+        contract = Path(tree["contract_package"])
+        os.chmod(contract, 0o555)
+        os.chmod(root, 0o777)
+        try:
+            with self.assertRaises(mtr.ValidationError) as ctx:
+                self.register("contractparent", tree)
+            self.assertEqual(ctx.exception.reason, "contract_parent_writable")
+        finally:
+            os.chmod(root, 0o755)
+            os.chmod(contract, 0o755)
+
+    def test_contract_dir_not_trusted_rejected(self):
+        tree = make_tree(self.base, "contractuntrusted")
+        with self.assertRaises(mtr.ValidationError) as ctx:
+            self.register("contractuntrusted", tree, trusted_uid=0)
+        self.assertEqual(ctx.exception.reason, "contract_not_trusted")
+
+    def test_contract_symlink_rejected(self):
+        tree = make_tree(self.base, "contractlink")
+        link = self.base / "contract-link"
+        os.symlink(tree["contract_package"], link)
+        tree["contract_package"] = str(link)
+        with self.assertRaises(mtr.ValidationError) as ctx:
+            self.register("contractlink", tree)
+        self.assertEqual(ctx.exception.reason, "symlink_path")
+
+    def test_registry_group_writable_rejected(self):
+        before = self.registry.read_bytes()
+        os.chmod(self.registry, 0o666)
+        try:
+            with self.assertRaises(mtr.RegistryInvalid) as ctx:
+                self.register("x", make_tree(self.base, "x"))
+            self.assertEqual(ctx.exception.reason, "registry_writable")
+            self.assertEqual(before, self.registry.read_bytes())
+        finally:
+            os.chmod(self.registry, 0o644)
+
+    def test_registry_symlink_rejected(self):
+        target = self.base / "real-registry.json"
+        target.write_text("{}\n", encoding="utf-8")
+        os.chmod(target, 0o644)
+        self.registry.unlink()
+        os.symlink(target, self.registry)
+        with self.assertRaises(mtr.RegistryInvalid) as ctx:
+            self.register("x", make_tree(self.base, "x"))
+        self.assertEqual(ctx.exception.reason, "registry_symlink")
+        self.assertEqual(target.read_text(encoding="utf-8"), "{}\n")
+
     def test_mode_preserved(self):
         os.chmod(self.registry, 0o600)
         self.register("mode", make_tree(self.base, "mode"))
         self.assertEqual(stat.S_IMODE(os.stat(self.registry).st_mode), 0o600)
 
-    def test_precommit_failure_preserves_bytes_and_cleans_temp(self):
+    def test_precommit_replace_failure_preserves_bytes_and_cleans_temp(self):
         self.register("keep", make_tree(self.base, "keep"))
         before = self.registry.read_bytes()
         tree = make_tree(self.base, "fail")
         with mock.patch.object(mtr.os, "replace", side_effect=OSError("boom")):
-            with self.assertRaises(mtr.RegistryError) as ctx:
+            with self.assertRaises(mtr.PrecommitIOError) as ctx:
                 self.register("fail", tree)
-        self.assertEqual(ctx.exception.reason, "replace_io")
+        self.assertEqual(ctx.exception.exit_code, 6)
+        self.assertEqual(ctx.exception.reason, "precommit_io")
+        self.assertEqual(before, self.registry.read_bytes())
+        leftovers = [p.name for p in self.base.iterdir() if p.name.startswith(".registry.")]
+        self.assertEqual(leftovers, [])
+
+    def test_precommit_fsync_failure_preserves_bytes_and_cleans_temp(self):
+        self.register("keep", make_tree(self.base, "keepfsync"))
+        before = self.registry.read_bytes()
+        tree = make_tree(self.base, "failfsync")
+        with mock.patch.object(mtr.os, "fsync", side_effect=OSError("boom")):
+            with self.assertRaises(mtr.PrecommitIOError) as ctx:
+                self.register("failfsync", tree)
+        self.assertEqual(ctx.exception.exit_code, 6)
+        self.assertEqual(ctx.exception.reason, "precommit_io")
+        self.assertEqual(before, self.registry.read_bytes())
+        leftovers = [p.name for p in self.base.iterdir() if p.name.startswith(".registry.")]
+        self.assertEqual(leftovers, [])
+
+    def test_precommit_metadata_failure_preserves_bytes_and_cleans_temp(self):
+        self.register("keep", make_tree(self.base, "keepmeta"))
+        before = self.registry.read_bytes()
+        tree = make_tree(self.base, "failmeta")
+        with mock.patch.object(mtr.os, "fchmod", side_effect=OSError("boom")):
+            with self.assertRaises(mtr.PrecommitIOError) as ctx:
+                self.register("failmeta", tree)
+        self.assertEqual(ctx.exception.exit_code, 6)
+        self.assertEqual(ctx.exception.reason, "precommit_io")
         self.assertEqual(before, self.registry.read_bytes())
         leftovers = [p.name for p in self.base.iterdir() if p.name.startswith(".registry.")]
         self.assertEqual(leftovers, [])
