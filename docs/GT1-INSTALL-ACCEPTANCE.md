@@ -62,6 +62,8 @@ Temporary inputs (cleaned on success, preserved and printed on failure):
   candidate worktree, `sync_formal_to_tip`, and formal-object-store extraction. It never
   reads the zhong-private development object store.
 - **aegl-ai**: broker `promote` requester and the non-root CLI acceptance probe.
+- Cross-identity read/traverse ACL probes use the explicit Bash builtin
+  (`bash --noprofile --norc -c 'builtin test ...'`), not an external `test` binary.
 - Root does not run git in an AI-modifiable checkout. No global `safe.directory` is used.
   The zhong Git reads use the normal zhong identity. The trusted bundle is root-owned,
   hash-verified, and readable only by root plus `aegl-promote` via ACL; `aegl-ai` cannot
@@ -187,8 +189,8 @@ blocks and runs in a subshell; it prints the final command exit code.
   sudo install -o root -g root -m 0400 "$BUNDLE_ZHONG" "$INPUT_DIR/gt1.bundle"
   sudo setfacl -m u:aegl-promote:r-- "$INPUT_DIR/gt1.bundle"
   test "$(sudo sha256sum "$INPUT_DIR/gt1.bundle" | awk '{print $1}')" = "$BUNDLE_SHA"
-  sudo -u aegl-promote test -x "$INPUT_DIR"
-  sudo -u aegl-promote test -r "$INPUT_DIR/gt1.bundle"
+  sudo -u aegl-promote -- bash --noprofile --norc -c 'builtin test -x "$1"' _ "$INPUT_DIR"
+  sudo -u aegl-promote -- bash --noprofile --norc -c 'builtin test -r "$1"' _ "$INPUT_DIR/gt1.bundle"
 
   # aegl-promote: verify the trusted copy's head and prerequisites against the formal repo.
   sudo -u aegl-promote -- env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \

@@ -62,8 +62,10 @@ id "$AI_USER" >/dev/null 2>&1 || die "missing user $AI_USER"
 BUNDLE_MODE="$(stat -c '%a' "$BUNDLE")"
 if (( (8#$BUNDLE_MODE & 8#022) != 0 )); then die "bundle must not be group/other writable"; fi
 printf '%s  %s\n' "$BUNDLE_SHA" "$BUNDLE" | sha256sum -c - >/dev/null || die "bundle hash mismatch"
-runuser -u "$BROKER_USER" -- test -r "$BUNDLE" || die "bundle not readable by $BROKER_USER"
-runuser -u "$BROKER_USER" -- test -x "$(dirname "$BUNDLE")" || die "bundle dir not traversable by $BROKER_USER"
+runuser -u "$BROKER_USER" -- bash --noprofile --norc -c 'builtin test -r "$1"' _ "$BUNDLE" \
+  || die "bundle not readable by $BROKER_USER"
+runuser -u "$BROKER_USER" -- bash --noprofile --norc -c 'builtin test -x "$1"' _ "$(dirname "$BUNDLE")" \
+  || die "bundle dir not traversable by $BROKER_USER"
 runuser -u "$BROKER_USER" -- env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
   git -C "$AEGL" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die "formal repo is not a work tree: $AEGL"
