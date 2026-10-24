@@ -1,109 +1,106 @@
-# GT1 — one-shot trusted install and root acceptance package
+# GT1 — trusted delivery, promotion, sync, install, and root acceptance
 
-## 0. Delivery record (including the over-budget verification)
+## 0. Delivery record
 
-- Code candidate: `e5f31c8227353e60683c86a6092b93561da30c74`
-- Candidate parent: `866c1d2b108d9911809bf5c542d1ad7351340599`
+- Functional payload: `e5f31c8227353e60683c86a6092b93561da30c74`
 - Baseline: `d36f073ba98fd00e2678d773d06aa44723a0b728`
-- Delivery package: this commit (the exact SHA is returned in the review reply)
+- Final promotion tip: the commit containing the GT1 payload **and** this delivery
+  package. The exact tip SHA is returned in the review reply and must be supplied to
+  the command below; it is intentionally not written into the commit itself.
+- The final tip, not the payload-only commit, is promoted.
 
-This round's centralized verification was run **three times**, exceeding the original
-one-rerun budget:
+Centralized verification was run **three times**, exceeding the original one-rerun
+budget:
 
-1. Run 1 after the fixes: 23 tests, **11 errors + 5 failures**. Cause: test fixture
-   default umask made the contract directory/files group/other-writable (0775/0664).
-2. Run 2 after fixing fixture directory/file modes: 23 tests, **10 errors + 4 failures**.
-   Cause: the fixture registry file was created as 0664 by `write_text`.
-3. Run 3 after fixing the fixture registry mode: **23/23 PASS**, 0.132s.
+1. Run 1: 23 tests, **11 errors + 5 failures**. Cause: test fixture default umask made
+   the contract directory/files group/other-writable (0775/0664).
+2. Run 2: 23 tests, **10 errors + 4 failures**. Cause: the fixture registry file was
+   created as 0664 by `write_text`.
+3. Run 3: **23/23 PASS**, 0.132s.
 
-The failures are not erased. Only test fixture permissions changed between runs 1–3;
-production logic was not changed in response to those failures. No system re-audit was
-performed.
+The failures are preserved in this record. Only fixture permissions changed between
+runs; production logic was not changed because of them. No system re-audit was done.
 
-## 1. Fixed install layout
+## 1. Fixed host impact
 
-```text
-/usr/local/lib/aegl-model-task/bin/aegl-model-task
-/usr/local/lib/aegl-model-task/recovery/model_task_registry.py
-```
-
-- The `bin/../recovery` import relationship is preserved.
-- Directories: `root:root 0755`; CLI: `root:root 0755`; module: `root:root 0644`.
-- Nothing under `/usr/local/lib/aegl-model` (launcher/modules) is modified.
-- The install script stops if `/usr/local/lib/aegl-model-task` already exists; it never
-  overwrites unknown files.
-- Only the two files below are extracted from the fixed commit, into a root-exclusive
-  `/root/gt1-install-src.XXXXXX` directory, and SHA-256 verified before any install:
-
-| Path | SHA-256 | Mode |
-|---|---|---|
-| `bin/aegl-model-task` | `edb38c2155f617417c8f225128144fba94c822db317a799613fa5e9203669b6e` | 0755 |
-| `recovery/model_task_registry.py` | `0b9376ef1be8cc1c26a6916c892e619d169b41dc6090818637a1b4fb35d923de` | 0644 |
-
-The installer uses `git archive` as root only for the fixed external checkout and a
-per-command `safe.directory` for that checkout and its gitdir/common dir. It does not
-change the formal tree, its `.git` permissions, or any global Git config. It does not
-execute any source-tree script.
-
-## 2. Install command (human, root, fixed candidate)
-
-```bash
-# The external checkout must be at the delivery commit (the commit returned in the
-# review reply), clean, with e5f31c8... present in its history.
-sudo /var/tmp/aegl-cursor-project-rules-dev/recovery/install-model-task-registry.sh \
-  --source /var/tmp/aegl-cursor-project-rules-dev \
-  --commit e5f31c8227353e60683c86a6092b93561da30c74
-```
-
-Expected success output:
+Only this path is created:
 
 ```text
-INSTALL_SOURCE_COMMIT=e5f31c8227353e60683c86a6092b93561da30c74
-INSTALL_BASELINE=d36f073ba98fd00e2678d773d06aa44723a0b728
-INSTALL_FILE bin/aegl-model-task sha256=edb38c... mode=0755 owner=root:root
-INSTALL_FILE recovery/model_task_registry.py sha256=0b9376... mode=0644 owner=root:root
-INSTALL_TARGET=/usr/local/lib/aegl-model-task
-INSTALL_IMPACT=only /usr/local/lib/aegl-model-task created; /usr/local/lib/aegl-model and all other paths untouched
-INSTALL=OK
+/usr/local/lib/aegl-model-task/                                  root:root 0755
+/usr/local/lib/aegl-model-task/bin/                              root:root 0755
+/usr/local/lib/aegl-model-task/bin/aegl-model-task               root:root 0755
+/usr/local/lib/aegl-model-task/recovery/                         root:root 0755
+/usr/local/lib/aegl-model-task/recovery/model_task_registry.py   root:root 0644
 ```
 
-Failure-stop:
+Not touched: `/usr/local/lib/aegl-model` (launcher/modules), formal AEGL `.git`
+permissions, global Git config, mounts, ACL policy, systemd, broker whitelist, other
+projects. The installer stops if the target already exists and never overwrites unknown
+files. Pre-install failures create no target; a post-move verification failure keeps the
+target for inspection and exits nonzero.
 
-- Not root, usage error, commit/parent/baseline mismatch, dirty source, target exists,
-  untrusted parent, archive/hash/file-list mismatch, stage mode/hash mismatch: prints
-  `INSTALL_FAILED reason=<reason>` and exits 1.
-- A pre-install failure creates no target. The root-exclusive extraction/stage dirs are
-  removed by the trap.
-- If the final atomic move succeeds but post-move verification fails, the script prints
-  `INSTALL_FAILED reason=<reason>` and exits 1 **without deleting the target**; stop and
-  inspect. It does not create a backup or rollback copy.
+## 2. Trusted identity model
 
-## 3. Root acceptance command (temporary registry only)
+- Root: bootstrap copy, hash verification, execution of the extracted delivery scripts,
+  install, and cleanup of explicitly allocated root paths.
+- `aegl-promote`: all git reads/fetches/archives of the formal repo and the fixed
+  development checkout; pre-CAS check; candidate worktree; formal sync; object import.
+- `aegl-ai`: broker `promote` requester and the non-root CLI acceptance probe.
+- No root git status/archive in an AI-modifiable checkout. No global
+  `safe.directory`; only command-level `-c safe.directory=<exact dev path>` for the
+  fixed import/archive read.
+- The candidate worktree is created from the formal repo at the final tip. Its temp
+  parent is root-owned 0750 with an ACL granting `aegl-promote` only; `aegl-ai` cannot
+  write it.
 
-```bash
-sudo /var/tmp/aegl-cursor-project-rules-dev/recovery/accept-model-task-registry.sh
-```
+## 3. What `deliver-gt1.sh` does
 
-This is **not** a real business registration and **not** a Hermes execution. It is a
-root CLI acceptance against a temporary registry mapped to the fixed path in a private
-mount namespace.
+The script is run as root from a root-exclusive copy. It never executes a script from
+`/var/tmp` directly.
 
-What it proves:
+1. `STAGE=import`: `aegl-promote` fetches the final tip from the fixed development
+   checkout into the formal object store using the existing `git fetch <DEV> <TIP>`
+   import pattern. It verifies the tip object, payload ancestry, baseline ancestry, and
+   the two payload file hashes.
+2. `STAGE=pre_cas`: extracts the existing `BEGIN_FORMAL_SYNC` block from the final tip's
+   `recovery/keeplab-appprojects-exec.sh` (read as `aegl-promote`, written to a
+   root-only file), verifies it contains `formal_pre_cas_check` and
+   `sync_formal_to_tip`, sources it, and calls `formal_pre_cas_check "$AEGL" main`.
+   It requires `FORMAL_BASELINE_OID == d36f073…` and refuses real dirty/formal changes.
+3. `STAGE=candidate`: creates a temporary candidate worktree from the formal repo at
+   the final tip; verifies HEAD, clean state, base == baseline, and that `aegl-ai`
+   cannot write it.
+4. `STAGE=broker_register` / `RECORD` / `PROMOTE`: root sends register and record;
+   `aegl-ai` sends promote. The broker task id is generated at runtime as
+   `gt1-delivery-<timestamp>-<pid>` and is independent; an existing id is refused. Every reply is parsed; decisions must be `REGISTERED`,
+   `RECORDED`, `APPLIED`; the returned `approved_commit` must equal the final tip.
+5. `STAGE=candidate_cleanup`: `git worktree remove` **without `--force`**; `rmdir` only
+   if empty. No `branch -D`. A failed or unexpected cleanup keeps the scene and exits
+   nonzero.
+6. `STAGE=formal_sync`: calls the existing `sync_formal_to_tip "$AEGL" "$TIP" main
+   "$BASELINE"` as `aegl-promote`; verifies main, HEAD, branch `main`, and clean
+   index/worktree. A bare `git switch main` is not used as a substitute for sync.
+7. `STAGE=extract_delivery`: after promotion/sync, extracts the delivery scripts,
+   manifest, documentation, and the two payload files from the **formal object store**
+   as `aegl-promote`, into a root-exclusive directory. It verifies every manifest hash.
+   The installer no longer depends on a development tree.
+8. `STAGE=install`: runs the extracted installer with `--payload-dir` (root-exclusive,
+   `root:root 0700`). It installs only `/usr/local/lib/aegl-model-task`.
+9. `STAGE=accept`: runs the extracted temporary-registry root acceptance.
+10. `STAGE=cleanup`: removes only the explicitly allocated candidate/root temp paths.
+    The success marker is printed only after cleanup succeeds. On failure the bootstrap
+`$BOOT` is kept and printed; on success it is removed only after the delivery script's
+cleanup and success marker.
 
-- installed CLI import path works (`--help`);
-- non-root `register` is rejected with exit 2 and `reason=not_root`;
-- root can register one valid temporary task;
-- duplicate `task_id` is rejected, the existing entry and first task remain;
-- temporary registry is `root:root 644`, lock is `root:root 600`;
-- atomic write succeeds; temporary files are cleaned;
-- the real `/var/lib/aegl-model/registry.json` SHA-256 is unchanged before/after;
-- the temporary fixture tree is removed.
+## 4. Temporary-registry root acceptance
 
-Fixtures and contracts are under `/var/tmp/aegl-model-task-accept.XXXXXX`, outside the
-project. They are created from scratch (never a copy of the production registry) and
-removed on exit. No model, API, sandbox-model run, or broker call is made.
+The acceptance is **not** a real business registration and **not** a Hermes execution.
+It uses a private mount namespace to map a temporary registry to
+`/var/lib/aegl-model/registry.json` for that process only. The real registry is never
+written; only its SHA-256 is compared before/after. Fixtures are created from scratch
+outside the project and removed. No model/API/sandbox-model run is performed.
 
-Expected success output:
+Expected markers:
 
 ```text
 ACCEPT_INSTALLED_CLI_IMPORT=OK
@@ -119,153 +116,100 @@ ACCEPT_SCOPE=TEMPORARY_REGISTRY_PRIVATE_MOUNTNS
 ROOT_CLI_ACCEPTANCE=PASS (temporary registry)
 ```
 
-Failure-stop:
+## 5. Complete trusted terminal command
 
-- Missing installed files, hash/mode mismatch, missing tools, no private mount namespace,
-  non-root test not returning 2/`reason=not_root`, root register not printing
-  `REGISTERED`, duplicate not returning 3/`reason=duplicate_task_id`, changed bytes,
-  wrong registry/lock owner/mode, or changed real registry: prints
-  `ACCEPT_FAILED step=<step> reason=<reason>` and exits 1.
-- The trap removes the temporary fixture tree. There is no fallback that writes the real
-  registry, and no re-run of the 23 registration tests.
-
-## 4. Candidate object import, broker promotion, formal sync
-
-These steps are for the candidate `e5f31c8...`, not for this delivery-scripts commit.
-They reuse the existing broker; no new promotion system, whitelist, mount, permission
-policy, or other project is changed. They are **not executed in this round**.
-
-### 4.1 Candidate object import
-
-The candidate's objects live in the external common repo
-`/var/tmp/aegl-parent-protection-dev-6yv9e5/repo/.git`, not in the formal AEGL object
-store. Import the exact candidate through a temporary promote worktree and a bundle.
+The final tip SHA and the manifest SHA are supplied by the review reply. Do not execute
+before both are assigned. The functional payload and baseline below are fixed.
 
 ```bash
 set -euo pipefail
+TIP=<EXACT_FINAL_TIP_SHA_FROM_REVIEW_REPLY>
+MANIFEST_SHA=<EXACT_MANIFEST_SHA_FROM_REVIEW_REPLY>
+PAYLOAD=e5f31c8227353e60683c86a6092b93561da30c74
+BASELINE=d36f073ba98fd00e2678d773d06aa44723a0b728
+DEV=/var/tmp/aegl-cursor-project-rules-dev
 AEGL=/home/zhong/Projects/AI-Engineering-Governance-Layer
-BASE=d36f073ba98fd00e2678d773d06aa44723a0b728
-CAND=e5f31c8227353e60683c86a6092b93561da30c74
-EXT_COMMON=/var/tmp/aegl-parent-protection-dev-6yv9e5/repo
-PROMOTE_WT=/var/tmp/aegl-gt1-promote-e5f31c8
-BUNDLE=/var/tmp/gt1-e5f31c8.bundle
+BOOT=$(mktemp -d /root/gt1-bootstrap.XXXXXX)
+chmod 0700 "$BOOT"
 
-# as zhong: temporary promote worktree at the exact candidate
-git -C "$EXT_COMMON" worktree add -b gt1-promote-e5f31c8 "$PROMOTE_WT" "$CAND"
-git -C "$PROMOTE_WT" bundle create "$BUNDLE" gt1-promote-e5f31c8 "^$BASE"
-git -C "$PROMOTE_WT" bundle verify "$BUNDLE"
-git -C "$PROMOTE_WT" bundle list-heads "$BUNDLE"   # must show CAND and the temp branch
+# aegl-promote reads the fixed delivery files from the final tip; root writes the
+# root-exclusive copy. No root git in the development checkout.
+runuser -u aegl-promote -- git -C "$DEV" -c "safe.directory=$DEV" archive "$TIP" \
+  recovery/deliver-gt1.sh recovery/gt1-install-manifest.txt \
+  | tar -x -C "$BOOT"
+
+# root verifies the manifest anchor from the review reply, then the deliver script
+echo "$MANIFEST_SHA  $BOOT/recovery/gt1-install-manifest.txt" | sha256sum -c -
+DELIVER_SHA=$(awk '$1=="recovery/deliver-gt1.sh"{print $2}' "$BOOT/recovery/gt1-install-manifest.txt")
+test "$(sha256sum "$BOOT/recovery/deliver-gt1.sh" | awk '{print $1}')" = "$DELIVER_SHA"
+
+# root executes only the root-exclusive, hash-verified delivery script
+set +e
+"$BOOT/recovery/deliver-gt1.sh" --tip "$TIP" --dev "$DEV" --aegl "$AEGL"
+rc=$?
+set -e
+
+if [ "$rc" -eq 0 ]; then
+  rm -f "$BOOT/recovery/deliver-gt1.sh" "$BOOT/recovery/gt1-install-manifest.txt" \
+    || { printf 'BOOTSTRAP_CLEANUP_FAILED=%s\n' "$BOOT" >&2; exit 1; }
+  rmdir "$BOOT/recovery" "$BOOT" \
+    || { printf 'BOOTSTRAP_CLEANUP_FAILED=%s\n' "$BOOT" >&2; exit 1; }
+else
+  printf 'BOOTSTRAP_PRESERVED=%s\n' "$BOOT" >&2
+fi
+exit "$rc"
 ```
 
-Then copy/verify the bundle into a root-controlled, `aegl-broker`-readable directory and
-import it as the formal repo owner. Do not run a user-tree script as root.
+The delivery script then imports/promotes/syncs the final tip, extracts the installer
+and acceptance script from the formal object store as `aegl-promote`, verifies them,
+installs, and runs the temporary-registry acceptance. It does not retain a dependency
+on the development checkout for installation.
 
-```bash
-# root: copy and verify the bundle
-BUNDLE_SHA=$(sha256sum "$BUNDLE" | awk '{print $1}')
-IMPORT_DIR=$(mktemp -d /root/gt1-import.XXXXXX)
-chmod 0750 "$IMPORT_DIR"
-chgrp aegl-broker "$IMPORT_DIR"
-install -o root -g aegl-broker -m 0640 "$BUNDLE" "$IMPORT_DIR/gt1-e5f31c8.bundle"
-test "$(sha256sum "$IMPORT_DIR/gt1-e5f31c8.bundle" | awk '{print $1}')" = "$BUNDLE_SHA"
+## 6. Stage output and failure-stop positions
 
-# aegl-promote: import the verified bundle into the formal object store
-sudo -u aegl-promote env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  git -C "$AEGL" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-  fetch "$IMPORT_DIR/gt1-e5f31c8.bundle" \
-  refs/heads/gt1-promote-e5f31c8:refs/heads/gt1/model-task-registry
+Success stage markers, in order:
 
-# verify object + target baseline
-sudo -u aegl-promote git -C "$AEGL" cat-file -e "$CAND^{commit}"
-test "$(sudo -u aegl-promote git -C "$AEGL" rev-parse refs/heads/gt1/model-task-registry)" = "$CAND"
-test "$(sudo -u aegl-promote git -C "$AEGL" rev-parse refs/heads/main)" = "$BASE"
+```text
+STAGE=import
+STAGE=pre_cas
+STAGE=candidate
+STAGE=broker_register
+STAGE=broker_record
+STAGE=broker_promote
+STAGE=candidate_cleanup
+STAGE=formal_sync
+STAGE=extract_delivery
+STAGE=install
+STAGE=accept
+STAGE=cleanup
+GT1_DELIVERY_RESULT=OK tip=<TIP>
+GT1_FORMAL_SYNC=OK
+GT1_INSTALL=OK
+GT1_ROOT_ACCEPTANCE=PASS (temporary registry)
 ```
 
-### 4.2 Broker register / record / promote
+Failure-stop:
 
-Use the existing broker client. Bind the exact candidate, baseline, promote worktree,
-and target ref. The fixed broker task id below is an example for this promotion; if it
-already exists in the broker registry, stop and choose a new one manually. It is not a
-Hermes task.
+- Import/tip/payload/baseline hash mismatch: `STOP_AT=...`; no promotion.
+- `FORMAL_BASELINE_OID != d36f073…`, formal dirty, gitlink drift: stop before CAS.
+- Candidate dirty / AI can write / base mismatch: stop; the candidate path is printed as
+  `CANDIDATE_DIR=...` and the scene is preserved.
+- Broker decision not `REGISTERED`/`RECORDED`/`APPLIED`, or approved commit not TIP:
+  stop; candidate scene is preserved.
+- Worktree remove without force fails, or temp dir is non-empty: cleanup error; scene is
+  preserved and the process exits nonzero; **no success marker**.
+- `sync_formal_to_tip` fails or main/HEAD/branch/worktree checks fail: stop; no install.
+- Delivery extraction/hash failure: stop; no install.
+- Install or acceptance failure: nonzero; installed target (if any) is preserved for
+  inspection; no success marker.
+- Success markers are emitted only after cleanup succeeds.
 
-```bash
-BROKER=/usr/local/lib/aegl-promote/promotion_broker.py
-SOCK=/run/aegl-promote/broker.sock
-TASK_ID=gt1-e5f31c8-20261024
+No `worktree remove --force`, no `branch -D`, no `rm -rf` on candidate/unknown paths, no
+backup/archive rollback.
 
-REGISTER_REQ='{"protocol":"AEGL-BROKER/1","op":"register","task_id":"gt1-e5f31c8-20261024","project":"/home/zhong/Projects/AI-Engineering-Governance-Layer","base":"d36f073ba98fd00e2678d773d06aa44723a0b728","worktree":"/var/tmp/aegl-gt1-promote-e5f31c8","branch":"gt1-promote-e5f31c8","target_ref":"refs/heads/main"}'
-sudo /usr/bin/python3 "$BROKER" client --socket "$SOCK" --request "$REGISTER_REQ"
-
-RECORD_REQ='{"protocol":"AEGL-BROKER/1","op":"record","task_id":"gt1-e5f31c8-20261024","verify_result":"PASS"}'
-sudo /usr/bin/python3 "$BROKER" client --socket "$SOCK" --request "$RECORD_REQ"
-
-PROMOTE_REQ='{"protocol":"AEGL-BROKER/1","op":"promote","task_id":"gt1-e5f31c8-20261024"}'
-sudo -u aegl-ai env AEGL_BROKER_SOCKET="$SOCK" \
-  /usr/bin/python3 "$BROKER" client --socket "$SOCK" --request "$PROMOTE_REQ"
-```
-
-Check the returned `decision` value, not just exit 0:
-
-- register: require `"decision":"REGISTERED"`;
-- record: require `"decision":"RECORDED"`;
-- promote: require `"decision":"APPLIED"`.
-
-Then verify the ref:
-
-```bash
-test "$(sudo -u aegl-promote git -C "$AEGL" rev-parse refs/heads/main)" = "$CAND"
-```
-
-Authorization boundary: the direct broker client is authorized by `SO_PEERCRED`
-(`aegl-ai` for promote, `root` for register/record) and the socket allowlists. The
-`aegl-task` wrapper adds a controller-token check; the direct client does not perform
-that check. Do not describe the direct client as token-authorized.
-
-After a successful promote, remove the temporary import ref (the candidate is reachable
-from `main`):
-
-```bash
-sudo -u aegl-promote git -C "$AEGL" update-ref -d refs/heads/gt1/model-task-registry
-```
-
-### 4.3 Formal checkout sync
-
-The broker updates the ref only; formal working-tree sync is a separate trusted state.
-Reuse AEGL's existing procedure: clean formal checkout, `git switch main`, no
-`reset --hard`, `git clean`, `stash`, or new deployment system. If the formal checkout is
-already on `main` and the working tree is stale, stop and use the AEGL owner's existing
-sync procedure; do not invent a destructive reset.
-
-```bash
-# read-only preflight
-sudo -u aegl-promote git -C "$AEGL" status --porcelain        # must be empty
-sudo -u aegl-promote git -C "$AEGL" rev-parse --abbrev-ref HEAD
-test "$(sudo -u aegl-promote git -C "$AEGL" rev-parse refs/heads/main)" = "$CAND"
-
-# existing AEGL switch step (only if HEAD is not main and the tree is clean)
-sudo -u aegl-promote env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-  git -C "$AEGL" switch main
-
-# verify
-test "$(sudo -u aegl-promote git -C "$AEGL" rev-parse HEAD)" = "$CAND"
-test -z "$(sudo -u aegl-promote git -C "$AEGL" status --porcelain)"
-```
-
-Clean up only the temporary import/promotion artifacts:
-
-```bash
-git -C "$EXT_COMMON" worktree remove --force "$PROMOTE_WT"
-git -C "$EXT_COMMON" branch -D gt1-promote-e5f31c8
-rm -f "$BUNDLE"
-rm -rf "$IMPORT_DIR"
-```
-
-## 5. Explicit non-actions in this preparation round
-
-No sudo, no installation, no real registry write, no formal promotion, no push, no
-Microcourse-Studio creation, no real business task registration, no model/API call, no
-sandbox-model re-run. Only the new install/acceptance scripts' syntax and the fixed file
-manifest were checked.
+This round did not sudo, install, promote, write the real registry, create
+Microcourse-Studio, register a real task, run the 23 tests, run the privileged
+acceptance, or push.
 
 ```text
 GT1_INSTALLED=NOT_DONE
