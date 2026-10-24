@@ -3,13 +3,14 @@
 # register/record/promote -> candidate cleanup -> formal sync -> install from
 # the formal object store -> temporary-registry root acceptance.
 #
-# All git operations on the formal repo and the development checkout run as
-# aegl-promote (never as root). The root process only orchestrates, verifies
-# hashes, runs the install/accept scripts from a root-exclusive directory, and
-# cleans only explicitly allocated paths.
+# The candidate arrives as a trusted bundle prepared by zhong and copied into a
+# root-controlled input directory readable by aegl-promote. aegl-promote never
+# reads the original zhong-private development object store. The root process
+# only orchestrates, verifies hashes, runs the install/accept scripts from a
+# root-exclusive directory, and cleans only explicitly allocated paths.
 set -euo pipefail
 
-TIP=""; DEV=""; AEGL=""
+TIP=""; BUNDLE=""; BUNDLE_SHA=""; AEGL=""
 PAYLOAD="e5f31c8227353e60683c86a6092b93561da30c74"
 BASELINE="d36f073ba98fd00e2678d773d06aa44723a0b728"
 CLI_REL="bin/aegl-model-task"
@@ -31,7 +32,8 @@ stop() { printf 'STOP_AT=%s\n' "$1" >&2; shift; printf 'GT1_DELIVERY_ERROR: %s\n
 while [ $# -gt 0 ]; do
   case "$1" in
     --tip) TIP="${2:-}"; shift 2 ;;
-    --dev) DEV="${2:-}"; shift 2 ;;
+    --bundle) BUNDLE="${2:-}"; shift 2 ;;
+    --bundle-sha256) BUNDLE_SHA="${2:-}"; shift 2 ;;
     --aegl) AEGL="${2:-}"; shift 2 ;;
     *) die "unknown option $1" ;;
   esac
@@ -41,8 +43,11 @@ done
 [ -n "$TIP" ] && [ "${#TIP}" -eq 40 ] || die "--tip <40-hex> required"
 case "$TIP" in [0-9a-f]*) ;; *) die "--tip must be 40-hex" ;; esac
 [ "$TIP" != "$PAYLOAD" ] || die "--tip must include the delivery files, not only the payload"
-[ -n "$DEV" ] && [ -d "$DEV/.git" ] || die "--dev git checkout required"
-[ -n "$AEGL" ] && [ -d "$AEGL/.git" ] || die "--aegl formal repo required"
+[ -n "$BUNDLE" ] && [ -f "$BUNDLE" ] || die "--bundle file required"
+[ ! -L "$BUNDLE" ] || die "bundle must not be a symlink"
+[ -n "$BUNDLE_SHA" ] && [ "${#BUNDLE_SHA}" -eq 64 ] || die "--bundle-sha256 <64-hex> required"
+case "$BUNDLE_SHA" in *[!0-9a-f]*) die "--bundle-sha256 must be lowercase 64-hex" ;; esac
+[ -n "$AEGL" ] || die "--aegl formal repo required"
 for tool in runuser git setfacl python3 sha256sum tar mktemp realpath stat sed grep rmdir chmod chown rm; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool $tool"
 done
@@ -53,6 +58,15 @@ id "$AI_USER" >/dev/null 2>&1 || die "missing user $AI_USER"
 [ ! -e "$TARGET" ] || die "install target already exists: $TARGET"
 [ "$(stat -c '%U:%G %a' /usr/local/lib)" = "root:root 755" ] \
   || die "untrusted /usr/local/lib: $(stat -c '%U:%G %a' /usr/local/lib)"
+[ "$(stat -c '%U:%G' "$BUNDLE")" = "root:root" ] || die "bundle must be root-owned"
+BUNDLE_MODE="$(stat -c '%a' "$BUNDLE")"
+if (( (8#$BUNDLE_MODE & 8#022) != 0 )); then die "bundle must not be group/other writable"; fi
+printf '%s  %s\n' "$BUNDLE_SHA" "$BUNDLE" | sha256sum -c - >/dev/null || die "bundle hash mismatch"
+runuser -u "$BROKER_USER" -- test -r "$BUNDLE" || die "bundle not readable by $BROKER_USER"
+runuser -u "$BROKER_USER" -- test -x "$(dirname "$BUNDLE")" || die "bundle dir not traversable by $BROKER_USER"
+runuser -u "$BROKER_USER" -- env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+  git -C "$AEGL" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || die "formal repo is not a work tree: $AEGL"
 
 as_broker() { runuser -u "$BROKER_USER" -- env HOME=/tmp GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "$@"; }
 git_aegl_broker() { as_broker git -C "$AEGL" "$@"; }
@@ -172,12 +186,20 @@ PY
   esac
 fi
 
-# 1) import the final tip into the formal object store as aegl-promote
+# 1) import the final tip from the trusted bundle into the formal object store
 say "STAGE=import"
-as_broker git -C "$AEGL" -c "safe.directory=$DEV" fetch "$DEV" "$TIP"
+as_broker git -C "$AEGL" bundle verify "$BUNDLE" || stop bundle_verify_failed
+HEADS="$(as_broker git bundle list-heads "$BUNDLE")" || stop bundle_heads_failed
+printf '%s\n' "$HEADS" | grep -q "^$TIP refs/heads/gt1/model-task-registry$" \
+  || stop bundle_head_mismatch "$HEADS"
+as_broker git -C "$AEGL" fetch "$BUNDLE" \
+  "refs/heads/gt1/model-task-registry:refs/heads/gt1/model-task-registry" \
+  || stop bundle_fetch_failed
 git_aegl_broker cat-file -e "$TIP^{commit}" || stop tip_object_missing "$TIP"
 git_aegl_broker merge-base --is-ancestor "$PAYLOAD" "$TIP" || stop payload_not_ancestor "$PAYLOAD"
 git_aegl_broker merge-base --is-ancestor "$BASELINE" "$TIP" || stop baseline_not_ancestor "$BASELINE"
+test "$(git_aegl_broker rev-parse refs/heads/gt1/model-task-registry)" = "$TIP" \
+  || stop bundle_ref_mismatch
 test "$(git_aegl_broker show "$TIP:$CLI_REL" | sha256sum | awk '{print $1}')" = "$CLI_SHA" \
   || stop payload_cli_hash_mismatch
 test "$(git_aegl_broker show "$TIP:$MOD_REL" | sha256sum | awk '{print $1}')" = "$MOD_SHA" \
