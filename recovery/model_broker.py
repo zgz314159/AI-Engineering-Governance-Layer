@@ -25,6 +25,21 @@ import ssl
 import sys
 import urllib.parse
 
+try:  # BRIDGE-DIAG-003: structured, non-sensitive phase events; never breaks the broker
+    import diag_events as _diag
+except Exception:  # noqa: BLE001
+    _diag = None
+
+
+def _ev(phase, **kw) -> None:
+    if _diag is None:
+        return
+    try:
+        _diag.emit(phase, **kw)
+    except Exception:  # noqa: BLE001 - diagnostics must never disturb the data path
+        pass
+
+
 DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_PREFIX = "Bearer "
 
@@ -189,6 +204,7 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
+    _ev("guard_call", arg=str(payload.get("tool_name") or ""))
     guard = os.environ.get("AEGL_GUARD_PATH") or ""
     try:
         runner = json.loads(os.environ.get("AEGL_GUARD_RUNNER") or "")
@@ -246,6 +262,10 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
         if status != "appended":
             result["error"] = "evidence_not_recorded:%s" % status
             result["rc"] = None        # an unrecorded verdict must never allow the tool
+    _ev("guard_verdict",
+        status=(result.get("rc") if isinstance(result.get("rc"), int) else None),
+        arg=str((result.get("verdict") or {}).get("action") or "") or None,
+        error=result.get("error"))
     out = json.dumps(result, ensure_ascii=False).encode("utf-8")
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
 
@@ -278,6 +298,8 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         _handle_guard(conn, body)
         return
 
+    _ev("broker_req_recv", arg="%s %s" % (method, path.split("?", 1)[0]))
+
     url = urllib.parse.urlsplit(upstream)
     base_path = url.path.rstrip("/")
     # separate the query BEFORE mapping so it is preserved verbatim
@@ -296,11 +318,14 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         fwd[auth_header] = credential
     fwd["Connection"] = "close"
     try:
+        _ev("upstream_req_start", arg=target)
         up.request(method, target, body=body if body else None, headers=fwd)
         resp = up.getresponse()
+        _ev("upstream_resp_headers", status=resp.status)
         # minimal routing record: method, inbound path, forwarded path, status ONLY
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
         payload = resp.read()
+        _ev("upstream_body_read_done", status=resp.status, bytes_=len(payload))
         _index_requests(payload)
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
@@ -312,7 +337,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         out.append("")
         out.append("")
         conn.sendall("\r\n".join(out).encode("latin-1") + payload)
+        _ev("client_handoff_done", status=resp.status, bytes_=len(payload))
     except Exception as exc:  # noqa: BLE001 — log the route only, never the message/headers/body
+        _ev("upstream_error", error=type(exc).__name__)
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=ERROR %s"
               % (method, path, target, type(exc).__name__), flush=True)
         raise
