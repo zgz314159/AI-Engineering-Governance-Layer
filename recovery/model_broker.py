@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import itertools
 import json
 import os
 import re
@@ -130,6 +131,11 @@ def _map_path(base_path: str, path: str) -> str:
 # non-empty id. Populated from the model response body (plain JSON or SSE deltas).
 REQUEST_INDEX: dict = {}
 
+# Content-free request sequence numbers (BRIDGE-DIAG-003): the broker is single-threaded, so
+# a monotonic counter per request kind lets the reader locate the LAST incomplete request.
+_MODEL_REQ_SEQ = itertools.count(1)
+_GUARD_REQ_SEQ = itertools.count(1)
+
 
 def _record_request(call_id, name, arguments) -> None:
     """Store one assembled tool call; arguments are parsed only after full assembly."""
@@ -204,7 +210,8 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    _ev("guard_call", arg=str(payload.get("tool_name") or ""))
+    guard_seq = next(_GUARD_REQ_SEQ)
+    _ev("guard_call", seq=guard_seq, arg=str(payload.get("tool_name") or ""))
     guard = os.environ.get("AEGL_GUARD_PATH") or ""
     try:
         runner = json.loads(os.environ.get("AEGL_GUARD_RUNNER") or "")
@@ -263,6 +270,7 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
             result["error"] = "evidence_not_recorded:%s" % status
             result["rc"] = None        # an unrecorded verdict must never allow the tool
     _ev("guard_verdict",
+        seq=guard_seq,
         status=(result.get("rc") if isinstance(result.get("rc"), int) else None),
         arg=str((result.get("verdict") or {}).get("action") or "") or None,
         error=result.get("error"))
@@ -298,7 +306,8 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         _handle_guard(conn, body)
         return
 
-    _ev("broker_req_recv", arg="%s %s" % (method, path.split("?", 1)[0]))
+    req_seq = next(_MODEL_REQ_SEQ)
+    _ev("broker_req_recv", seq=req_seq, arg="%s %s" % (method, path.split("?", 1)[0]))
 
     url = urllib.parse.urlsplit(upstream)
     base_path = url.path.rstrip("/")
@@ -318,14 +327,14 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         fwd[auth_header] = credential
     fwd["Connection"] = "close"
     try:
-        _ev("upstream_req_start", arg=target)
+        _ev("upstream_req_start", seq=req_seq, arg=target)
         up.request(method, target, body=body if body else None, headers=fwd)
         resp = up.getresponse()
-        _ev("upstream_resp_headers", status=resp.status)
+        _ev("upstream_resp_headers", seq=req_seq, status=resp.status)
         # minimal routing record: method, inbound path, forwarded path, status ONLY
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
         payload = resp.read()
-        _ev("upstream_body_read_done", status=resp.status, bytes_=len(payload))
+        _ev("upstream_body_read_done", seq=req_seq, status=resp.status, bytes_=len(payload))
         _index_requests(payload)
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
@@ -337,9 +346,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         out.append("")
         out.append("")
         conn.sendall("\r\n".join(out).encode("latin-1") + payload)
-        _ev("client_handoff_done", status=resp.status, bytes_=len(payload))
+        _ev("client_handoff_done", seq=req_seq, status=resp.status, bytes_=len(payload))
     except Exception as exc:  # noqa: BLE001 — log the route only, never the message/headers/body
-        _ev("upstream_error", error=type(exc).__name__)
+        _ev("upstream_error", seq=req_seq, error=type(exc).__name__)
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=ERROR %s"
               % (method, path, target, type(exc).__name__), flush=True)
         raise

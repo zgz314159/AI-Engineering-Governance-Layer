@@ -57,24 +57,31 @@ else
   say "ENTRY_BIND_STATE=NOT_DEPLOYED (hermes: not claiming protection)"
 fi
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
-for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN" "$DIAG_PY"; do [ -e "$b" ] || die "required component missing: $b"; done
+for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
 # shellcheck disable=SC1090
 . "$CONFIG"
 for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
   [ -n "${!v:-}" ] || die "trusted config missing $v"
 done
 
-# --- diagnostic event sink (BRIDGE-DIAG-003): controller-owned, task-scoped, root-only #
-# The path is DERIVED from the task id and NEVER supplied by a caller, so an unprivileged
-# caller cannot redirect root output. It lives OUTSIDE /run/aegl-model/$TASK, which the
-# sandbox's own EXIT trap removes, so the structured events survive the task-dir cleanup;
-# the trusted driver removes this dir after printing the redacted summary.
+# --- diagnostic event sink: OFF by default, task-allowlisted (BRIDGE-DIAG-003 only) --- #
+# Capture is enabled ONLY for the trusted diagnosis task id below; every other task behaves
+# exactly as before and creates no sink. The path is DERIVED from the task id and is NEVER
+# supplied by a caller, so an unprivileged caller cannot redirect root output. An existing
+# sink dir is NEVER removed here; the trusted driver refuses to start if one already exists.
 DIAG_ROOT=/var/tmp/aegl-diag
-DIAG_DIR="$DIAG_ROOT/$TASK"
-rm -rf -- "$DIAG_DIR"
-install -d -o root -g root -m 0700 -- "$DIAG_ROOT" "$DIAG_DIR"
-export AEGL_DIAG_DIR="$DIAG_DIR"
-diag_ev(){ python3 "$DIAG_PY" "$@"; }
+DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 "
+DIAG_DIR=""
+diag_ev(){ :; }
+case "$DIAG_ENABLED_TASKS" in
+  *" $TASK "*)
+    DIAG_DIR="$DIAG_ROOT/$TASK"
+    [ -e "$DIAG_PY" ] || die "required diagnostic component missing: $DIAG_PY"
+    [ -e "$DIAG_DIR" ] || install -d -o root -g root -m 0700 -- "$DIAG_ROOT" "$DIAG_DIR"
+    export AEGL_DIAG_DIR="$DIAG_DIR"
+    diag_ev(){ python3 "$DIAG_PY" "$@"; }
+    ;;
+esac
 diag_ev --phase sandbox_prep_begin --task "$TASK"
 AI_UID="$(id -u "$AI_USER")"; AI_GID="$(id -g "$AI_USER")"; AI_GROUP="$(id -gn "$AI_USER")"
 
@@ -386,7 +393,7 @@ chown root:root "$RUN/prep.sh"; chmod 0755 "$RUN/prep.sh"
 # --- the real chain runs UNDER strace; the credential broker stays OUTSIDE the traced branch
 # only file open/create results and errnos are captured (no network, buffers, credentials, env)
 diag_ev --phase sandbox_prep_done --task "$TASK"
-diag_ev --phase hermes_exec --task "$TASK"
+diag_ev --phase launch_requested --task "$TASK"
 TRACE_LOG="${AEGL_TRIAL_EVIDENCE:-$RUN}/strace.log"
 if [ -n "${AEGL_TRIAL_EVIDENCE:-}" ] && [ -x /usr/bin/strace ]; then
   say "  tracing the sandbox tool branch -> $TRACE_LOG"

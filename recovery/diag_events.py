@@ -11,6 +11,7 @@ Only whitelisted, non-sensitive fields are ever written:
     task   — the task id (or $AEGL_TASK)
     phase  — the stage label
     mono_ns— monotonic timestamp (ns)
+    seq    — a content-free request sequence number (to locate the last incomplete request)
     status — an integer status/code (HTTP status, guard rc, ...)
     bytes  — an integer byte count
     error  — a short exception type / error name
@@ -32,11 +33,13 @@ import sys
 import time
 
 
-def _record(phase, *, task=None, status=None, bytes_=None, error=None, arg=None) -> dict:
+def _record(phase, *, task=None, seq=None, status=None, bytes_=None, error=None, arg=None) -> dict:
     rec = {"phase": str(phase or ""), "mono_ns": time.monotonic_ns()}
     name = task if task else os.environ.get("AEGL_TASK")
     if name:
         rec["task"] = str(name)
+    if isinstance(seq, int):
+        rec["seq"] = seq
     if isinstance(status, int):
         rec["status"] = status
     if isinstance(bytes_, int) and bytes_ >= 0:
@@ -48,11 +51,11 @@ def _record(phase, *, task=None, status=None, bytes_=None, error=None, arg=None)
     return rec
 
 
-def emit(phase, *, task=None, status=None, bytes_=None, error=None, arg=None, dir_=None) -> None:
+def emit(phase, *, task=None, seq=None, status=None, bytes_=None, error=None, arg=None, dir_=None) -> None:
     directory = dir_ or os.environ.get("AEGL_DIAG_DIR") or ""
     if not directory:
         return
-    line = json.dumps(_record(phase, task=task, status=status, bytes_=bytes_,
+    line = json.dumps(_record(phase, task=task, seq=seq, status=status, bytes_=bytes_,
                               error=error, arg=arg), ensure_ascii=False) + "\n"
     try:
         fd = os.open(os.path.join(directory, "events.jsonl"),
@@ -69,12 +72,13 @@ def main(argv) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--phase", required=True)
     ap.add_argument("--task", default="")
+    ap.add_argument("--seq", type=int, default=None)
     ap.add_argument("--status", type=int, default=None)
     ap.add_argument("--bytes", dest="bytes_", type=int, default=None)
     ap.add_argument("--error", default="")
     ap.add_argument("--arg", default="")
     a = ap.parse_args(argv)
-    emit(a.phase, task=a.task, status=a.status, bytes_=a.bytes_, error=a.error, arg=a.arg)
+    emit(a.phase, task=a.task, seq=a.seq, status=a.status, bytes_=a.bytes_, error=a.error, arg=a.arg)
     return 0
 
 
