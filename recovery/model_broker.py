@@ -371,6 +371,12 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     fwd["Connection"] = "close"
     try:
         _ev("upstream_req_start", seq=req_seq, arg=target)
+        # A diagnostic run separates TCP/TLS establishment from HTTP sending. Normally
+        # request() connects lazily; without a sink the original lazy path is unchanged.
+        if os.environ.get("AEGL_DIAG_DIR"):
+            _ev("upstream_connect_start", seq=req_seq)
+            up.connect()
+            _ev("upstream_connect_done", seq=req_seq)
         up.request(method, target, body=body if body else None, headers=fwd)
         _ev("upstream_req_write_done", seq=req_seq, arg=target)
         resp = up.getresponse()
