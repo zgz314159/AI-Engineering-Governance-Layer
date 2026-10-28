@@ -372,6 +372,7 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     try:
         _ev("upstream_req_start", seq=req_seq, arg=target)
         up.request(method, target, body=body if body else None, headers=fwd)
+        _ev("upstream_req_write_done", seq=req_seq, arg=target)
         resp = up.getresponse()
         _ev("upstream_resp_headers", seq=req_seq, status=resp.status)
         # minimal routing record: method, inbound path, forwarded path, status ONLY
