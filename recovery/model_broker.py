@@ -44,6 +44,19 @@ def _ev(phase, **kw) -> None:
 DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_PREFIX = "Bearer "
 
+# Native local model-server probe paths (LM Studio / Ollama / llama.cpp / vLLM). They are
+# NOT OpenAI-compatible endpoints: they are answered LOCALLY with a plain 404 (no model
+# catalog, no fake 200, no context length, no server-type hint, no credential, no upstream
+# connection), so a startup probe can never block the task. The real catalog `/v1/models`
+# is deliberately NOT here, and `/api/v1/models` is never rewritten to `/v1/models`.
+LOCAL_PROBE_PATHS = frozenset({
+    "/api/v1/models",
+    "/api/tags",
+    "/v1/props",
+    "/props",
+    "/version",
+})
+
 
 def _parse_dotenv_data(path: str, name: str) -> str:
     """Read ``NAME=value`` from a file as DATA — never sourced or eval'd.
@@ -278,6 +291,30 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
 
 
+def _answer_local_probe(conn: socket.socket, method: str, path_only: str) -> None:
+    """Answer a native model-server probe LOCALLY, honestly: 404, no upstream, no credential."""
+    payload = json.dumps({
+        "error": {
+            "message": "endpoint not supported by this server",
+            "type": "unsupported_endpoint",
+            "param": None,
+            "code": None,
+        }
+    }, separators=(",", ":")).encode("utf-8")
+    head = (
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n\r\n" % len(payload)
+    ).encode("latin-1")
+    try:
+        conn.sendall(head + payload)
+    except OSError:
+        pass
+    print("AEGL_MODEL_ROUTE method=%s in=%s fwd=LOCAL_UNSUPPORTED status=404"
+          % (method, path_only), flush=True)
+
+
 def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: str) -> None:
     head, body = _read_headers(conn)
     lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
@@ -304,6 +341,12 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     # the trusted controller ALSO answers pre_tool_call evaluations on this same socket
     if path.split("?")[0] == "/guard":
         _handle_guard(conn, body)
+        return
+
+    # native model-server probes are answered locally and NEVER reach the upstream
+    probe_path = path.split("?", 1)[0]
+    if probe_path in LOCAL_PROBE_PATHS:
+        _answer_local_probe(conn, method, probe_path)
         return
 
     req_seq = next(_MODEL_REQ_SEQ)
