@@ -10,7 +10,7 @@ GT1_COMMIT="e5f31c8227353e60683c86a6092b93561da30c74"
 CLI="/usr/local/lib/aegl-model-task/bin/aegl-model-task"
 MOD="/usr/local/lib/aegl-model-task/recovery/model_task_registry.py"
 CLI_SHA="edb38c2155f617417c8f225128144fba94c822db317a799613fa5e9203669b6e"
-MOD_SHA="0b9376ef1be8cc1c26a6916c892e619d169b41dc6090818637a1b4fb35d923de"
+MOD_SHA="baa7133e990a9009256068ac75b772a79d426a45678cd010b8301cdb6dc41491"
 REAL_REG="/var/lib/aegl-model/registry.json"
 
 say() { printf '%s\n' "$*"; }
