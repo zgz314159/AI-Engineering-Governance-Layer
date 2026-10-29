@@ -93,6 +93,28 @@ class Configuration(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.active_route(config.read_config(self.cfg))
 
+    def test_cli_symlink_and_direct_layouts_resolve_the_same_helper(self):
+        config.activate(self.cfg, 'example', route(self.source))
+        lib, entry = self.base / 'lib', self.base / 'bin'
+        lib.mkdir()
+        entry.mkdir()
+        installed = lib / 'aegl-model-config'
+        installed.write_bytes((ROOT / 'bin/aegl-model-config').read_bytes())
+        installed.chmod(0o755)
+        (lib / 'model_config.py').write_bytes((ROOT / 'recovery/model_config.py').read_bytes())
+        link = entry / 'aegl-model-config'
+        link.symlink_to(installed)
+        chained = entry / 'alias'
+        chained.symlink_to(link)
+        for command in (ROOT / 'bin/aegl-model-config', installed, link, chained):
+            with self.subTest(layout=str(command)):
+                result = subprocess.run([str(command), '--config', str(self.cfg), 'show'],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = json.loads(result.stdout)
+                self.assertEqual(actual['profile'], 'example')
+                self.assertEqual(actual['model'], 'provider/model-a')
+
     def test_generated_hermes_profile_uses_selected_model_and_local_dummy(self):
         script = (ROOT / 'bin/aegl-hermes-sandbox').read_text()
         a = script.index('\nimport json, os, sys\nsrc, dst, port, model_id = sys.argv[1:]') + 1
