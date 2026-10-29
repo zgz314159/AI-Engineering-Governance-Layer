@@ -19,6 +19,7 @@ import os
 import pwd
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -119,6 +120,43 @@ def _validate_project(path: str) -> str:
     if not (os.path.isdir(git) or os.path.isfile(git)):
         _reject("project_not_git", "project must contain .git")
     return real
+
+
+def _git_rev(cwd: str, *args: str) -> str:
+    """Run one git query as the TRUSTED (root) identity. Never reads AI-written files."""
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "-C", cwd, *args],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _reject("git_unavailable", "git query failed: %s" % exc)
+    if proc.returncode != 0:
+        _reject("git_unavailable", "git %s failed: %s" % (" ".join(args), (proc.stderr or "").strip()[:200]))
+    return proc.stdout.strip()
+
+
+def _abs_in(base: str, value: str) -> str:
+    """git may report a relative path; resolve it against the worktree, not our cwd."""
+    return os.path.realpath(value if os.path.isabs(value) else os.path.join(base, value))
+
+
+def _verify_git_ownership(worktree_real: str, project_real: str) -> None:
+    """Prove, with real git, that the worktree belongs to the project repository.
+
+    Runs at registration time as root, so it reads the repository metadata directly and
+    never relaxes the repository's permissions. Nothing here trusts a declarative file.
+    """
+    project_git = os.path.join(project_real, ".git")
+    toplevel = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--show-toplevel"))
+    common = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--git-common-dir"))
+    git_dir = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--absolute-git-dir"))
+    if toplevel != worktree_real:
+        _reject("worktree_not_git_toplevel", "worktree %s is not its own git toplevel (%s)" % (worktree_real, toplevel))
+    if common != project_git:
+        _reject("worktree_not_project_repo", "worktree git common dir %s is not %s" % (common, project_git))
+    if not git_dir.startswith(project_git + os.sep + "worktrees" + os.sep):
+        _reject("worktree_not_project_worktree", "worktree git dir %s is not under %s/worktrees" % (git_dir, project_git))
 
 
 def _check_trusted_dir(path: str, label: str, *, trusted_uid: int) -> None:
@@ -257,6 +295,9 @@ def validate_entry(entry: dict, *, ai_uid: int, trusted_uid: int | None = None) 
     scratch = _validate_owned_dir(entry["scratch"], "scratch", ai_uid)
     project = _validate_project(entry["project"])
     contract = _validate_contract(entry["contract_package"], worktree, trusted_uid=trusted_uid)
+    # The worktree must really be a git worktree of the project repository. Proven with
+    # real git here (root), before the task can ever be launched.
+    _verify_git_ownership(worktree, project)
     return {
         "worktree": worktree,
         "scratch": scratch,

@@ -17,18 +17,32 @@ import model_task_registry as mtr  # noqa: E402
 TEST_BASE = "/var/tmp"
 
 
+def _git(cwd, *args):
+    subprocess.run(["git", "-c", "safe.directory=*", "-C", str(cwd), *args],
+                   check=True, capture_output=True, text=True)
+
+
 def make_tree(base: Path, name: str) -> dict:
+    """A real formal git repo plus a real git worktree of it, with a contract package."""
     root = base / name
-    for path in (
-        root,
-        root / "project",
-        root / "scratch",
-        root / "contract",
-        root / "formal",
-        root / "formal" / ".git",
-    ):
+    for path in (root, root / "scratch", root / "contract"):
         path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, 0o755)
+
+    formal = root / "formal"
+    formal.mkdir(parents=True, exist_ok=True)
+    os.chmod(formal, 0o755)
+    _git(formal, "init", "-q", "-b", "main")
+    _git(formal, "config", "user.email", "contract@local")
+    _git(formal, "config", "user.name", "contract")
+    (formal / "README.md").write_text("baseline\n", encoding="utf-8")
+    _git(formal, "add", "-A")
+    _git(formal, "commit", "-q", "-m", "baseline")
+
+    project = root / "project"
+    _git(formal, "worktree", "add", "-q", "--detach", str(project), "HEAD")
+    os.chmod(project, 0o755)
+
     ctx = root / "contract" / "project-context.json"
     impl = root / "contract" / "implementation-contract.json"
     ctx.write_text(json.dumps({"source_root": str(root)}), encoding="utf-8")
@@ -36,9 +50,9 @@ def make_tree(base: Path, name: str) -> dict:
     os.chmod(ctx, 0o644)
     os.chmod(impl, 0o644)
     return {
-        "worktree": str(root / "project"),
+        "worktree": str(project),
         "scratch": str(root / "scratch"),
-        "project": str(root / "formal"),
+        "project": str(formal),
         "contract_package": str(root / "contract"),
     }
 
@@ -301,6 +315,67 @@ class RegistryTests(unittest.TestCase):
         proc = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2)
         self.assertIn("reason=not_root", proc.stderr)
+
+    def test_worktree_not_git_worktree_rejected(self):
+        tree = make_tree(self.base, "notgitwt")
+        # replace the real worktree with a plain directory (no git identity)
+        wt = Path(tree["worktree"])
+        subprocess.run(["git", "-c", "safe.directory=*", "-C", str(tree["project"]),
+                        "worktree", "remove", "--force", str(wt)], check=True, capture_output=True)
+        wt.mkdir()
+        os.chmod(wt, 0o755)
+        with self.assertRaises(mtr.ValidationError) as ctx:
+            self.register("notgitwt", tree)
+        self.assertEqual(ctx.exception.reason, "git_unavailable")
+
+    def test_worktree_of_other_repo_rejected(self):
+        tree = make_tree(self.base, "otherrepo")
+        # a second, unrelated formal repo whose worktree is swapped in
+        other = self.base / "otherrepo-formal"
+        other.mkdir(parents=True, exist_ok=True)
+        os.chmod(other, 0o755)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "config", "user.email", "x@local")
+        _git(other, "config", "user.name", "x")
+        (other / "f.txt").write_text("x\n", encoding="utf-8")
+        _git(other, "add", "-A")
+        _git(other, "commit", "-q", "-m", "b")
+        foreign = self.base / "otherrepo-wt"
+        _git(other, "worktree", "add", "-q", "--detach", str(foreign), "HEAD")
+        os.chmod(foreign, 0o755)
+        tree["worktree"] = str(foreign)
+        # keep the worktree inside source_root and allowed_paths so the git proof is the
+        # only failing gate
+        (Path(tree["contract_package"]) / "project-context.json").write_text(
+            json.dumps({"source_root": str(self.base)}), encoding="utf-8"
+        )
+        (Path(tree["contract_package"]) / "implementation-contract.json").write_text(
+            json.dumps({"allowed_paths": ["otherrepo-wt/"]}), encoding="utf-8"
+        )
+        with self.assertRaises(mtr.ValidationError) as ctx:
+            self.register("otherrepo", tree)
+        self.assertEqual(ctx.exception.reason, "worktree_not_project_repo")
+
+    def test_genuine_worktree_accepted(self):
+        tree = make_tree(self.base, "genuine")
+        entry = self.register("genuine", tree)
+        self.assertEqual(entry["worktree"], tree["worktree"])
+
+    def test_legacy_four_field_registry_still_loads(self):
+        """A pre-existing 4-field registry must load unchanged (no new required field)."""
+        legacy = {
+            "legacy-1": {
+                "worktree": "/var/tmp/legacy/project",
+                "scratch": "/var/tmp/legacy/scratch",
+                "project": "/var/tmp/legacy/formal",
+                "contract_package": "/var/tmp/legacy/contract",
+            }
+        }
+        self.registry.write_text(json.dumps(legacy), encoding="utf-8")
+        os.chmod(self.registry, 0o644)
+        loaded = mtr._load_registry(str(self.registry), require_root_owner=False)
+        self.assertEqual(loaded, legacy)
+        self.assertEqual(mtr.ENTRY_FIELDS, ("worktree", "scratch", "project", "contract_package"))
 
     def _run_concurrent(self, tasks):
         ctx = multiprocessing.get_context("fork")
