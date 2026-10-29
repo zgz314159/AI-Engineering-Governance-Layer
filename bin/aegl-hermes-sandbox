@@ -24,6 +24,7 @@ pick(){ [ -f "$LIBDIR/$1" ] && printf '%s' "$LIBDIR/$1" || printf '%s' "$SELF_DI
 BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$SELF_DIR/aegl-model-broker"
 SHIM="$(pick loopback_shim.py)"
 DIAG_PY="$(pick diag_events.py)"
+MODEL_CONFIG_PY="$(pick model_config.py)"
 EXEC_SPEC="$(pick exec_spec.py)"
 SPEC_PY="$(pick sandbox_spec.py)"
 PREPARE="$(pick prepare_targets.py)"
@@ -57,10 +58,11 @@ else
   say "ENTRY_BIND_STATE=NOT_DEPLOYED (hermes: not claiming protection)"
 fi
 [ -f "$CONFIG" ] || die "trusted config not found: $CONFIG"
-for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN"; do [ -e "$b" ] || die "required component missing: $b"; done
+for b in "$BWRAP" "$EXEC_SPEC" "$SPEC_PY" "$PREPARE" "$DROP_VERIFY" "$SHIM" "$BROKER_BIN" "$MODEL_CONFIG_PY"; do [ -e "$b" ] || die "required component missing: $b"; done
+python3 "$MODEL_CONFIG_PY" --config "$CONFIG" validate || die "configure a provider with aegl-model-config save/use before running tasks"
 # shellcheck disable=SC1090
 . "$CONFIG"
-for v in UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
+for v in MODEL_ID MODEL_API AUTH_HEADER UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG; do
   [ -n "${!v:-}" ] || die "trusted config missing $v"
 done
 
@@ -149,6 +151,7 @@ GUARD_RUNNER="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1:]))' \
   "$SETPRIV" --reuid "$AI_UID" --regid "$AI_GID" --clear-groups --no-new-privs -- )"
 AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" \
 AEGL_MODEL_CREDENTIAL_ENV="$CREDENTIAL_ENV" AEGL_MODEL_CREDENTIAL_SOURCE="$CREDENTIAL_SOURCE" \
+AEGL_MODEL_AUTH_HEADER="$AUTH_HEADER" \
 AEGL_GUARD_PATH="$GUARD_COPY" AEGL_GUARD_RUNNER="$GUARD_RUNNER" \
 AEGL_DIAG_DIR="${AEGL_DIAG_DIR:-}" AEGL_GUARD_EVIDENCE="${AEGL_TRIAL_EVIDENCE:-$AEGL_DIAG_DIR}" AEGL_GUARD_AI_UID="$AI_UID" \
 AEGL_GUARD_AI_GID="$AI_GID" AEGL_TASK="$TASK" \
@@ -170,9 +173,9 @@ if [ -f "$GUARD_COPY" ] && [ -f "$GUARD_CLIENT" ]; then
 else
   die "verified guard copy ($GUARD_COPY) or controller client ($GUARD_CLIENT) missing; refusing to start"
 fi
-gen_config(){ AEGL_HOOK_CMD="$AEGL_HOOK_CMD" python3 - "$HERMES_PROFILE_CONFIG" "$1" "$PORT" <<'PY'
-import os, sys
-src, dst, port = sys.argv[1], sys.argv[2], sys.argv[3]
+gen_config(){ AEGL_HOOK_CMD="$AEGL_HOOK_CMD" python3 - "$HERMES_PROFILE_CONFIG" "$1" "$PORT" "$MODEL_ID" <<'PY'
+import json, os, sys
+src, dst, port, model_id = sys.argv[1:]
 hook_cmd = os.environ.get("AEGL_HOOK_CMD") or ""
 keep, on, in_pre, replaced = [], False, False, False
 for line in open(src, encoding="utf-8").read().splitlines():
@@ -195,7 +198,8 @@ for line in open(src, encoding="utf-8").read().splitlines():
             keep.append(line)
 with open(dst, "w", encoding="utf-8") as fh:
     fh.write("model:\n  provider: custom\n  base_url: http://127.0.0.1:%s/v1\n"
-             "  api_key: aegl-sandbox-dummy\n  default: deepseek/deepseek-v4.1-flash\n" % port)
+             "  api_key: aegl-sandbox-dummy\n  api_mode: chat_completions\n"
+             "  default: %s\n" % (port, json.dumps(model_id)))
     fh.write("\n".join(keep).rstrip() + "\n")
 PY
 }

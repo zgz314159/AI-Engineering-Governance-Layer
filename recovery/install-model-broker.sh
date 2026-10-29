@@ -27,9 +27,9 @@ LIBDIR="/usr/local/lib/aegl-model"
 CREDDIR="/etc/aegl/model"
 REGDIR="/var/lib/aegl-model"
 AI_USER="aegl-ai"
-FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/trace_capture.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py recovery/guard-lock.json recovery/trace_capture.py)
+FILES=(bin/aegl-model-broker bin/aegl-hermes-sandbox bin/aegl-model-config recovery/model_config.py recovery/diag_events.py recovery/model_broker.py recovery/loopback_shim.py recovery/exec_spec.py recovery/prepare_targets.py recovery/drop_verify.py recovery/guard_capture.py recovery/guard_hook_client.py recovery/trace_capture.py recovery/trial_gate.py recovery/sandbox_spec.py recovery/capture_evidence.py recovery/make_trial_contract.py recovery/guard-lock.json recovery/trace_capture.py)
 # every module the entry points reference must exist in the flat install dir
-REFERENCED=(aegl-model-broker aegl-hermes-sandbox model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
+REFERENCED=(aegl-model-broker aegl-hermes-sandbox aegl-model-config model_config.py diag_events.py model_broker.py loopback_shim.py exec_spec.py prepare_targets.py drop_verify.py guard_capture.py guard_hook_client.py sandbox_spec.py capture_evidence.py trial_gate.py make_trial_contract.py)
 say(){ printf '%s\n' "$*"; }
 fail(){ printf 'INSTALL_ERROR: %s\n' "$*" >&2; exit 1; }
 sha_of(){ sha256sum | awk '{print $1}'; }
@@ -83,6 +83,10 @@ fi
 [ "${#COMMIT}" -eq 40 ] || fail "--commit must be a full 40-hex commit id"
 git -C "$REPO" cat-file -e "$COMMIT^{commit}" 2>/dev/null || fail "commit not found: $COMMIT"
 for f in "${FILES[@]}"; do git -C "$REPO" cat-file -e "$COMMIT:$f" 2>/dev/null || fail "required file missing in commit: $f"; done
+CLI=/usr/local/bin/aegl-model-config
+if [ -e "$CLI" ] || [ -L "$CLI" ]; then
+  [ -L "$CLI" ] && [ "$(readlink "$CLI")" = "$LIBDIR/aegl-model-config" ] || fail "foreign model-config CLI path: $CLI"
+fi
 
 STAGE="$(mktemp -d)"; CLEAN_DIRS+=("$STAGE")
 for f in "${FILES[@]}"; do
@@ -99,6 +103,7 @@ for f in "${FILES[@]}"; do
   install -o root -g root -m "$mode" "$STAGE/$base" "$LIBDIR/$base" || fail "install $f"
 done
 for m in "${REFERENCED[@]}"; do [ -f "$LIBDIR/$m" ] || fail "referenced module missing after install: $m"; done
+[ -L "$CLI" ] || ln -s "$LIBDIR/aegl-model-config" "$CLI" || fail "model-config CLI link"
 
 # --- verified READ-ONLY guard copy: pinned Stack commit + declared hash ----------------- #
 # The file is extracted from the PINNED Stack commit and its declared SHA-256 is verified; a
@@ -139,16 +144,13 @@ chmod 0444 "$LIBDIR/guard/guard-manifest.sha256"
 say "  verified guard copy: $LIBDIR/guard/contract_guard.py project=$GUARD_PROJECT commit=$GUARD_COMMIT sha256=$GUARD_GOT"
 install -d -o root -g root -m 0750 "$CREDDIR" || fail "mkdir $CREDDIR"
 
-# trusted config (root-owned): fixes the upstream, the credential source, and the runtime.
-# The upstream and auth format are the existing Command Code provider (Bearer).
+# Trusted runtime config. Model routes are operator-selected with aegl-model-config;
+# installing/upgrading must never select a provider/model or replace credentials.
 CFG="/etc/aegl/model/config"
-WANT="UPSTREAM CREDENTIAL_ENV CREDENTIAL_SOURCE HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG"
+WANT="HERMES_ENTRY HERMES_RUNTIME HERMES_TOOLS HERMES_INSTALLS HERMES_HOME_REAL HERMES_PROFILE_CONFIG"
 install -d -o root -g root -m 0755 /etc/aegl/model || fail "mkdir /etc/aegl/model"
 if [ ! -f "$CFG" ]; then
   cat > "$CFG" <<'CONF'
-UPSTREAM=https://api.commandcode.ai/provider/v1
-CREDENTIAL_ENV=COMMANDCODE_API_KEY
-CREDENTIAL_SOURCE=/home/zhong/.hermes/.env
 HERMES_ENTRY=/home/zhong/.local/bin/hermes
 HERMES_RUNTIME=/home/zhong/.hermes/hermes-agent
 HERMES_TOOLS=/home/zhong/.hermes/tools
@@ -161,7 +163,6 @@ else
   # migrate an existing root config in place: add any key the new launcher needs. Keys that
   # cannot be defaulted (upstream/credential source/guard profile) must already be present.
   default_of(){ case "$1" in
-    CREDENTIAL_ENV) echo COMMANDCODE_API_KEY ;;
     HERMES_ENTRY) echo /home/zhong/.local/bin/hermes ;;
     HERMES_RUNTIME) echo /home/zhong/.hermes/hermes-agent ;;
     HERMES_TOOLS) echo /home/zhong/.hermes/tools ;;
@@ -180,8 +181,8 @@ else
   [ -n "$added" ] && say "  migrated existing config (added:$added)" || say "  trusted config present: $CFG"
 fi
 chown root:root "$CFG"; chmod 0644 "$CFG" || fail "config perms"
-grep -q '^UPSTREAM=https' "$CFG" || fail "config UPSTREAM must be a concrete https URL"
 grep -q '^HERMES_PROFILE_CONFIG=/' "$CFG" || fail "config HERMES_PROFILE_CONFIG must be an absolute path"
+say "  model selection: $LIBDIR/aegl-model-config save/use (profile required before tasks)"
 
 # trusted task registry (root-owned; the launcher reads task paths from HERE, not task.json)
 install -d -o root -g root -m 0755 "$REGDIR" || fail "mkdir $REGDIR"
@@ -192,8 +193,8 @@ say "  program: $LIBDIR (aegl-model-broker, aegl-hermes-sandbox, model_broker.py
 say "  trusted config: $CFG"
 say "  trusted task registry: $REGDIR/registry.json (root-owned)"
 say ""
-say "NOT done: it does not create the model credential or write it anywhere (the broker reads the"
-say "existing COMMANDCODE_API_KEY from its original location as DATA), does not run 'switch', change"
+say "NOT done: it does not create/copy credentials or select a provider/model (the broker reads"
+say "the operator-configured credential source as DATA), does not run 'switch', change"
 say "project permissions, merge any project, or write /etc/aegl/broker-verified."
 
 # --- real independent-UID trial (aegl-ai + the real Command Code/DeepSeek) ----- #

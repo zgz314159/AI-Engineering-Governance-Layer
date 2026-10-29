@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Operator configuration only. Never put an API key on this command line.
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="$SELF_DIR/model_config.py"
+[ -f "$HELPER" ] || HELPER="$SELF_DIR/../recovery/model_config.py"
+exec /usr/bin/python3 "$HELPER" "$@"
