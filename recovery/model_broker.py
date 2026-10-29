@@ -87,21 +87,31 @@ def _parse_dotenv_data(path: str, name: str) -> str:
     return ""
 
 
+CREDENTIAL_SOURCE_KIND = ""
+
+
 def _load_credential(env_name: str, source_file: str, path: str) -> str:
     """Credential from the env, else the EXISTING source file parsed as data.
 
     Never printed, never written to the trial directory, and never executed.
+    Records ONLY the source category in ``CREDENTIAL_SOURCE_KIND`` (ENV /
+    CONFIGURED_SOURCE_FILE / CREDENTIAL_FILE) — never the value, a fragment, a length
+    or a hash. A rotated credential is simply re-read on the next start.
     """
+    global CREDENTIAL_SOURCE_KIND
     if env_name and os.environ.get(env_name, "").strip():
+        CREDENTIAL_SOURCE_KIND = "ENV"
         return os.environ[env_name].strip()
     if source_file:
         value = _parse_dotenv_data(source_file, env_name or "COMMANDCODE_API_KEY")
         if value:
+            CREDENTIAL_SOURCE_KIND = "CONFIGURED_SOURCE_FILE"
             return value
     if path and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as handle:
             value = handle.read().strip()
         if value:
+            CREDENTIAL_SOURCE_KIND = "CREDENTIAL_FILE"
             return value
     raise SystemExit("model broker: no credential (env %s / source %s)" % (env_name, source_file or "-"))
 
@@ -315,6 +325,71 @@ def _answer_local_probe(conn: socket.socket, method: str, path_only: str) -> Non
           % (method, path_only), flush=True)
 
 
+_AUTH_HEADER_NAMES = ("authorization", "x-api-key", "api-key", "x-oauth-token")
+
+
+def _auth_labels(headers: dict) -> str:
+    """Names (only) of the auth-ish headers present, case-insensitively. No values."""
+    keys = {str(k).lower() for k in headers}
+    present = [name for name in _AUTH_HEADER_NAMES if name in keys]
+    return ",".join(present) if present else "none"
+
+
+def _auth_format(credential: str) -> str:
+    """Injected auth format category only: Bearer / Token / Other."""
+    low = (credential or "").lower()
+    if low.startswith("bearer "):
+        return "Bearer"
+    if low.startswith("token "):
+        return "Token"
+    return "Other"
+
+
+_ERR_TOKENS = {
+    "invalid_api_key": "AUTHENTICATION", "authentication_error": "AUTHENTICATION",
+    "unauthorized": "AUTHENTICATION", "invalid_authentication": "AUTHENTICATION",
+    "permission_error": "PERMISSION", "insufficient_permissions": "PERMISSION",
+    "forbidden": "PERMISSION", "permission_denied": "PERMISSION",
+    "rate_limit_exceeded": "RATE_LIMIT", "rate_limit_error": "RATE_LIMIT",
+    "invalid_request_error": "INVALID_REQUEST", "bad_request": "INVALID_REQUEST",
+    "model_not_found": "MODEL_NOT_FOUND", "not_found_error": "MODEL_NOT_FOUND",
+    "server_error": "SERVER_ERROR", "internal_error": "SERVER_ERROR",
+    "overloaded_error": "SERVER_ERROR", "overloaded": "SERVER_ERROR",
+}
+
+
+def _error_category(status: int, payload: bytes) -> str:
+    """Map a non-2xx response to a PRE-DEFINED category; never returns raw text."""
+    token = ""
+    try:
+        obj = json.loads(payload)
+        if isinstance(obj, dict):
+            err = obj.get("error")
+            if isinstance(err, dict):
+                token = str(err.get("type") or err.get("code") or "").strip().lower()
+            elif isinstance(err, str):
+                token = err.strip().lower()
+            if not token:
+                token = str(obj.get("code") or "").strip().lower()
+    except Exception:
+        token = ""
+    if token in _ERR_TOKENS:
+        return _ERR_TOKENS[token]
+    if status == 401:
+        return "AUTHENTICATION"
+    if status == 403:
+        return "PERMISSION"
+    if status == 429:
+        return "RATE_LIMIT"
+    if status in (400, 422):
+        return "INVALID_REQUEST"
+    if status == 404:
+        return "NOT_FOUND"
+    if 500 <= status <= 599:
+        return "SERVER_ERROR"
+    return "UNKNOWN"
+
+
 def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: str) -> None:
     head, body = _read_headers(conn)
     lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
@@ -369,6 +444,21 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     else:
         fwd[auth_header] = credential
     fwd["Connection"] = "close"
+    # metadata only: model id, stream flag, auth-header PRESENCE and the injected format
+    model_id, stream_flag = "UNKNOWN", "UNKNOWN"
+    try:
+        _req = json.loads(body) if body else {}
+        if isinstance(_req, dict):
+            if isinstance(_req.get("model"), str):
+                model_id = _req["model"][:64]
+            if isinstance(_req.get("stream"), bool):
+                stream_flag = "1" if _req["stream"] else "0"
+    except Exception:
+        pass
+    _ev("request_meta", seq=req_seq,
+        arg="model=%s stream=%s auth_in=%s auth_out=%s auth_fmt=%s"
+            % (model_id, stream_flag, _auth_labels(headers), _auth_labels(fwd),
+               _auth_format(credential)))
     try:
         _ev("upstream_req_start", seq=req_seq, arg=target)
         # A diagnostic run separates TCP/TLS establishment from HTTP sending. Normally
@@ -385,6 +475,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
         payload = resp.read()
         _ev("upstream_body_read_done", seq=req_seq, status=resp.status, bytes_=len(payload))
+        if resp.status < 200 or resp.status >= 300:
+            _ev("upstream_http_error", seq=req_seq, status=resp.status,
+                arg=_error_category(resp.status, payload))
         _index_requests(payload)
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
@@ -453,6 +546,7 @@ def main(argv):
     credential = _load_credential(args.credential_env, args.credential_source, args.credential_file)
     if args.auth_header.lower() == "authorization":
         credential = credential if credential.lower().startswith(("bearer ", "token ")) else DEFAULT_AUTH_PREFIX + credential
+    _ev("credential_source", arg=CREDENTIAL_SOURCE_KIND or "UNKNOWN")
     return serve(args.socket, args.upstream, credential, args.auth_header)
 
 

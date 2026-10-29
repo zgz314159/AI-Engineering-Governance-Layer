@@ -70,7 +70,7 @@ done
 # supplied by a caller, so an unprivileged caller cannot redirect root output. An existing
 # sink dir is NEVER removed here; the trusted driver refuses to start if one already exists.
 DIAG_ROOT=/var/tmp/aegl-diag
-DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 "
+DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 "
 DIAG_DIR=""
 diag_ev(){ :; }
 case "$DIAG_ENABLED_TASKS" in
