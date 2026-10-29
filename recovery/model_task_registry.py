@@ -122,13 +122,19 @@ def _validate_project(path: str) -> str:
     return real
 
 
-def _git_rev(cwd: str, *args: str) -> str:
-    """Run one git query as the TRUSTED (root) identity. Never reads AI-written files."""
+def _git_rev(cwd: str, *args: str, trusted=()) -> str:
+    """Run one git query as the TRUSTED (root) identity. Never reads AI-written files.
+
+    ``safe.directory`` is set to the EXACT, already-resolved paths for this one command
+    only — never a wildcard, never global config, never an ACL change. A git failure is
+    raised, never swallowed.
+    """
+    argv = ["git"]
+    for path in trusted:
+        argv += ["-c", "safe.directory=%s" % os.path.realpath(path)]
+    argv += ["-C", cwd, *args]
     try:
-        proc = subprocess.run(
-            ["git", "-c", "safe.directory=*", "-C", cwd, *args],
-            capture_output=True, text=True, timeout=30,
-        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         _reject("git_unavailable", "git query failed: %s" % exc)
     if proc.returncode != 0:
@@ -148,9 +154,10 @@ def _verify_git_ownership(worktree_real: str, project_real: str) -> None:
     never relaxes the repository's permissions. Nothing here trusts a declarative file.
     """
     project_git = os.path.join(project_real, ".git")
-    toplevel = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--show-toplevel"))
-    common = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--git-common-dir"))
-    git_dir = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--absolute-git-dir"))
+    trusted = (worktree_real, project_real)
+    toplevel = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--show-toplevel", trusted=trusted))
+    common = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--git-common-dir", trusted=trusted))
+    git_dir = _abs_in(worktree_real, _git_rev(worktree_real, "rev-parse", "--absolute-git-dir", trusted=trusted))
     if toplevel != worktree_real:
         _reject("worktree_not_git_toplevel", "worktree %s is not its own git toplevel (%s)" % (worktree_real, toplevel))
     if common != project_git:

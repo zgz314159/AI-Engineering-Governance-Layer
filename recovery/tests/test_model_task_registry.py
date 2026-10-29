@@ -18,8 +18,7 @@ TEST_BASE = "/var/tmp"
 
 
 def _git(cwd, *args):
-    subprocess.run(["git", "-c", "safe.directory=*", "-C", str(cwd), *args],
-                   check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
 
 
 def make_tree(base: Path, name: str) -> dict:
@@ -320,7 +319,7 @@ class RegistryTests(unittest.TestCase):
         tree = make_tree(self.base, "notgitwt")
         # replace the real worktree with a plain directory (no git identity)
         wt = Path(tree["worktree"])
-        subprocess.run(["git", "-c", "safe.directory=*", "-C", str(tree["project"]),
+        subprocess.run(["git", "-C", str(tree["project"]),
                         "worktree", "remove", "--force", str(wt)], check=True, capture_output=True)
         wt.mkdir()
         os.chmod(wt, 0o755)
@@ -376,6 +375,29 @@ class RegistryTests(unittest.TestCase):
         loaded = mtr._load_registry(str(self.registry), require_root_owner=False)
         self.assertEqual(loaded, legacy)
         self.assertEqual(mtr.ENTRY_FIELDS, ("worktree", "scratch", "project", "contract_package"))
+
+    def test_git_rev_safe_directory_is_exact_not_wildcard(self):
+        captured = {}
+
+        class _P:
+            returncode = 0
+            stdout = "ok\n"
+            stderr = ""
+
+        def fake_run(argv, **kw):
+            captured["argv"] = argv
+            return _P()
+
+        with mock.patch.object(mtr.subprocess, "run", side_effect=fake_run):
+            out = mtr._git_rev("/var/tmp/wt", "rev-parse", "HEAD",
+                               trusted=("/var/tmp/wt", "/var/tmp/formal"))
+        self.assertEqual(out, "ok")
+        argv = captured["argv"]
+        self.assertEqual(argv, ["git",
+                                "-c", "safe.directory=/var/tmp/wt",
+                                "-c", "safe.directory=/var/tmp/formal",
+                                "-C", "/var/tmp/wt", "rev-parse", "HEAD"])
+        self.assertTrue(all("*" not in token for token in argv), argv)
 
     def _run_concurrent(self, tasks):
         ctx = multiprocessing.get_context("fork")
