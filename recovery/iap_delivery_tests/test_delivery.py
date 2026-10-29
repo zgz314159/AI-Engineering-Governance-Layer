@@ -328,6 +328,27 @@ class FlowTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_real_bootstrap_copy_keeps_all_directory_levels_private(self):
+        with tempfile.TemporaryDirectory(prefix="iap-bootstrap-", dir="/var/tmp") as t:
+            p = Path(t); src = p / "source"; dst = p / "destination"
+            src.mkdir(); dst.mkdir(mode=0o700)
+            members = ("iap_delivery.py", "release.json", "install-model-task-registry.sh",
+                       "payload/aegl/bin/aegl-model-task", "payload/aegl/recovery/model_task_registry.py")
+            for rel in members:
+                f = src / rel; f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("never execute package code in this test\n")
+            (src / "MANIFEST.sha256").write_text("".join(d.digest(src / rel) + "  " + rel + "\n" for rel in members))
+            anchor = d.digest(src / "MANIFEST.sha256")
+            # Exercise exactly the trusted inline COPY step without running the
+            # root-only shell wrapper or any copied package entrypoint.
+            body = (ROOT / "iap-delivery-bootstrap.sh").read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+            result = subprocess.run([sys.executable, "-I", "-c", body, str(src), str(dst), anchor],
+                                    capture_output=True, check=True, umask=0o022)
+            self.assertIn(b"BOOTSTRAP_VERIFIED", result.stdout)
+            for directory in (dst / "payload", dst / "payload/aegl", dst / "payload/aegl/bin", dst / "payload/aegl/recovery"):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(len(d.manifest_entries(dst, anchor)), len(members))
+
     def test_payload_tampering_and_bad_anchor_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="iap-manifest-", dir="/var/tmp") as t:
             p = Path(t)

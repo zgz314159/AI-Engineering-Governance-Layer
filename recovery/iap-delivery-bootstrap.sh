@@ -43,7 +43,12 @@ for line in (dst/'MANIFEST.sha256').read_text().splitlines():
     for part in p.parts:
         source=source/part; need(not source.is_symlink(), 'source_symlink')
     need(source.is_file(), 'source_file')
-    target=dst/rel; target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target=dst/rel; parent=dst
+    # pathlib parents=True uses default permissions for intermediate parents.
+    # Create each level explicitly so payload/aegl stays private even with umask 022.
+    for part in p.parts[:-1]:
+        parent=parent/part; parent.mkdir(mode=0o700, exist_ok=True)
+        need(not parent.is_symlink() and stat.S_IMODE(parent.stat().st_mode)==0o700, 'destination_directory')
     shutil.copyfile(source, target); os.chmod(target, 0o600)
     need(sha(target)==want, 'copied_payload_hash')
 need({'iap_delivery.py','release.json','install-model-task-registry.sh'} <= seen, 'missing_entrypoints')
