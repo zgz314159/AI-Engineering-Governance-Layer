@@ -16,7 +16,13 @@
 CLI_NAME="cleanup-iap-candidates"
 
 say()  { printf '%s\n' "$*"; }
-die()  { FAIL_REPORTED=1; printf 'CLEANUP_FAILED reason=%s: %s\n' "$1" "${2:-}" >&2; exit 1; }
+die()  {
+  FAIL_REPORTED=1
+  # visible to the parent even when die runs inside a command substitution
+  if [ -n "${CLEANUP_FAIL_MARK:-}" ]; then : > "$CLEANUP_FAIL_MARK" 2>/dev/null || :; fi
+  printf 'CLEANUP_FAILED reason=%s: %s\n' "$1" "${2:-}" >&2
+  exit 1
+}
 
 # git with exact, command-scoped trust for one path (never a wildcard)
 git_safe() { local d="$1"; shift; git -c "safe.directory=$d" -C "$d" "$@"; }

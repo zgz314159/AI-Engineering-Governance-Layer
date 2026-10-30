@@ -383,6 +383,7 @@ on_abort() { # rc line cmd  (ERR trap: reports the abort point once, no env dump
   local rc="$1" line="$2" cmd="$3"
   if [ "$rc" -eq 0 ]; then return 0; fi
   if [ "${FAIL_REPORTED:-0}" = 1 ]; then return 0; fi
+  if [ -n "${CLEANUP_FAIL_MARK:-}" ] && [ -e "$CLEANUP_FAIL_MARK" ]; then return 0; fi
   FAIL_REPORTED=1
   printf 'CLEANUP_ABORT stage=%s func=%s line=%s rc=%s cmd=%s\n' \
     "${CURRENT_STAGE:-none}" "${FUNCNAME[1]:-main}" "$line" "$rc" \
@@ -392,12 +393,16 @@ on_exit() { # EXIT trap: catches a bare non-zero exit with no printed reason
   local rc="$1"
   if [ "$rc" -eq 0 ]; then return 0; fi
   if [ "${FAIL_REPORTED:-0}" = 1 ]; then return 0; fi
+  if [ -n "${CLEANUP_FAIL_MARK:-}" ] && [ -e "$CLEANUP_FAIL_MARK" ]; then return 0; fi
   FAIL_REPORTED=1
   printf 'CLEANUP_ABORT stage=%s func=exit line=0 rc=%s cmd=<exit>\n' "${CURRENT_STAGE:-none}" "$rc" >&2
 }
 
 main() {
   set -Eeuo pipefail
+  CLEANUP_FAIL_MARK="${TMPDIR:-/tmp}/.iap-cleanup-fail.$$"
+  export CLEANUP_FAIL_MARK
+  rm -f "$CLEANUP_FAIL_MARK" 2>/dev/null || :
   trap 'on_abort "$?" "$LINENO" "$BASH_COMMAND"' ERR
   trap 'on_exit "$?"' EXIT
   load_tables
