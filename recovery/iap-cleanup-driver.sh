@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # iap-cleanup-driver.sh — cleanup-ONLY, precise, resumable finisher for the IAP delivery.
 #
-# Root only. It never re-runs import/register/record/promote/formal-sync/install, never
+# Root only. Never re-runs import/register/record/promote/formal-sync/install, never
 # edits the broker/model-task registry, never runs `rm -rf`, `git worktree prune`,
 # `--force`, backups or archives, and never relaxes staging/formal-tree permissions.
 #
-# Markers record completed DELETION stages only; they are bound to the current package
-# anchor and to the exact attempt identities. `verify-clean` is NEVER skipped: it always
-# re-inspects the real scene, so a stale marker can never yield a false clean result.
+# Git discipline:
+#   * every mutating/querying git call goes through run_git / git_probe;
+#   * trust is granted per COMMAND and per EXACT resolved repository path
+#     (`-c safe.directory=<realpath>`) — never a wildcard, never global config;
+#   * a git failure reports the operation, the argv, the exit code and git's own
+#     (bounded) stderr, then stops. Failures are NEVER collapsed into a sentinel such
+#     as UNREADABLE, and an ownership error is NOT assumed to be a permission problem.
 set -uo pipefail
 
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -71,6 +75,47 @@ done_marker() {
   return 0
 }
 
+# --- git with exact command-scoped trust + real diagnostics ------------------------ #
+git_argv() { # <repo> <args...> -> one argv line (exact resolved repo trust, no wildcard)
+  local repo="$1" real; shift
+  real="$(realpath -e "$repo" 2>/dev/null)" || { printf 'UNRESOLVED'; return 1; }
+  printf 'git -c safe.directory=%s -C %s %s' "$real" "$repo" "$*"
+}
+
+# run_git <op> <repo> <args...> : prints stdout; on any failure dies with diagnostics.
+run_git() {
+  local op="$1" repo="$2" real out err rc raw argv; shift 2
+  real="$(realpath -e "$repo" 2>/dev/null)" || die git_repo_unresolved "op=$op repo=$repo"
+  argv="$(git_argv "$repo" "$@")"
+  GIT_CALLS+=("$argv")
+  out="$(mktemp)"; err="$(mktemp)"
+  git -c "safe.directory=$real" -C "$repo" "$@" >"$out" 2>"$err"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    raw="$(head -c 400 "$err" | tr '\n' ' ')"
+    rm -f "$out" "$err"
+    die git_failed "op=$op argv='$argv' rc=$rc stderr=${raw:-<empty>}"
+  fi
+  cat "$out"; rm -f "$out" "$err"
+}
+
+# git_probe <op> <repo> <args...> : 0 = success, 1 = "not found" (expected), else dies.
+git_probe() {
+  local op="$1" repo="$2" real err rc raw argv; shift 2
+  real="$(realpath -e "$repo" 2>/dev/null)" || die git_repo_unresolved "op=$op repo=$repo"
+  argv="$(git_argv "$repo" "$@")"
+  GIT_CALLS+=("$argv")
+  err="$(mktemp)"
+  git -c "safe.directory=$real" -C "$repo" "$@" >/dev/null 2>"$err"; rc=$?
+  if [ "$rc" -gt 1 ]; then
+    raw="$(head -c 400 "$err" | tr '\n' ' ')"
+    rm -f "$err"
+    die git_failed "op=$op argv='$argv' rc=$rc stderr=${raw:-<empty>}"
+  fi
+  rm -f "$err"; return "$rc"
+}
+
+GIT_CALLS=()
+
 # --------------------------------------------------------------------------- #
 stage_preflight() {
   require_root
@@ -78,19 +123,18 @@ stage_preflight() {
   for row in "${REPOS[@]}"; do
     name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"; ref="$(row_field "$row" 3)"
     want="$(row_field "$row" 4)"
-    got="$(git -C "$repo" rev-parse "$ref" 2>/dev/null || printf 'UNREADABLE')"
+    got="$(run_git "rev-parse $name $ref" "$repo" rev-parse "$ref")"
     [ "$got" = "$want" ] || die preflight_ref "$name $ref=$got want=$want"
-    got="$(git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'UNREADABLE')"
+    got="$(run_git "rev-parse $name HEAD" "$repo" rev-parse HEAD)"
     [ "$got" = "$want" ] || die preflight_head "$name HEAD=$got want=$want"
     say "PREFLIGHT_OK ref+head=$name $got"
   done
   got="$(sha256sum "$MODULE_PATH" 2>/dev/null | awk '{print $1}')"
   [ "$got" = "$EXPECTED_MODULE_SHA" ] || die preflight_module "$MODULE_PATH=$got want=$EXPECTED_MODULE_SHA"
   say "PREFLIGHT_OK module=$got"
-  # gitlink must be intact at HEAD (mode 160000, index OID == HEAD OID)
-  local tree_oid idx_mode idx_oid
-  tree_oid="$(git -C "$STACK_REPO" rev-parse "HEAD:$GITLINK_PATH" 2>/dev/null)" || die preflight_gitlink_missing "$GITLINK_PATH"
-  read -r idx_mode idx_oid _ < <(git -C "$STACK_REPO" ls-files -s -- "$GITLINK_PATH" 2>/dev/null)
+  local tree_oid idx_mode idx_oid _ignored
+  tree_oid="$(run_git "rev-parse HEAD:$GITLINK_PATH" "$STACK_REPO" rev-parse "HEAD:$GITLINK_PATH")"
+  read -r idx_mode idx_oid _ignored < <(run_git "ls-files -s $GITLINK_PATH" "$STACK_REPO" ls-files -s -- "$GITLINK_PATH")
   [ "$idx_mode" = "160000" ] || die preflight_gitlink_mode "$GITLINK_PATH mode=$idx_mode"
   [ "$idx_oid" = "$tree_oid" ] || die preflight_gitlink_drift "$GITLINK_PATH index=$idx_oid head=$tree_oid"
   say "PREFLIGHT_OK gitlink=$GITLINK_PATH $idx_oid"
@@ -106,13 +150,12 @@ PY
 
 # --- precise admin-entry removal ---------------------------------------------------- #
 prove_and_drop_admin() { # <repo> <candidate> <approved_commit>
-  local repo="$1" cand="$2" appr="$3" wtname adm gd cd hd entry unexpected
+  local repo="$1" cand="$2" appr="$3" wtname adm gd cd hd entry
   wtname="$(basename "$cand")"
   adm="$repo/.git/worktrees/$wtname"
   case "$adm" in "$repo"/.git/worktrees/*) : ;; *) die admin_outside "$adm" ;; esac
   [ -d "$adm" ] && [ ! -L "$adm" ] || die admin_missing "$adm"
   [ -d "$repo/.git/worktrees" ] && [ ! -L "$repo/.git/worktrees" ] || die admin_parent "$repo/.git/worktrees"
-  # no symlinks and no unexpected entries anywhere directly under the admin dir
   [ -z "$(find "$adm" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null)" ] || die admin_symlink "$adm"
   for entry in "$adm"/* "$adm"/.[!.]*; do
     [ -e "$entry" ] || continue
@@ -129,7 +172,7 @@ prove_and_drop_admin() { # <repo> <candidate> <approved_commit>
     || die admin_commondir_foreign "$(cat "$cd")"
   hd="$(cat "$adm/HEAD" 2>/dev/null)"
   case "$hd" in
-    "ref: "*) [ "$(git -C "$repo" rev-parse --verify "${hd#ref: }" 2>/dev/null)" = "$appr" ] || die admin_head "${hd#ref: } != $appr" ;;
+    "ref: "*) [ "$(run_git "rev-parse admin HEAD $wtname" "$repo" rev-parse --verify "${hd#ref: }")" = "$appr" ] || die admin_head "${hd#ref: } != $appr" ;;
     *) [ "$hd" = "$appr" ] || die admin_head "$hd != $appr" ;;
   esac
   say "ADMIN_PROOF_OK $adm (gitdir/commondir/HEAD/locked/entries verified)"
@@ -145,7 +188,7 @@ cleanup_candidate() { # <repo> <candidate> <approved_commit>
   say "CANDIDATE path=$cand admin=$wtname state=$st action=$act"
   case "$act" in
     REMOVE_WORKTREE)
-      git -c "safe.directory=$cand" -C "$repo" worktree remove -- "$cand" \
+      run_git "worktree remove $wtname" "$repo" worktree remove -- "$cand" >/dev/null \
         || die worktree_remove "$cand (the attempt root is not writable by the broker identity; removal must run as root)"
       wt_admin_present "$repo" "$wtname" && die admin_left "$wtname"
       [ ! -e "$cand" ] || die dir_left "$cand"
@@ -187,11 +230,14 @@ stage_temp_refs() {
     for row in "${REPOS[@]}"; do
       name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"
       ref="refs/iap-candidate/$name"; want="$(row_field "$row" 4)"
-      got="$(git -C "$repo" rev-parse --verify --quiet "$ref" 2>/dev/null || printf 'ABSENT')"
-      [ "$got" = "ABSENT" ] && { say "TEMP_REF_ABSENT $aid $ref"; continue; }
-      [ "$got" = "$want" ] || die temp_ref_oid "$aid $ref=$got want=$want"
-      git -C "$repo" update-ref -d "$ref" || die temp_ref_delete "$aid $ref"
-      say "TEMP_REF_DELETED $aid $ref ($got)"
+      if git_probe "rev-parse $ref" "$repo" rev-parse --verify --quiet "$ref"; then
+        got="$(run_git "rev-parse $ref" "$repo" rev-parse --verify "$ref")"
+        [ "$got" = "$want" ] || die temp_ref_oid "$aid $ref=$got want=$want"
+        run_git "update-ref -d $ref" "$repo" update-ref -d "$ref" >/dev/null
+        say "TEMP_REF_DELETED $aid $ref ($got)"
+      else
+        say "TEMP_REF_ABSENT $aid $ref"
+      fi
     done
   done
 }
@@ -223,7 +269,6 @@ stage_rootcopies() {
   done
 }
 
-# ALWAYS re-inspects the real scene; never skipped by a marker.
 stage_verify_clean() {
   require_root
   local att aid aroot ldir row name repo ref p bad=0
@@ -235,7 +280,7 @@ stage_verify_clean() {
       name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"
       wt_admin_present "$repo" "$name$CAND_SUFFIX" && { say "REMAINS $repo/.git/worktrees/$name$CAND_SUFFIX"; bad=1; }
       ref="refs/iap-candidate/$name"
-      git -C "$repo" rev-parse --verify --quiet "$ref" >/dev/null 2>&1 && { say "REMAINS $ref"; bad=1; }
+      git_probe "rev-parse $ref" "$repo" rev-parse --verify --quiet "$ref" && { say "REMAINS $ref"; bad=1; }
     done
   done
   for p in "${ROOTCOPIES[@]}"; do [ -e "$p" ] && { say "REMAINS $p"; bad=1; }; done
@@ -268,7 +313,6 @@ main() {
     if [ -n "$from" ] && [ "$started" -eq 0 ]; then
       [ "$op" = "$from" ] && started=1 || continue
     fi
-    # only deletion stages may be skipped; verify-clean always re-inspects
     if [ "$op" != verify-clean ] && done_marker "$op"; then say "SKIP $op (done)"; continue; fi
     CURRENT_STAGE="$op"
     "$(stage_name_to_fn "$op")"
