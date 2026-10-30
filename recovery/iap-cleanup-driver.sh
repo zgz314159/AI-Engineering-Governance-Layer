@@ -28,7 +28,11 @@ EXPECTED_STACK_TIP="${EXPECTED_STACK_TIP:-0b04e1798fffb17ec78aaf096065b9990ec65b
 EXPECTED_AEGL_TIP="${EXPECTED_AEGL_TIP:-a387a501916600fc8feaab6da249d3a2c4764b8d}"
 MODULE_PATH="${MODULE_PATH:-/usr/local/lib/aegl-model-task/recovery/model_task_registry.py}"
 EXPECTED_MODULE_SHA="${EXPECTED_MODULE_SHA:-baa7133e990a9009256068ac75b772a79d426a45678cd010b8301cdb6dc41491}"
-BRIDGE_STATE="${BRIDGE_STATE:-$HOME/.local/state/google-android-agent-stack/bridge/state.json}"
+# Authoritative, FIXED Bridge state directory — never derived from $HOME / sudo HOME /
+# root's ~. Overridable only for tests.
+BRIDGE_DIR="${BRIDGE_DIR:-/home/zhong/.local/state/google-android-agent-stack/bridge}"
+BRIDGE_STATE="$BRIDGE_DIR/state.json"
+BRIDGE_PENDING="$BRIDGE_DIR/pending_result.json"
 GITLINK_PATH="${GITLINK_PATH:-references/architecture-templates}"
 CAND_SUFFIX="${CAND_SUFFIX:--candidate}"
 
@@ -138,14 +142,27 @@ stage_preflight() {
   [ "$idx_mode" = "160000" ] || die preflight_gitlink_mode "$GITLINK_PATH mode=$idx_mode"
   [ "$idx_oid" = "$tree_oid" ] || die preflight_gitlink_drift "$GITLINK_PATH index=$idx_oid head=$tree_oid"
   say "PREFLIGHT_OK gitlink=$GITLINK_PATH $idx_oid"
-  python3 - "$BRIDGE_STATE" <<'PY' || die preflight_bridge "bridge state not WAITING_FOR_GPT/seq5/no-pending"
-import json,sys,os
-d=json.load(open(sys.argv[1]))
-assert d.get("status")=="WAITING_FOR_GPT", d.get("status")
-assert d.get("expected_sequence")==5, d.get("expected_sequence")
-assert not os.path.exists(os.path.join(os.path.dirname(sys.argv[1]),"pending_result.json"))
+  [ -e "$BRIDGE_STATE" ] || die preflight_bridge_missing "$BRIDGE_STATE (fixed path, not derived from HOME)"
+  [ -r "$BRIDGE_STATE" ] || die preflight_bridge_unreadable "$BRIDGE_STATE"
+  python3 - "$BRIDGE_STATE" "$BRIDGE_PENDING" <<'PY' || die preflight_bridge "state invalid, or status/sequence/pending mismatch"
+import json, sys, os
+path, pending = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+except Exception as exc:
+    print("bridge_state_bad_json", type(exc).__name__, file=sys.stderr); raise SystemExit(1)
+missing = [k for k in ("status", "expected_sequence") if k not in d]
+if missing:
+    print("bridge_state_missing_field", ",".join(missing), file=sys.stderr); raise SystemExit(1)
+if d.get("status") != "WAITING_FOR_GPT":
+    print("bridge_status_mismatch", d.get("status"), file=sys.stderr); raise SystemExit(1)
+if d.get("expected_sequence") != 5:
+    print("bridge_sequence_mismatch", d.get("expected_sequence"), file=sys.stderr); raise SystemExit(1)
+if os.path.exists(pending):
+    print("bridge_pending_present", pending, file=sys.stderr); raise SystemExit(1)
 PY
-  say "PREFLIGHT_OK bridge=WAITING_FOR_GPT/seq5/no-pending"
+  say "PREFLIGHT_OK bridge=WAITING_FOR_GPT/seq5/no-pending ($BRIDGE_DIR)"
 }
 
 # --- precise admin-entry removal ---------------------------------------------------- #
