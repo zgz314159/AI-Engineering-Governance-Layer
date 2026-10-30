@@ -71,14 +71,20 @@ att_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
 # --- temp refs: the REAL namespace used by the delivered runs --------------------- #
 REF_PREFIX="${REF_PREFIX:-refs/aegl-delivery}"
 temp_ref_name() { printf '%s/%s/%s' "$REF_PREFIX" "$1" "$2"; }
-temp_ref_expect() { # <attempt-id> <repo> -> expected OID (per attempt; defaults are the delivered ones)
-  case "$1/$2" in
-    3f1729319a8f07d6/stack) printf '%s' "${EXPECT_OID_3F_STACK:-0b04e1798fffb17ec78aaf096065b9990ec65b0e}" ;;
-    3f1729319a8f07d6/aegl)  printf '%s' "${EXPECT_OID_3F_AEGL:-a387a501916600fc8feaab6da249d3a2c4764b8d}" ;;
-    a41e8c5348895588/stack) printf '%s' "${EXPECT_OID_A4_STACK:-0b04e1798fffb17ec78aaf096065b9990ec65b0e}" ;;
-    a41e8c5348895588/aegl)  printf '%s' "${EXPECT_OID_A4_AEGL:-34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29}" ;;
-    *) return 1 ;;
+temp_ref_expect() { # <attempt-id> <repo> -> expected OID; rc 1 = unconfigured (stop)
+  local id="$1" repo="$2" v=""
+  if v="$(printenv "EXPECT_OID_${id}_${repo}" 2>/dev/null)"; then :; else v=""; fi
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  case "$id/$repo" in
+    3f1729319a8f07d6/stack) printf '%s' "0b04e1798fffb17ec78aaf096065b9990ec65b0e"; return 0 ;;
+    3f1729319a8f07d6/aegl)  printf '%s' "a387a501916600fc8feaab6da249d3a2c4764b8d"; return 0 ;;
+    a41e8c5348895588/stack) printf '%s' "0b04e1798fffb17ec78aaf096065b9990ec65b0e"; return 0 ;;
+    a41e8c5348895588/aegl)  printf '%s' "34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29"; return 0 ;;
   esac
+  # test-only generic fallback (production does not define it -> hard stop)
+  if v="$(printenv "EXPECT_OID_DEFAULT_${repo}" 2>/dev/null)"; then :; else v=""; fi
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  return 1
 }
 
 # --- bundle staging expectations (per attempt, per repo) --------------------------- #
