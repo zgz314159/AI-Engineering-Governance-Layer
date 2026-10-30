@@ -166,10 +166,54 @@ PY
 }
 
 # --- precise admin-entry removal ---------------------------------------------------- #
-prove_and_drop_admin() { # <repo> <candidate> <approved_commit>
-  local repo="$1" cand="$2" appr="$3" wtname adm gd cd hd entry
-  wtname="$(basename "$cand")"
-  adm="$repo/.git/worktrees/$wtname"
+# --- admin-entry location by EXACT gitdir match (never by name) -------------------- #
+# Prints the one admin directory whose `gitdir` resolves to <candidate>/.git.
+# rc 0 = exactly one match; 1 = none; 2 = more than one (refuse).
+find_admin_for() { # <repo> <candidate>
+  local repo="$1" cand="$2" target gd content resolved
+  local -a matches=()
+  target="$(realpath -m -- "$cand/.git")"
+  for gd in "$repo"/.git/worktrees/*/gitdir; do
+    [ -f "$gd" ] && [ ! -L "$gd" ] || continue
+    content="$(cat "$gd" 2>/dev/null)" || continue
+    [ -n "$content" ] || continue
+    case "$content" in /*) : ;; *) content="$(dirname "$gd")/$content" ;; esac
+    resolved="$(realpath -m -- "$content")"
+    [ "$resolved" = "$target" ] && matches+=("$(dirname "$gd")")
+  done
+  if [ "${#matches[@]}" -eq 0 ]; then return 1; fi
+  if [ "${#matches[@]}" -gt 1 ]; then return 2; fi
+  printf '%s' "${matches[0]}"
+}
+
+classify_candidate() { # <repo> <candidate> -> MISSING_REGISTERED|EMPTY_REGISTERED|CLEAN_REGISTERED|DIRTY_REGISTERED|EMPTY_UNREGISTERED|RESIDUE_UNREGISTERED|ABSENT
+  local repo="$1" cand="$2" admin_rc ds
+  find_admin_for "$repo" "$cand" >/dev/null; admin_rc=$?
+  ds="$(dir_state "$cand")"
+  if [ "$admin_rc" -eq 0 ]; then
+    case "$ds" in
+      MISSING|EMPTY) printf '%s_REGISTERED' "$ds" ;;
+      NONEMPTY)
+        if git_safe "$cand" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+           && [ -z "$(git_safe "$cand" status --porcelain 2>/dev/null)" ]; then
+          printf 'CLEAN_REGISTERED'
+        else
+          printf 'DIRTY_REGISTERED'
+        fi ;;
+      *) printf 'RESIDUE_UNREGISTERED' ;;
+    esac
+  else
+    case "$ds" in
+      MISSING) printf 'ABSENT' ;;
+      EMPTY)   printf 'EMPTY_UNREGISTERED' ;;
+      *)       printf 'RESIDUE_UNREGISTERED' ;;
+    esac
+  fi
+}
+
+prove_and_drop_admin() { # <repo> <admin-dir> <candidate> <approved_commit>
+  local repo="$1" adm="$2" cand="$3" appr="$4" wtname gd cd hd entry
+  wtname="$(basename "$adm")"
   case "$adm" in "$repo"/.git/worktrees/*) : ;; *) die admin_outside "$adm" ;; esac
   [ -d "$adm" ] && [ ! -L "$adm" ] || die admin_missing "$adm"
   [ -d "$repo/.git/worktrees" ] && [ ! -L "$repo/.git/worktrees" ] || die admin_parent "$repo/.git/worktrees"
@@ -198,25 +242,29 @@ prove_and_drop_admin() { # <repo> <candidate> <approved_commit>
 }
 
 cleanup_candidate() { # <repo> <candidate> <approved_commit>
-  local repo="$1" cand="$2" appr="$3" wtname st act
-  wtname="$(basename "$cand")"
-  st="$(worktree_state "$repo" "$wtname" "$cand")"
+  local repo="$1" cand="$2" appr="$3" st act adm admin_rc
+  find_admin_for "$repo" "$cand" >/dev/null; admin_rc=$?
+  [ "$admin_rc" -eq 2 ] && die admin_ambiguous "$cand (more than one admin entry references it; refusing)"
+  st="$(classify_candidate "$repo" "$cand")"
   act="$(plan_action "$st")"
-  say "CANDIDATE path=$cand admin=$wtname state=$st action=$act"
+  adm=""
+  [ "$admin_rc" -eq 0 ] && adm="$(find_admin_for "$repo" "$cand")"
+  say "CANDIDATE path=$cand state=$st action=$act admin=${adm:-none}"
   case "$act" in
     REMOVE_WORKTREE)
-      run_git "worktree remove $wtname" "$repo" worktree remove -- "$cand" >/dev/null \
+      run_git "worktree remove $cand" "$repo" worktree remove -- "$cand" >/dev/null \
         || die worktree_remove "$cand (the attempt root is not writable by the broker identity; removal must run as root)"
-      wt_admin_present "$repo" "$wtname" && die admin_left "$wtname"
+      find_admin_for "$repo" "$cand" >/dev/null && die admin_left "$cand"
       [ ! -e "$cand" ] || die dir_left "$cand"
       ;;
     DROP_ADMIN_ENTRY)
-      prove_and_drop_admin "$repo" "$cand" "$appr"
+      [ -n "$adm" ] || die admin_ambiguous_or_missing "$cand (expected exactly one admin entry)"
+      prove_and_drop_admin "$repo" "$adm" "$cand" "$appr"
       [ -d "$cand" ] && { rmdir -- "$cand" || die rmdir_empty "$cand"; } || true
       ;;
     DELETE_EMPTY_DIR) rmdir -- "$cand" || die rmdir_empty "$cand" ;;
     REFUSE_DIRTY)     die dirty_candidate "$cand has real modifications; preserved" ;;
-    REFUSE_RESIDUE)   die residue "$cand is present but not a registered worktree; preserved" ;;
+    REFUSE_RESIDUE)   die residue "$cand is present but has no exact admin entry; preserved" ;;
     NOTHING)          say "CANDIDATE_ABSENT $cand" ;;
     *)                die unknown_action "$act for $st" ;;
   esac
@@ -295,7 +343,8 @@ stage_verify_clean() {
     [ -e "$ldir" ] && { say "REMAINS $ldir"; bad=1; }
     for row in "${REPOS[@]}"; do
       name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"
-      wt_admin_present "$repo" "$name$CAND_SUFFIX" && { say "REMAINS $repo/.git/worktrees/$name$CAND_SUFFIX"; bad=1; }
+      cand="$aroot/$name$CAND_SUFFIX"
+      find_admin_for "$repo" "$cand" >/dev/null && { say "REMAINS admin for $cand"; bad=1; }
       ref="refs/iap-candidate/$name"
       git_probe "rev-parse $ref" "$repo" rev-parse --verify --quiet "$ref" && { say "REMAINS $ref"; bad=1; }
     done
