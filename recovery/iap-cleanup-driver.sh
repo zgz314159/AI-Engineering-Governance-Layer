@@ -102,7 +102,9 @@ run_git() { # <op> <repo> <args...>; prints stdout, dies with diagnostics on fai
   if ! real="$(realpath -e "$repo" 2>/dev/null)"; then die git_repo_unresolved "op=$op repo=$repo"; fi
   argv="$(git_argv "$repo" "$@")" || argv="git -C $repo $*"
   out="$(mktemp)"; err="$(mktemp)"
-  git -c "safe.directory=$real" -C "$repo" "$@" >"$out" 2>"$err"; rc=$?
+  # the git status is an EXPECTED result to be inspected: consume it in a condition so
+  # the ERR trap does not fire on a failure this function is about to report itself
+  if git -c "safe.directory=$real" -C "$repo" "$@" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
   if [ "$rc" -ne 0 ]; then
     raw="$(head -c 400 "$err" | tr '\n' ' ')"
     rm -f "$out" "$err"
@@ -117,7 +119,7 @@ git_probe() { # <op> <repo> <args...>; 0 found, 1 absent (expected), else die
   if ! real="$(realpath -e "$repo" 2>/dev/null)"; then die git_repo_unresolved "op=$op repo=$repo"; fi
   argv="$(git_argv "$repo" "$@")" || argv="git -C $repo $*"
   err="$(mktemp)"
-  git -c "safe.directory=$real" -C "$repo" "$@" >/dev/null 2>"$err"; rc=$?
+  if git -c "safe.directory=$real" -C "$repo" "$@" >/dev/null 2>"$err"; then rc=0; else rc=$?; fi
   if [ "$rc" -gt 1 ]; then
     raw="$(head -c 400 "$err" | tr '\n' ' ')"
     rm -f "$err"
@@ -402,7 +404,7 @@ main() {
   set -Eeuo pipefail
   CLEANUP_FAIL_MARK="${TMPDIR:-/tmp}/.iap-cleanup-fail.$$"
   export CLEANUP_FAIL_MARK
-  rm -f "$CLEANUP_FAIL_MARK" 2>/dev/null || :
+  rm -f "$CLEANUP_FAIL_MARK" 2>/dev/null || if [ -e "$CLEANUP_FAIL_MARK" ]; then say "FAIL_MARK_CLEANUP_FAILED $CLEANUP_FAIL_MARK"; fi
   trap 'on_abort "$?" "$LINENO" "$BASH_COMMAND"' ERR
   trap 'on_exit "$?"' EXIT
   load_tables

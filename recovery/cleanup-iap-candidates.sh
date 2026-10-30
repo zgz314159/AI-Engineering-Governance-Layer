@@ -19,7 +19,9 @@ say()  { printf '%s\n' "$*"; }
 die()  {
   FAIL_REPORTED=1
   # visible to the parent even when die runs inside a command substitution
-  if [ -n "${CLEANUP_FAIL_MARK:-}" ]; then : > "$CLEANUP_FAIL_MARK" 2>/dev/null || :; fi
+  if [ -n "${CLEANUP_FAIL_MARK:-}" ]; then
+    if ! : > "$CLEANUP_FAIL_MARK" 2>/dev/null; then :; fi
+  fi
   printf 'CLEANUP_FAILED reason=%s: %s\n' "$1" "${2:-}" >&2
   exit 1
 }
