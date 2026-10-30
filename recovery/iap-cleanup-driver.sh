@@ -67,6 +67,29 @@ load_tables() {
 
 row_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
 att_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
+
+# --- temp refs: the REAL namespace used by the delivered runs --------------------- #
+REF_PREFIX="${REF_PREFIX:-refs/aegl-delivery}"
+temp_ref_name() { printf '%s/%s/%s' "$REF_PREFIX" "$1" "$2"; }
+temp_ref_expect() { # <attempt-id> <repo> -> expected OID (per attempt; defaults are the delivered ones)
+  case "$1/$2" in
+    3f1729319a8f07d6/stack) printf '%s' "${EXPECT_OID_3F_STACK:-0b04e1798fffb17ec78aaf096065b9990ec65b0e}" ;;
+    3f1729319a8f07d6/aegl)  printf '%s' "${EXPECT_OID_3F_AEGL:-a387a501916600fc8feaab6da249d3a2c4764b8d}" ;;
+    a41e8c5348895588/stack) printf '%s' "${EXPECT_OID_A4_STACK:-0b04e1798fffb17ec78aaf096065b9990ec65b0e}" ;;
+    a41e8c5348895588/aegl)  printf '%s' "${EXPECT_OID_A4_AEGL:-34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- bundle staging expectations (per attempt, per repo) --------------------------- #
+# Supplied by the operator from each attempt's frozen package manifest; a missing
+# expectation is a hard stop (never "trust whatever bundle is there").
+bundle_expect() { # <attempt-id> <repo>
+  local name="BUNDLE_SHA_$1_$2" v
+  if v="$(printenv "$name" 2>/dev/null)"; then :; else v=""; fi
+  if [ -z "$v" ]; then return 1; fi
+  printf '%s' "$v"
+}
 require_root() {
   if [ "$CLEANUP_ALLOW_NONROOT" != 1 ] && [ "$(id -u)" -ne 0 ]; then
     die not_root "stage '${CURRENT_STAGE}' needs root"
@@ -301,13 +324,15 @@ stage_candidates() {
 
 stage_temp_refs() {
   require_root
-  local att aid aroot row name repo ref want got
+  local att aid row name repo ref want got
   for att in "${ATTEMPTS[@]}"; do
-    aid="$(att_field "$att" 1)"; aroot="$(att_field "$att" 2)"
-    if [ ! -e "$aroot" ]; then continue; fi
+    aid="$(att_field "$att" 1)"
     for row in "${REPOS[@]}"; do
       name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"
-      ref="refs/iap-candidate/$name"; want="$(row_field "$row" 4)"
+      ref="$(temp_ref_name "$aid" "$name")"
+      if ! want="$(temp_ref_expect "$aid" "$name")"; then
+        die temp_ref_unconfigured "$aid $name (no expected OID for $ref)"
+      fi
       if git_probe "rev-parse $ref" "$repo" rev-parse --verify --quiet "$ref"; then
         got="$(run_git "rev-parse $ref" "$repo" rev-parse --verify "$ref")"
         if [ "$got" != "$want" ]; then die temp_ref_oid "$aid $ref=$got want=$want"; fi
@@ -317,6 +342,35 @@ stage_temp_refs() {
         say "TEMP_REF_ABSENT $aid $ref"
       fi
     done
+  done
+  return 0
+}
+
+stage_bundles() { # <attempt>/bundles/{stack,aegl}.bundle — exact members, type, owner, hash
+  require_root
+  local att aid aroot bdir member want got f name
+  for att in "${ATTEMPTS[@]}"; do
+    aid="$(att_field "$att" 1)"; aroot="$(att_field "$att" 2)"
+    bdir="$aroot/bundles"
+    if [ ! -e "$bdir" ]; then say "BUNDLES_ABSENT $bdir"; continue; fi
+    if [ ! -d "$bdir" ] || [ -L "$bdir" ]; then die bundles_not_dir "$bdir"; fi
+    # exactly the two expected regular members, nothing else, no symlinks
+    member="$(ls -A "$bdir" 2>/dev/null | LC_ALL=C sort | paste -sd, -)"
+    if [ "$member" != "aegl.bundle,stack.bundle" ]; then die bundles_members "$bdir members=$member"; fi
+    for name in stack aegl; do
+      f="$bdir/$name.bundle"
+      if [ ! -f "$f" ] || [ -L "$f" ]; then die bundle_not_regular "$f"; fi
+      if [ "$(stat -c '%u' "$f")" != "$(stat -c '%u' "$aroot")" ]; then die bundle_owner "$f"; fi
+      if ! want="$(bundle_expect "$aid" "$name")"; then
+        die bundle_hash_unconfigured "$aid $name (supply BUNDLE_SHA_${aid}_${name} from the frozen package manifest)"
+      fi
+      got="$(sha256sum "$f" | awk '{print $1}')"
+      if [ "$got" != "$want" ]; then die bundle_hash "$f=$got want=$want"; fi
+      say "BUNDLE_VERIFIED $aid $name $got"
+    done
+    for name in stack aegl; do rm -- "$bdir/$name.bundle" || die bundle_remove "$bdir/$name.bundle"; done
+    rmdir -- "$bdir" || die bundles_dir_left "$bdir"
+    say "BUNDLES_REMOVED $bdir"
   done
   return 0
 }
@@ -360,13 +414,14 @@ stage_verify_clean() {
   for att in "${ATTEMPTS[@]}"; do
     aid="$(att_field "$att" 1)"; aroot="$(att_field "$att" 2)"; ldir="$(att_field "$att" 3)"
     if [ -e "$aroot" ]; then say "REMAINS $aroot"; bad=1; fi
+    if [ -e "$aroot/bundles" ]; then say "REMAINS $aroot/bundles"; bad=1; fi
     if [ -e "$ldir" ]; then say "REMAINS $ldir"; bad=1; fi
     for row in "${REPOS[@]}"; do
       name="$(row_field "$row" 1)"; repo="$(row_field "$row" 2)"
       cand="$aroot/$name$CAND_SUFFIX"
       admin_rc=0; find_admin_for "$repo" "$cand" >/dev/null || admin_rc=$?
       if [ "$admin_rc" -ne 1 ]; then say "REMAINS admin($admin_rc) for $cand"; bad=1; fi
-      ref="refs/iap-candidate/$name"
+      ref="$(temp_ref_name "$aid" "$name")"
       if git_probe "rev-parse $ref" "$repo" rev-parse --verify --quiet "$ref"; then
         say "REMAINS $ref"; bad=1
       fi
@@ -378,7 +433,7 @@ stage_verify_clean() {
   return 0
 }
 
-STAGES=(preflight candidates temp-refs attempt-roots rootcopies verify-clean)
+STAGES=(preflight candidates temp-refs bundles attempt-roots rootcopies verify-clean)
 stage_name_to_fn() { printf 'stage_%s' "${1//-/_}"; }
 
 on_abort() { # rc line cmd  (ERR trap: reports the abort point once, no env dump)
