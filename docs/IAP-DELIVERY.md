@@ -72,6 +72,17 @@ explicitly use the formal Stack entry, bind to the existing state directory
 `/home/zhong/.local/state/google-android-agent-stack/bridge`, and preserve sequence 5.
 No M1 launch is included here.
 
+The superseded package whose anchor begins `a41e8c5348895588` stopped before its
+shell broker launcher could connect: its sanitized environment lacked the required
+`AEGL_BROKER_SOCKET`. The corrected caller sets that one variable explicitly after
+identity switching; tests now run the real shell launcher as well as the real
+broker server. Before this replacement begins, root verifies the old ledger is
+exactly at import/pre-CAS, both imported refs still match, and neither old task ID
+is registered. Any evidence of old registration or promotion stops replacement.
+Its files and ledger remain intact for precise cleanup after successful delivery;
+the old package must not be rerun. New source and package anchors are required
+because the corrected driver is itself source in the AEGL candidate commit.
+
 ## Local validation
 
 Run from an external AEGL checkout:

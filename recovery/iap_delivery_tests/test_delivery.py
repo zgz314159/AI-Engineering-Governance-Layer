@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import shlex
 import socket
 import subprocess
 import sys
@@ -125,10 +124,13 @@ class FlowTests(unittest.TestCase):
             if time.monotonic() > deadline:
                 raise RuntimeError("test broker startup timeout")
             time.sleep(.01)
-        self.client = self.root / "broker-client"
-        self.client.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " -B " +
-                               shlex.quote(str(ROOT / "promotion_broker.py")) + ' "$@"\n')
+        # Use the actual installed-layout shell entry, not a test-only Python
+        # shortcut: its mandatory environment variable is part of the contract.
+        self.client = self.root / "aegl-promote-broker"
+        self.client.write_bytes((ROOT.parent / "bin/aegl-promote-broker").read_bytes())
         self.client.chmod(0o700)
+        for module in ("promotion_broker.py", "promotion_core.py"):
+            (self.root / module).symlink_to(ROOT / module)
         self.ledger = self.root / "ledger"
         self.ledger.mkdir()
         self.driver = self.new_driver()
@@ -167,6 +169,46 @@ class FlowTests(unittest.TestCase):
         self.driver.import_objects(row)
         self.assertEqual(git(row["path"], "rev-parse", row["target_ref"]), row["base"])
         self.assertEqual(self.driver.calls, [])
+
+    def test_launcher_without_socket_env_fails_before_registration(self):
+        p = self.driver.run([str(self.client), "client", "--socket", str(self.socket),
+                             "--request", '{"op":"register","task_id":"must-not-register"}'],
+                            check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(p.stdout, b"")
+        self.assertIn(b"AEGL_BROKER_SOCKET", p.stderr)
+        self.assertFalse((self.registry_dir / "registry.json").exists())
+
+    def test_client_failure_reports_operation_and_exit_without_output(self):
+        self.client.write_text('#!/bin/sh\nprintf secret-output >&2\nexit 27\n')
+        row = self.release["repos"][0]
+        with self.assertRaisesRegex(d.DeliveryError,
+                                    "broker_client_failed op=register rc=27 stdout_bytes=0 stderr_bytes=13"):
+            self.driver.broker_call(row, "register", "REGISTERED")
+
+    def test_replacement_guard_requires_import_only_and_zero_old_registrations(self):
+        self.driver.prepare_workspace()
+        for row in self.release["repos"]:
+            self.driver.import_objects(row)
+        self.driver.checkpoint("stack", "pre_cas")
+        aegl_final = self.release["repos"][1]["final"]
+        args = (self.driver.anchor, self.ledger, self.driver.workspace, aegl_final)
+        self.driver.verify_previous_imports(*args)
+        row = self.release["repos"][0]
+        candidate = self.driver.candidate(row)
+        self.driver.broker_call(row, "register", "REGISTERED", project=row["path"],
+                                base=row["base"], worktree=str(candidate), branch="test",
+                                target_ref=row["target_ref"])
+        with self.assertRaisesRegex(d.DeliveryError, "previous_broker_task_already_registered"):
+            self.driver.verify_previous_imports(*args)
+
+    def test_replacement_guard_rejects_advanced_old_ledger(self):
+        self.driver.state["repos"] = {"stack": {"import": True, "pre_cas": True, "broker": True},
+                                      "aegl": {"import": True}}
+        self.driver.save()
+        with self.assertRaisesRegex(d.DeliveryError, "previous_import_progress_not_compatible"):
+            self.driver.verify_previous_imports(self.driver.anchor, self.ledger,
+                                                self.driver.workspace, self.release["repos"][1]["final"])
 
     def test_payload_not_in_candidate_source_stops_before_any_broker(self):
         self.release["source_files"] = {"payload/aegl/bin/aegl-model-task": "source.txt"}

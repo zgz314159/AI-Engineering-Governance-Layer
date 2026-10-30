@@ -23,6 +23,8 @@ import tempfile
 
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+FAILED_IMPORT_ANCHOR = "a41e8c53488955881853830bed1d57868ebe001dc2899b191638ea104729e32f"
+FAILED_IMPORT_AEGL = "34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29"
 PRODUCTION = {
     "stack": ("/home/zhong/Projects/Google-Android-Agent-Development-Stack", "master",
               "3a93066de216e731900870d145032bbb995fb92f"),
@@ -302,14 +304,55 @@ class Delivery:
             require(e.get("approved_commit") in (None, row["final"]), "approved_commit_mismatch")
         return e
 
+    def verify_previous_imports(self, anchor, ledger, workspace, previous_aegl):
+        """Read-only guard before replacing a package that failed at its launcher.
+
+        A new source commit needs a new package anchor. Do not invent fresh broker
+        identities if the superseded package actually reached registration/CAS.
+        Retain its artifacts until the replacement has completed successfully.
+        """
+        ledger, workspace = Path(ledger), Path(workspace)
+        if not ledger.exists():
+            require(not workspace.exists(), "previous_import_ledger_missing")
+            return
+        state_path = ledger / "state.json"
+        if os.geteuid() == 0:
+            check_root_path(ledger, 0o700)
+            check_root_path(state_path, 0o600)
+        value = json.loads(state_path.read_text())
+        require(set(value) == {"anchor", "release", "repos"} and value["anchor"] == anchor,
+                "previous_import_state_changed")
+        expected_release = json.loads(json.dumps(self.release))
+        for row in expected_release["repos"]:
+            if row["name"] == "aegl":
+                row["final"] = previous_aegl
+        require(value["release"] == expected_release and value["repos"] == {
+            "stack": {"import": True, "pre_cas": True}, "aegl": {"import": True}},
+                "previous_import_progress_not_compatible")
+        previous = Delivery(self.package, anchor, expected_release, ledger, workspace,
+                            operator=self.operator, requester=self.requester,
+                            broker=self.broker, socket=self.socket, registry=self.registry)
+        for row in expected_release["repos"]:
+            require(previous.entry(row) is None, "previous_broker_task_already_registered")
+            ref = "refs/aegl-delivery/%s/%s" % (anchor[:16], row["name"])
+            require(self.oid(row, ref) == row["final"], "previous_import_ref_changed")
+        self.emit("PREVIOUS_IMPORT_ONLY=VERIFIED (no old broker registrations; old artifacts retained)")
+
     def broker_call(self, row, op, decision, **kwargs):
         request = {"protocol": "AEGL-BROKER/1", "op": op, "task_id": self.task_id(row), **kwargs}
-        p = self.run([self.broker, "client", "--socket", self.socket, "--request", json.dumps(request)],
+        # The installed shell launcher requires this variable before it parses
+        # arguments. Set it after runuser, inside our otherwise sanitized env.
+        p = self.run(["/usr/bin/env", "AEGL_BROKER_SOCKET=" + self.socket,
+                      self.broker, "client", "--request", json.dumps(request)],
                      user=self.requester if op in ("promote", "validate") else None, check=False)
         try:
             reply = json.loads(p.stdout)
         except ValueError as exc:
-            raise DeliveryError("broker_invalid_json") from exc
+            # Do not echo arbitrary broker output (or request bodies). Distinguish
+            # launcher failure from a malformed successful protocol response.
+            raise DeliveryError("broker_client_failed op=%s rc=%s stdout_bytes=%s stderr_bytes=%s" %
+                                (op, p.returncode, len(p.stdout), len(p.stderr))) from exc
+        require(isinstance(reply, dict), "broker_reply_not_object")
         require(p.returncode == 0 and reply.get("decision") == decision,
                 "broker_%s rc=%s decision=%s reason=%s" %
                 (op, p.returncode, reply.get("decision"), reply.get("reason", "")))
@@ -544,6 +587,11 @@ def main(argv=None):
             check_root_path(ledger, 0o700)
             delivery = Delivery(package, args.package_anchor, release, ledger,
                                 Path("/var/tmp/aegl-iap-" + args.package_anchor[:16]))
+            delivery.stage = "previous_import_guard"
+            delivery.verify_previous_imports(
+                FAILED_IMPORT_ANCHOR,
+                ledger_parent / ("iap-" + FAILED_IMPORT_ANCHOR[:16]),
+                Path("/var/tmp/aegl-iap-" + FAILED_IMPORT_ANCHOR[:16]), FAILED_IMPORT_AEGL)
             delivery.execute()
         return 0
     except (DeliveryError, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
