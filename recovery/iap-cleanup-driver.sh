@@ -71,28 +71,82 @@ att_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
 # --- temp refs: the REAL namespace used by the delivered runs --------------------- #
 REF_PREFIX="${REF_PREFIX:-refs/aegl-delivery}"
 temp_ref_name() { printf '%s/%s/%s' "$REF_PREFIX" "$1" "$2"; }
-temp_ref_expect() { # <attempt-id> <repo> -> expected OID; rc 1 = unconfigured (stop)
-  local id="$1" repo="$2" v=""
-  if v="$(printenv "EXPECT_OID_${id}_${repo}" 2>/dev/null)"; then :; else v=""; fi
-  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
-  case "$id/$repo" in
-    3f1729319a8f07d6/stack) printf '%s' "0b04e1798fffb17ec78aaf096065b9990ec65b0e"; return 0 ;;
-    3f1729319a8f07d6/aegl)  printf '%s' "a387a501916600fc8feaab6da249d3a2c4764b8d"; return 0 ;;
-    a41e8c5348895588/stack) printf '%s' "0b04e1798fffb17ec78aaf096065b9990ec65b0e"; return 0 ;;
-    a41e8c5348895588/aegl)  printf '%s' "34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29"; return 0 ;;
-  esac
-  # test-only generic fallback (production does not define it -> hard stop)
-  if v="$(printenv "EXPECT_OID_DEFAULT_${repo}" 2>/dev/null)"; then :; else v=""; fi
-  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
-  return 1
+
+# --- frozen production expectations ------------------------------------------------ #
+# Derived from the two APPROVED frozen packages (manifest SHA256 verified first):
+#   3f1729319a8f07d68cc662d7ec091b84b0d2a59815853ef031cd9f925f3feeed  (IAP-DELIVERY-SOCKET-FIX)
+#   a41e8c53488955881853830bed1d57868ebe001dc2899b191638ea104729e32f  (IAP-DELIVERY)
+# member names are exactly bundle/stack.bundle and bundle/aegl.bundle.
+# attempt|repo|expected OID|expected bundle sha256
+PROD_EXPECTATIONS="
+3f1729319a8f07d6|stack|0b04e1798fffb17ec78aaf096065b9990ec65b0e|254f35d9d03c19968d141639cea9d72b6e5fa2a769c478248029876343771158
+3f1729319a8f07d6|aegl|a387a501916600fc8feaab6da249d3a2c4764b8d|2f19e52d2188f35a52db67b52526129272505cbd46bb174bdb72a33527901784
+a41e8c5348895588|stack|0b04e1798fffb17ec78aaf096065b9990ec65b0e|254f35d9d03c19968d141639cea9d72b6e5fa2a769c478248029876343771158
+a41e8c5348895588|aegl|34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29|5068b179b73c9555d3f8093434a47e7fe1e17625985e05185fcd69fa98460685
+"
+
+declare -A EXPECT_OIDS=()
+declare -A EXPECT_BUNDLES=()
+
+is_hex40() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" -eq 40 ]; }
+is_hex64() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" -eq 64 ]; }
+
+# derive_bundle_sha <manifest> <approved-anchor> <member> -> prints the member hash
+# Verifies the manifest's own SHA256 equals the approved anchor, that the member occurs
+# EXACTLY once, and that its value is a full 64-hex digest.
+derive_bundle_sha() {
+  local manifest="$1" anchor="$2" member="$3" got count value
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then die expect_manifest_missing "$manifest"; fi
+  if ! is_hex64 "$anchor"; then die expect_anchor_format "$anchor"; fi
+  got="$(sha256sum "$manifest" | awk '{print $1}')"
+  if [ "$got" != "$anchor" ]; then die expect_anchor_mismatch "$manifest=$got want=$anchor"; fi
+  count="$(awk -v m="$member" '$2==m{n++} END{print n+0}' "$manifest")"
+  if [ "$count" -ne 1 ]; then die expect_member_count "$member count=$count in $manifest"; fi
+  value="$(awk -v m="$member" '$2==m{print $1; exit}' "$manifest")"
+  if ! is_hex64 "$value"; then die expect_member_hash "$member value=$value"; fi
+  printf '%s' "$value"
 }
 
+load_expectations() { # production table, or an isolated test file via CLEANUP_EXPECT_FILE
+  local src="${CLEANUP_EXPECT_FILE:-}" att repo oid sha
+  EXPECT_OIDS=(); EXPECT_BUNDLES=()
+  if [ -n "$src" ] && [ ! -f "$src" ]; then die expect_file_missing "$src"; fi
+  while IFS='|' read -r att repo oid sha; do
+    [ -n "${att:-}" ] || continue
+    case "$att" in \#*) continue ;; esac
+    if [ -z "${repo:-}" ] || [ -z "${oid:-}" ] || [ -z "${sha:-}" ]; then
+      die expect_row_incomplete "$att|$repo|$oid|$sha"
+    fi
+    EXPECT_OIDS["$att/$repo"]="$oid"
+    EXPECT_BUNDLES["$att/$repo"]="$sha"
+  done < <( if [ -n "$src" ]; then cat "$src"; else printf '%s\n' "$PROD_EXPECTATIONS"; fi )
+  return 0
+}
+
+validate_expectations() { # every configured attempt x repo must have a valid pair
+  local att aid row name key oid sha
+  for att in "${ATTEMPTS[@]}"; do
+    aid="$(att_field "$att" 1)"
+    for row in "${REPOS[@]}"; do
+      name="$(row_field "$row" 1)"; key="$aid/$name"
+      oid="${EXPECT_OIDS[$key]:-}"; sha="${EXPECT_BUNDLES[$key]:-}"
+      if [ -z "$oid" ]; then die expect_missing "no expected OID for $key"; fi
+      if [ -z "$sha" ]; then die expect_missing "no expected bundle sha for $key"; fi
+      if ! is_hex40 "$oid"; then die expect_oid_format "$key=$oid"; fi
+      if ! is_hex64 "$sha"; then die expect_sha_format "$key=$sha"; fi
+    done
+  done
+  say "EXPECTATIONS_OK entries=$((${#ATTEMPTS[@]} * ${#REPOS[@]}))"
+  return 0
+}
+
+temp_ref_expect() { local v="${EXPECT_OIDS[$1/$2]:-}"; if [ -z "$v" ]; then return 1; fi; printf '%s' "$v"; }
+
 # --- bundle staging expectations (per attempt, per repo) --------------------------- #
-# Supplied by the operator from each attempt's frozen package manifest; a missing
-# expectation is a hard stop (never "trust whatever bundle is there").
+# Read from the frozen production table (or the isolated test file); a missing or
+# invalid expectation is a hard stop BEFORE anything is deleted.
 bundle_expect() { # <attempt-id> <repo>
-  local name="BUNDLE_SHA_$1_$2" v
-  if v="$(printenv "$name" 2>/dev/null)"; then :; else v=""; fi
+  local v="${EXPECT_BUNDLES[$1/$2]:-}"
   if [ -z "$v" ]; then return 1; fi
   printf '%s' "$v"
 }
@@ -469,6 +523,9 @@ main() {
   trap 'on_abort "$?" "$LINENO" "$BASH_COMMAND"' ERR
   trap 'on_exit "$?"' EXIT
   load_tables
+  # ALL expectations are resolved and validated BEFORE any stage can delete anything
+  load_expectations
+  validate_expectations
   local only="" from="" op started=0
   while [ $# -gt 0 ]; do
     case "$1" in
