@@ -56,13 +56,15 @@ git_src(){
 }
 
 # Formal pre_cas / sync / cleanup through the shared verifier (Git runs as the owner).
+# `python3 -I` (isolated): no PYTHONPATH / user site / install-dir module can shadow the
+# verified, colocated copy of iap_delivery.py that the wrapper imports explicitly.
 formal_op(){ # <pre_cas|sync>
-  python3 "$SYNC_HELPER" --mode "$1" --project "$FORMAL" --target-ref "$TARGET_REF" \
+  python3 -I "$SYNC_HELPER" --mode "$1" --project "$FORMAL" --target-ref "$TARGET_REF" \
     --base "$BASE" --final "$COMMIT" --ledger "$REC_DIR" \
     --gitlink-path "$GITLINK_PATH" --gitlink-oid "$GITLINK_KNOWN_OID"
 }
 cleanup_op(){
-  python3 "$SYNC_HELPER" --mode cleanup --project "$FORMAL" --commit "$COMMIT" \
+  python3 -I "$SYNC_HELPER" --mode cleanup --project "$FORMAL" --commit "$COMMIT" \
     --candidate-ref "$CAND_REF" --record "$REC" --ledger "$REC_DIR"
 }
 
@@ -92,6 +94,11 @@ require_root_and_tools(){
   for t in git runuser python3 systemctl getent; do command -v "$t" >/dev/null 2>&1 || fail "missing tool: $t"; done
   for u in "$BROKER_USER" "$AI_USER"; do id "$u" >/dev/null 2>&1 || fail "missing user: $u"; done
   [ -f "$SYNC_HELPER" ] || fail "sync helper missing: $SYNC_HELPER"
+  # Complete runtime dependency must load from the STAGED copy before ANY promotion
+  # operation (isolated, so no external checkout/PYTHONPATH/install-dir module can serve it).
+  [ -f "$(dirname "$SYNC_HELPER")/iap_delivery.py" ] || fail "iap_delivery.py missing beside the verifier"
+  python3 -I "$SYNC_HELPER" --help >/dev/null 2>&1 \
+    || fail "self-contained dependency load failed (iap_delivery import)"
   [ -d "$FORMAL/.git" ] || fail "formal repo missing: $FORMAL/.git"
   [ "$(basename "$FORMAL")" = "Google-Android-Agent-Development-Stack" ] || fail "formal project basename mismatch"
   [ "$(realpath "$(dirname "$FORMAL")")" = "$(realpath "$PROJECTS_ROOT")" ] || fail "formal project not directly under the projects root"
