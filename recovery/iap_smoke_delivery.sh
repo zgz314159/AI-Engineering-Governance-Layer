@@ -56,6 +56,29 @@ op_py_env() {
   as_op env "${envs[@]}" /usr/bin/python3 -c "$snippet" "$@"
 }
 
+# --- sandbox-identity access probes (PAM-free drop + ACL-aware access(2)) ---------- #
+# The probe must answer the SAME question the kernel answers for the aegl-ai sandbox
+# identity. Two host hazards are removed:
+#   * runuser/PAM is not used to drop: a service account with a nologin shell and no
+#     home is fine because setpriv execs the command directly (never a login shell);
+#   * the host `test` binary is not trusted: some hosts ship a Rust/uutils coreutils
+#     `test` that reads mode bits only and IGNORES POSIX ACLs, which false-negatively
+#     rejects the aegl-ai traversal ACL on the task root. access(2) honors ACLs, so we
+#     evaluate with os.access as the dropped identity instead.
+AI_USER="aegl-ai"
+ai_uid() { id -u "$AI_USER"; }
+ai_gid() { id -g "$AI_USER"; }
+as_ai() { setpriv --reuid="$(ai_uid)" --regid="$(ai_gid)" --clear-groups --no-new-privs -- "$@"; }
+AI_ACCESS_ERR=""
+ai_access() { # <r|w|x> <path> -> rc 0 when $AI_USER may access <path> (parent traversal included)
+  local mode="$1" path="$2" out
+  out="$(as_ai /usr/bin/python3 -I -c '
+import os,sys
+sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.argv[1]]) else 1)
+' "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
+  return 0
+}
+
 operator_state_path() {
   op_py 'import sys;sys.path.insert(0,sys.argv[1]);import bridge_state;print(bridge_state.state_dir())' "$STACK_BRIDGE"
 }
@@ -236,8 +259,18 @@ stage_permissions() {
   if [ -e "$commondir/config" ]; then setfacl -m u:aegl-ai:r "$commondir/config" || die acl_config; fi
   if [ -e "$commondir/packed-refs" ]; then setfacl -m u:aegl-ai:r "$commondir/packed-refs" || die acl_packed; fi
   setfacl -R -m u:aegl-ai:rwX "$gitdir" || die acl_admin "$gitdir"
+  # Pin the mask on the traversal-only dirs so a later group-mode change cannot strip
+  # x from the aegl-ai entry, then ASSERT the effective right is really present — a
+  # zero exit from setfacl is not proof that aegl-ai can traverse.
+  setfacl -m m::rx "$TASK_ROOT" || die acl_task_root_mask
+  setfacl -m m::rx "$commondir" || die acl_commondir_mask
+  local tf cf
+  tf="$(getfacl -e -p "$TASK_ROOT" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
+  case "$tf" in *x*) : ;; *) die acl_task_root_effective "aegl-ai effective='${tf:-none}' on $TASK_ROOT (need x)";; esac
+  cf="$(getfacl -e -p "$commondir" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
+  case "$cf" in *x*) : ;; *) die acl_commondir_effective "aegl-ai effective='${cf:-none}' on $commondir (need x)";; esac
   printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
-  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX)"
+  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) traverse-verified=$TASK_ROOT,$commondir"
 }
 
 stage_probe() {
@@ -245,20 +278,20 @@ stage_probe() {
   local gitdir commondir base st head
   gitdir="$(sed -n '1p' "$LEDGER/paths")"; commondir="$(sed -n '2p' "$LEDGER/paths")"
   base="$(ctl_git "$IAP" rev-parse HEAD)"
-  runuser -u aegl-ai -- test -x "$TASK_ROOT" || die probe_traverse "$TASK_ROOT"
-  runuser -u aegl-ai -- test -x "$commondir" || die probe_commondir "$commondir"
-  runuser -u aegl-ai -- test -r "$WORKTREE/$PLAN_FILE" || die probe_read
-  runuser -u aegl-ai -- test -w "$WORKTREE" || die probe_write
-  runuser -u aegl-ai -- test -w "$SCRATCH" || die probe_scratch
-  head="$(runuser -u aegl-ai -- git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>&1)" || die probe_git "$head"
+  ai_access x "$TASK_ROOT" || die probe_traverse "$TASK_ROOT ${AI_ACCESS_ERR:-}"
+  ai_access x "$commondir" || die probe_commondir "$commondir ${AI_ACCESS_ERR:-}"
+  ai_access r "$WORKTREE/$PLAN_FILE" || die probe_read "$WORKTREE/$PLAN_FILE ${AI_ACCESS_ERR:-}"
+  ai_access w "$WORKTREE" || die probe_write "$WORKTREE ${AI_ACCESS_ERR:-}"
+  ai_access w "$SCRATCH" || die probe_scratch "$SCRATCH ${AI_ACCESS_ERR:-}"
+  head="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>&1)" || die probe_git "$head"
   [ "$head" = "$base" ] || die probe_git_head "$head != $base"
-  st="$(runuser -u aegl-ai -- git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>&1)" || die probe_status "$st"
+  st="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>&1)" || die probe_status "$st"
   [ -z "$st" ] || die probe_dirty "$st"
-  runuser -u aegl-ai -- test ! -w "$commondir/refs" || die probe_refs "$commondir/refs writable"
-  runuser -u aegl-ai -- test ! -w "$commondir/config" || die probe_config "config writable"
-  runuser -u aegl-ai -- test ! -w "$commondir/objects" || die probe_objects "object DB writable"
-  runuser -u aegl-ai -- test ! -w "$IAP" || die probe_formal "$IAP writable"
-  say "PROBE_OK traverse/read/write(worktree,scratch)/git=HEAD+status; formal refs/config/objects/tree read-only"
+  if ai_access w "$commondir/refs"; then die probe_refs "$commondir/refs writable"; fi
+  if ai_access w "$commondir/config"; then die probe_config "config writable"; fi
+  if ai_access w "$commondir/objects"; then die probe_objects "object DB writable"; fi
+  if ai_access w "$IAP"; then die probe_formal "$IAP writable"; fi
+  say "PROBE_OK traverse/read/write(worktree,scratch)/git=HEAD+status; formal refs/config/objects/tree read-only (access(2), ACL-aware)"
 }
 
 stage_contract() {
