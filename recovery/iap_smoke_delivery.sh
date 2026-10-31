@@ -66,9 +66,21 @@ op_py_env() {
 #     rejects the aegl-ai traversal ACL on the task root. access(2) honors ACLs, so we
 #     evaluate with os.access as the dropped identity instead.
 AI_USER="aegl-ai"
+AI_HOME="/home/aegl-ai"
+AI_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ai_uid() { id -u "$AI_USER"; }
 ai_gid() { id -g "$AI_USER"; }
-as_ai() { setpriv --reuid="$(ai_uid)" --regid="$(ai_gid)" --clear-groups --no-new-privs -- "$@"; }
+# Drop to the sandbox identity with a CONTROLLED environment: never the caller's HOME
+# (root's), never any inherited Git plumbing/env, never global/system Git config. This
+# keeps the probe from reading /root/.gitconfig or ~/.config/git and from being steered
+# by GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_* leaking in from the parent shell.
+as_ai() {
+  setpriv --reuid="$(ai_uid)" --regid="$(ai_gid)" --clear-groups --no-new-privs -- \
+    env -i PATH="$AI_PATH" LANG=C.UTF-8 HOME="$AI_HOME" \
+        XDG_CONFIG_HOME="$AI_HOME/.config" XDG_CACHE_HOME="$AI_HOME/.cache" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        "$@"
+}
 AI_ACCESS_ERR=""
 ai_access() { # <r|w|x> <path> -> rc 0 when $AI_USER may access <path> (parent traversal included)
   local mode="$1" path="$2" out
@@ -358,9 +370,15 @@ stage_probe() {
   ai_access r "$WORKTREE/$PLAN_FILE" || die probe_read "$WORKTREE/$PLAN_FILE ${AI_ACCESS_ERR:-}"
   ai_access w "$WORKTREE" || die probe_write "$WORKTREE ${AI_ACCESS_ERR:-}"
   ai_access w "$SCRATCH" || die probe_scratch "$SCRATCH ${AI_ACCESS_ERR:-}"
-  head="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>&1)" || die probe_git "$head"
+  # Git is invoked with return code, stdout and stderr kept apart: rc decides pass/fail,
+  # stdout is the value under test, stderr is diagnostics only (never mixed into it).
+  local gerr="$LEDGER/probe.git.stderr" grc
+  : > "$gerr" || die ledger_stderr "$gerr"
+  head="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>"$gerr")" \
+    || { grc=$?; die probe_git "rc=$grc stderr=$(tr -d '\n' <"$gerr")"; }
   [ "$head" = "$base" ] || die probe_git_head "$head != $base"
-  st="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>&1)" || die probe_status "$st"
+  st="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>"$gerr")" \
+    || { grc=$?; die probe_status "rc=$grc stderr=$(tr -d '\n' <"$gerr")"; }
   [ -z "$st" ] || die probe_dirty "$st"
   if ai_access w "$commondir/refs"; then die probe_refs "$commondir/refs writable"; fi
   if ai_access w "$commondir/config"; then die probe_config "config writable"; fi
