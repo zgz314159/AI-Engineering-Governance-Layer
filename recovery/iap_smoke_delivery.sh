@@ -86,8 +86,24 @@ stack_hashes_ok() {
 
 # --------------------------------------------------------------------------- #
 stage_preflight() {
-  say "[preflight] roots / evidence / stack / state path"
-  if [ -e "$IAP/.git" ] && ! done_marker baseline; then die baseline_exists "$IAP/.git present without a baseline marker"; fi
+  say "[preflight] baseline state / evidence / stack / state path"
+  local st files dirty
+  st="$(baseline_state)"
+  say "PREFLIGHT_BASELINE_STATE=$st"
+  case "$st" in
+    ABSENT|ZHONG_EMPTY_INIT)
+      say "PREFLIGHT_BASELINE=resumable ($st)" ;;
+    ROOT_EMPTY_INIT)
+      die git_meta_root_owned "run --stage repair-git-owner first (.git is a root-owned empty init)" ;;
+    HAS_COMMIT)
+      files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+      dirty="$(op_git status --porcelain)"
+      [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
+      [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
+      say "PREFLIGHT_BASELINE=approved commit=$(op_git rev-parse HEAD)" ;;
+    *)
+      die baseline_unknown "unrecognised .git state; refusing to proceed" ;;
+  esac
   [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_exists "$WORKTREE/EVIDENCE.txt"
   stack_hashes_ok
   assert_operator_state_path
@@ -99,15 +115,8 @@ iap_real() { realpath -e "$IAP" 2>/dev/null || die iap_unresolved "$IAP"; }
 op_git() { local real; real="$(iap_real)"; if [ "$(id -u)" -eq 0 ]; then
     runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"
   else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"; fi; }
-op_git_id() {
-  local n="" e=""
-  if n="$(op_git config --get user.name 2>/dev/null)"; then :; else n=""; fi
-  if e="$(op_git config --get user.email 2>/dev/null)"; then :; else e=""; fi
-  n="${IAP_GIT_NAME:-$n}"; e="${IAP_GIT_EMAIL:-$e}"
-  if [ -z "$n" ] || [ -z "$e" ]; then
-    die git_identity_unset "no operator git identity: configure user.name/user.email for zhong or pass IAP_GIT_NAME/IAP_GIT_EMAIL (never impersonate)"
-  fi
-  printf '%s\n%s\n' "$n" "$e"
+op_git_id() { # explicit identity for this run only; never writes global config
+  printf '%s\n%s\n' "${IAP_GIT_NAME:-zgz314159}" "${IAP_GIT_EMAIL:-zgz314159@gmail.com}"
 }
 
 baseline_state() { # ABSENT | ZHONG_EMPTY_INIT | ROOT_EMPTY_INIT | HAS_COMMIT | UNKNOWN
@@ -384,7 +393,9 @@ main() {
   local mode=prep only=""
   while [ $# -gt 0 ]; do case "$1" in --execute) mode=execute; shift ;; --stage) only="${2:-}"; shift 2 ;; --status) mode=status; shift ;; *) die usage "$1" ;; esac; done
   if [ "$mode" = status ]; then say "anchor=$ANCHOR ledger=$LEDGER"; ls -1 "$LEDGER" 2>/dev/null || say "(no stages)"; cat "$BRIDGE_DIR/state.json" 2>/dev/null; return 0; fi
-  local stages=("${PREP_STAGES[@]}")
+  local stages=()
+  if [ -n "${SMOKE_PREP_STAGES:-}" ]; then IFS=: read -r -a stages <<< "$SMOKE_PREP_STAGES"
+  else stages=("${PREP_STAGES[@]}"); fi
   if [ "$mode" = execute ]; then stages+=("${EXEC_STAGES[@]}"); fi
   if [ -n "$only" ]; then CURRENT_STAGE="$only"; "stage_${only//-/_}"; mark "$only"; return 0; fi
   local s
