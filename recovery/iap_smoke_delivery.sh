@@ -82,13 +82,20 @@ as_ai() {
         "$@"
 }
 AI_ACCESS_ERR=""
+_ACCESS_PY='import os,sys
+sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.argv[1]]) else 1)'
 ai_access() { # <r|w|x> <path> -> rc 0 when $AI_USER may access <path> (parent traversal included)
   local mode="$1" path="$2" out
-  out="$(as_ai /usr/bin/python3 -I -c '
-import os,sys
-sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.argv[1]]) else 1)
-' "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
+  out="$(as_ai /usr/bin/python3 -I -c "$_ACCESS_PY" "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
   return 0
+}
+# The gate operator also evaluates the worktree with real git (the Bridge contract check
+# runs as the campaign/operator identity), so it too needs traverse on the task root.
+# Same ACL-aware access(2) as $AI_USER — never the ACL-blind host `test` — via the
+# operator's own environment (as_op, the operator's HOME, not root's).
+op_access() { # <r|w|x> <path> -> rc 0 when $OPERATOR may access <path>
+  local mode="$1" path="$2"
+  as_op /usr/bin/python3 -I -c "$_ACCESS_PY" "$mode" "$path" >/dev/null 2>&1
 }
 # The ONLY production permission change this driver may make: grant the sandbox
 # identity traverse (x only) on the single directory the linked-worktree common dir
@@ -329,6 +336,10 @@ stage_permissions() {
   say "GITDIR=$gitdir COMMONDIR=$commondir"
   install -d -o aegl-ai -g aegl-ai -m 0750 "$SCRATCH" || die scratch
   setfacl -m u:aegl-ai:x "$TASK_ROOT" || die acl_task_root
+  # The Bridge contract check runs real git as the gate operator ($OPERATOR), so the
+  # task root must be traversable by BOTH identities — the execution identity ($AI_USER)
+  # and the gate operator. Traverse only; never read or write.
+  setfacl -m u:"$OPERATOR":x "$TASK_ROOT" || die acl_task_root_operator
   setfacl -m u:aegl-ai:x "$commondir" || die acl_commondir
   setfacl -R -m u:aegl-ai:rX "$commondir/objects" "$commondir/refs" || die acl_objects_refs
   if [ -e "$gitdir/HEAD" ]; then setfacl -m u:aegl-ai:r "$gitdir/HEAD" || die acl_gitdir_head; fi
@@ -343,6 +354,8 @@ stage_permissions() {
   local tf cf
   tf="$(getfacl -e -p "$TASK_ROOT" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
   case "$tf" in *x*) : ;; *) die acl_task_root_effective "aegl-ai effective='${tf:-none}' on $TASK_ROOT (need x)";; esac
+  op_access x "$TASK_ROOT" \
+    || die acl_task_root_operator_effective "$TASK_ROOT not traversable by gate operator $OPERATOR"
   cf="$(getfacl -e -p "$commondir" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
   case "$cf" in *x*) : ;; *) die acl_commondir_effective "aegl-ai effective='${cf:-none}' on $commondir (need x)";; esac
   # The checks above prove only the TARGET's ACL is effective — nothing about the chain.
@@ -351,7 +364,7 @@ stage_permissions() {
   ensure_required_traverse "$commondir"
   ensure_required_traverse "$gitdir"
   printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
-  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) target-acl-effective=$TASK_ROOT,$commondir (ancestor traverse ensured; reachability proven only by probe)"
+  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) task-root-traverse=$AI_USER,$OPERATOR target-acl-effective=$TASK_ROOT,$commondir (reachability proven only by probe)"
 }
 
 stage_probe() {
