@@ -43,7 +43,8 @@ mark() { mkdir -p "$LEDGER" || die ledger_dir "$LEDGER"; printf 'anchor=%s stage
 done_marker() { local f="$LEDGER/$1.done"; if [ ! -f "$f" ]; then return 1; fi; if [ "$(cat "$f")" != "anchor=$ANCHOR stage=$1" ]; then say "MARKER_STALE $1"; return 1; fi; return 0; }
 
 # --- operator-side execution (never root's HOME, never sudo -E) ------------------- #
-as_op() { runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" BU_CDP_URL="$CDP_URL" LANG=C.UTF-8 "$@"; }
+_op_env() { if [ "$(id -u)" -eq 0 ]; then printf 'runuser'; else printf 'direct'; fi; }
+as_op() { if [ "$(id -u)" -eq 0 ]; then runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" BU_CDP_URL="$CDP_URL" LANG=C.UTF-8 "$@"; else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 "$@"; fi; }
 op_py() { local snippet="$1"; shift; as_op /usr/bin/python3 -c "$snippet" "$@"; }
 # op_py_env <snippet> [VAR=VAL...] -- [args...]
 op_py_env() {
@@ -93,16 +94,85 @@ stage_preflight() {
   say "PREFLIGHT_OK evidence=absent stack=0b04e179 state=$(operator_state_path)"
 }
 
-stage_baseline() {
-  require_root
-  if [ -e "$IAP/.git" ]; then say "BASELINE_EXISTS (verify only)"; else
-    git -C "$IAP" init -q -b main || die git_init "$IAP"
-    git -C "$IAP" add -- "$PLAN_FILE" || die git_add "$PLAN_FILE"
-    git -C "$IAP" -c user.name=operator -c user.email=operator@local commit -q -m "IAP baseline: plan only" || die git_commit
+# --- baseline identity: ALWAYS the operator (zhong), never root -------------------- #
+iap_real() { realpath -e "$IAP" 2>/dev/null || die iap_unresolved "$IAP"; }
+op_git() { local real; real="$(iap_real)"; if [ "$(id -u)" -eq 0 ]; then
+    runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"
+  else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"; fi; }
+op_git_id() {
+  local n="" e=""
+  if n="$(op_git config --get user.name 2>/dev/null)"; then :; else n=""; fi
+  if e="$(op_git config --get user.email 2>/dev/null)"; then :; else e=""; fi
+  n="${IAP_GIT_NAME:-$n}"; e="${IAP_GIT_EMAIL:-$e}"
+  if [ -z "$n" ] || [ -z "$e" ]; then
+    die git_identity_unset "no operator git identity: configure user.name/user.email for zhong or pass IAP_GIT_NAME/IAP_GIT_EMAIL (never impersonate)"
   fi
-  local files; files="$(git -C "$IAP" ls-files | sort | paste -sd, -)"
-  [ "$files" = "$PLAN_FILE" ] || die baseline_scope "tracked=$files"
-  say "BASELINE_OK commit=$(git -C "$IAP" rev-parse HEAD) tracked=1"
+  printf '%s\n%s\n' "$n" "$e"
+}
+
+baseline_state() { # ABSENT | ZHONG_EMPTY_INIT | ROOT_EMPTY_INIT | HAS_COMMIT | UNKNOWN
+  local gitd="$IAP/.git" owner objects idx=0 refs logs=0
+  if [ ! -e "$gitd" ]; then printf 'ABSENT'; return 0; fi
+  if [ ! -d "$gitd" ] || [ -L "$gitd" ]; then printf 'UNKNOWN'; return 0; fi
+  owner="$(stat -c '%U' "$gitd")"
+  objects="$(find "$gitd/objects" -type f 2>/dev/null | wc -l)"
+  if [ -e "$gitd/index" ]; then idx=1; fi
+  if [ -e "$gitd/logs" ]; then logs=1; fi
+  refs="$(ls -A "$gitd/refs/heads" 2>/dev/null | wc -l)"
+  if op_git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then printf 'HAS_COMMIT'; return 0; fi
+  if [ "$objects" -eq 0 ] && [ "$idx" -eq 0 ] && [ "$refs" -eq 0 ] && [ "$logs" -eq 0 ]; then
+    case "$owner" in
+      "$OPERATOR") printf 'ZHONG_EMPTY_INIT' ;;
+      root) printf 'ROOT_EMPTY_INIT' ;;
+      *) printf 'UNKNOWN' ;;
+    esac
+    return 0
+  fi
+  printf 'UNKNOWN'
+}
+
+stage_baseline() {
+  local st; st="$(baseline_state)"
+  say "BASELINE_STATE=$st"
+  case "$st" in
+    ROOT_EMPTY_INIT) die git_meta_root_owned "run --stage repair-git-owner (scoped to .git) before baseline" ;;
+    UNKNOWN) die baseline_unknown "unexpected .git state; refusing init/add/commit" ;;
+    HAS_COMMIT)
+      local files dirty
+      files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+      dirty="$(op_git status --porcelain)"
+      [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
+      [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
+      say "BASELINE_EXISTS_OK commit=$(op_git rev-parse HEAD) tracked=1"
+      return 0 ;;
+    ABSENT|ZHONG_EMPTY_INIT)
+      local id n e
+      id="$(op_git_id)"; n="$(sed -n '1p' <<< "$id")"; e="$(sed -n '2p' <<< "$id")"
+      if [ "$st" = ABSENT ]; then op_git init -q -b main || die git_init "$IAP"; fi
+      op_git -c user.name="$n" -c user.email="$e" add -- "$PLAN_FILE" || die git_add "$PLAN_FILE"
+      op_git -c user.name="$n" -c user.email="$e" commit -q -m "IAP baseline: plan only" || die git_commit
+      local files; files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+      [ "$files" = "$PLAN_FILE" ] || die baseline_scope "tracked=$files"
+      say "BASELINE_OK author=$n commit=$(op_git rev-parse HEAD) tracked=1" ;;
+  esac
+}
+
+stage_repair_git_owner() { # root: scoped repair of THIS run's root-created empty init
+  require_root
+  local gitd="$IAP/.git" objects refs extra
+  [ -d "$gitd" ] || die repair_absent "$gitd"
+  [ ! -L "$gitd" ] || die repair_symlink "$gitd"
+  [ "$(stat -c '%U' "$gitd")" = root ] || die repair_not_root_owned "$(stat -c '%U' "$gitd")"
+  objects="$(find "$gitd/objects" -type f 2>/dev/null | wc -l)"
+  refs="$(ls -A "$gitd/refs/heads" 2>/dev/null | wc -l)"
+  [ "$objects" -eq 0 ] || die repair_objects "objects=$objects (not an empty init)"
+  [ "$refs" -eq 0 ] || die repair_refs "refs/heads non-empty"
+  [ ! -e "$gitd/index" ] || die repair_index "index exists"
+  [ ! -e "$gitd/logs" ] || die repair_logs "logs exist"
+  extra="$(find "$IAP" -mindepth 1 -maxdepth 1 ! -name .git ! -name "$PLAN_FILE" -print -quit)"
+  [ -z "$extra" ] || die repair_tree "unexpected member: $extra"
+  chown -R "$OPERATOR:$OPERATOR" "$gitd" || die repair_chown
+  say "REPAIR_OK scope=$gitd owner=$OPERATOR (no delete/reset/clean; business tree untouched)"
 }
 
 stage_worktree() {
@@ -121,6 +191,7 @@ stage_worktree() {
 
 stage_permissions() {
   require_root
+  done_marker baseline || die prerequisite_not_done baseline
   local gitdir commondir
   gitdir="$(git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse --absolute-git-dir)" || die gitdir_resolve
   commondir="$(git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse --git-common-dir)" || die commondir_resolve
@@ -162,6 +233,7 @@ stage_probe() {
 
 stage_contract() {
   require_root
+  done_marker baseline || die prerequisite_not_done baseline
   install -d -o root -g root -m 0755 /var/lib/aegl-model/trusted/ImageAnalysisFactory/reports/contracts || die contract_dir
   if [ ! -e "$PKG_DEST" ]; then
     cp -a "$CONTRACT_SRC" "$PKG_DEST" || die contract_copy
@@ -176,6 +248,7 @@ stage_contract() {
 
 stage_binding() {
   require_root
+  done_marker baseline || die prerequisite_not_done baseline
   local base; base="$(git -C "$IAP" rev-parse HEAD)"
   printf '{"worktree":"%s","commit":"%s"}\n' "$WORKTREE" "$base" > "$TASK_ROOT/PREP-BINDING.json" || die binding_write
   chown root:root "$TASK_ROOT/PREP-BINDING.json" || die binding_chown
@@ -185,6 +258,7 @@ stage_binding() {
 
 stage_register() {
   require_root
+  done_marker baseline || die prerequisite_not_done baseline
   local reg=/usr/local/lib/aegl-model-task/bin/aegl-model-task
   [ -x "$reg" ] || die registrar_missing "$reg"
   if "$reg" show --task-id "$TASK_ID" >/dev/null 2>&1; then say "REGISTER_EXISTS (verify only)"; else
@@ -320,4 +394,6 @@ main() {
   done
   if [ "$mode" = prep ]; then say "PREP_COMPLETE (no model called, nothing sent)"; fi
 }
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
