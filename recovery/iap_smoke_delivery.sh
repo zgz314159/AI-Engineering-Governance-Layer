@@ -21,14 +21,15 @@ CONTRACT_SRC="$PKG/contract/IAP-SMOKE-001"
 IAP="${IAP:-/home/zhong/AndroidStudioProjects/ImageAnalysisFactory}"
 STACK="${STACK:-/home/zhong/Projects/Google-Android-Agent-Development-Stack}"
 TASK_ID="IAP-SMOKE-001"
-TASK_ROOT="/var/tmp/IAP-SMOKE-001"
-WORKTREE="$TASK_ROOT/project"
-SCRATCH="$TASK_ROOT/scratch"
+TASK_ROOT="${TASK_ROOT:-/var/tmp/IAP-SMOKE-001}"
+WORKTREE="${WORKTREE:-$TASK_ROOT/project}"
+SCRATCH="${SCRATCH:-$TASK_ROOT/scratch}"
 PKG_DEST="/var/lib/aegl-model/trusted/ImageAnalysisFactory/reports/contracts/IAP-SMOKE-001"
 BRIDGE_DIR="/home/zhong/.local/state/google-android-agent-stack/bridge"
 STACK_BRIDGE="$STACK/orchestration/hermes/bridge"
 PLAN_FILE="Command_Code_DeepSeek_大规模图片智能分析工厂_建设方案_v1.0.md"
 EXPECT_MANIFEST_SHA="bfa09df94e7736ab79aa9e6f356b0fd335a0b64aa0a3c11eb0477b66e2471186"
+EXPECT_BASE="${EXPECT_BASE:-177680708739a72a0d70bc6a9664245b00a2ef08}"
 OPERATOR="zhong"; OPERATOR_HOME="/home/zhong"; OP_PATH="/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin"
 CDP_URL="http://127.0.0.1:9333"
 LEDGER="${LEDGER:-/var/lib/aegl-smoke/$TASK_ID}"
@@ -100,7 +101,9 @@ stage_preflight() {
       dirty="$(op_git status --porcelain)"
       [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
       [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
-      say "PREFLIGHT_BASELINE=approved commit=$(op_git rev-parse HEAD)" ;;
+      head="$(op_git rev-parse HEAD)"
+      [ "$head" = "$EXPECT_BASE" ] || die baseline_head "$head != $EXPECT_BASE"
+      say "PREFLIGHT_BASELINE=approved commit=$head" ;;
     *)
       die baseline_unknown "unrecognised .git state; refusing to proceed" ;;
   esac
@@ -115,6 +118,17 @@ iap_real() { realpath -e "$IAP" 2>/dev/null || die iap_unresolved "$IAP"; }
 op_git() { local real; real="$(iap_real)"; if [ "$(id -u)" -eq 0 ]; then
     runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"
   else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"; fi; }
+# controller (root) git: exact command-scoped trust, errors propagate, no global config
+ctl_git() { local path="$1"; shift; local real; real="$(realpath -e "$path" 2>/dev/null)" || die git_path_unresolved "$path"
+  if [ "$(id -u)" -eq 0 ]; then
+    git -c "safe.directory=$real" -C "$path" "$@"
+  else
+    git -c "safe.directory=$real" -C "$path" "$@"
+  fi
+}
+ctl_git_argv() { local path="$1"; shift; printf 'git -c safe.directory=%s -C %s %s' "$(realpath -e "$path")" "$path" "$*"; }
+wt_registered() { ctl_git "$IAP" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | grep -Fxq -- "$WORKTREE"; }
+
 op_git_id() { # explicit identity for this run only; never writes global config
   printf '%s\n%s\n' "${IAP_GIT_NAME:-zgz314159}" "${IAP_GIT_EMAIL:-zgz314159@gmail.com}"
 }
@@ -186,14 +200,21 @@ stage_repair_git_owner() { # root: scoped repair of THIS run's root-created empt
 
 stage_worktree() {
   require_root
-  local base; base="$(git -C "$IAP" rev-parse HEAD)"
-  install -d -o root -g root -m 0750 "$TASK_ROOT" || die task_root "$TASK_ROOT"
-  if [ ! -e "$WORKTREE" ]; then
-    git -C "$IAP" worktree add --detach "$WORKTREE" "$base" || die worktree_add "$WORKTREE"
+  local base; base="$(ctl_git "$IAP" rev-parse HEAD)" || die base_query
+  install -d -m 0750 "$TASK_ROOT" || die task_root "$TASK_ROOT"
+  if [ "$(id -u)" -eq 0 ]; then chown root:root "$TASK_ROOT" || die task_root_chown; fi
+  if [ -e "$WORKTREE" ]; then
+    wt_registered || die worktree_unknown "$WORKTREE exists but is not a registered worktree (preserved)"
+    [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$base" ] || die worktree_head_mismatch
+    [ -z "$(ctl_git "$WORKTREE" status --porcelain)" ] || die worktree_dirty "$WORKTREE (preserved)"
+    say "WORKTREE_EXISTS_OK (verified, reusing)"
+  else
+    if wt_registered; then die worktree_registered_missing "$WORKTREE is registered but absent (preserved; no prune)"; fi
+    ctl_git "$IAP" worktree add --detach "$WORKTREE" "$base" || die worktree_add "$WORKTREE"
   fi
-  chown -R aegl-ai:aegl-ai "$WORKTREE" || die worktree_chown
+  if [ "$(id -u)" -eq 0 ]; then chown -R aegl-ai:aegl-ai "$WORKTREE" || die worktree_chown; fi
   chmod -R u=rwX,go=rX "$WORKTREE" || die worktree_chmod
-  local got; got="$(git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>/dev/null)"
+  local got; got="$(ctl_git "$WORKTREE" rev-parse HEAD)"
   [ "$got" = "$base" ] || die worktree_head "$got != $base"
   say "WORKTREE_OK $WORKTREE detached=$base"
 }
@@ -202,8 +223,8 @@ stage_permissions() {
   require_root
   done_marker baseline || die prerequisite_not_done baseline
   local gitdir commondir
-  gitdir="$(git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse --absolute-git-dir)" || die gitdir_resolve
-  commondir="$(git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse --git-common-dir)" || die commondir_resolve
+  gitdir="$(ctl_git "$WORKTREE" rev-parse --absolute-git-dir)" || die gitdir_resolve
+  commondir="$(ctl_git "$WORKTREE" rev-parse --git-common-dir)" || die commondir_resolve
   case "$commondir" in /*) : ;; *) commondir="$WORKTREE/$commondir" ;; esac
   commondir="$(realpath -e "$commondir")" || die commondir_realpath
   say "GITDIR=$gitdir COMMONDIR=$commondir"
@@ -223,15 +244,15 @@ stage_probe() {
   require_root
   local gitdir commondir base st head
   gitdir="$(sed -n '1p' "$LEDGER/paths")"; commondir="$(sed -n '2p' "$LEDGER/paths")"
-  base="$(git -C "$IAP" rev-parse HEAD)"
+  base="$(ctl_git "$IAP" rev-parse HEAD)"
   runuser -u aegl-ai -- test -x "$TASK_ROOT" || die probe_traverse "$TASK_ROOT"
   runuser -u aegl-ai -- test -x "$commondir" || die probe_commondir "$commondir"
   runuser -u aegl-ai -- test -r "$WORKTREE/$PLAN_FILE" || die probe_read
   runuser -u aegl-ai -- test -w "$WORKTREE" || die probe_write
   runuser -u aegl-ai -- test -w "$SCRATCH" || die probe_scratch
-  head="$(runuser -u aegl-ai -- git -C "$WORKTREE" rev-parse HEAD 2>&1)" || die probe_git "$head"
+  head="$(runuser -u aegl-ai -- git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>&1)" || die probe_git "$head"
   [ "$head" = "$base" ] || die probe_git_head "$head != $base"
-  st="$(runuser -u aegl-ai -- git -C "$WORKTREE" status --porcelain 2>&1)" || die probe_status "$st"
+  st="$(runuser -u aegl-ai -- git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>&1)" || die probe_status "$st"
   [ -z "$st" ] || die probe_dirty "$st"
   runuser -u aegl-ai -- test ! -w "$commondir/refs" || die probe_refs "$commondir/refs writable"
   runuser -u aegl-ai -- test ! -w "$commondir/config" || die probe_config "config writable"
@@ -258,7 +279,7 @@ stage_contract() {
 stage_binding() {
   require_root
   done_marker baseline || die prerequisite_not_done baseline
-  local base; base="$(git -C "$IAP" rev-parse HEAD)"
+  local base; base="$(ctl_git "$IAP" rev-parse HEAD)"
   printf '{"worktree":"%s","commit":"%s"}\n' "$WORKTREE" "$base" > "$TASK_ROOT/PREP-BINDING.json" || die binding_write
   chown root:root "$TASK_ROOT/PREP-BINDING.json" || die binding_chown
   chmod 0644 "$TASK_ROOT/PREP-BINDING.json" || die binding_chmod
