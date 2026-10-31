@@ -338,8 +338,11 @@ stage_permissions() {
   setfacl -m u:aegl-ai:x "$TASK_ROOT" || die acl_task_root
   # The Bridge contract check runs real git as the gate operator ($OPERATOR), so the
   # task root must be traversable by BOTH identities — the execution identity ($AI_USER)
-  # and the gate operator. Traverse only; never read or write.
-  setfacl -m u:"$OPERATOR":x "$TASK_ROOT" || die acl_task_root_operator
+  # and the gate operator. Traverse only; never read or write. The operator entry uses
+  # `-n` so the existing ACL mask (already carrying x from the entry above) is preserved
+  # and no other subject's effective rights change — the same semantics as the operator's
+  # manual one-liner.
+  setfacl -n -m u:"$OPERATOR":x "$TASK_ROOT" || die acl_task_root_operator
   setfacl -m u:aegl-ai:x "$commondir" || die acl_commondir
   setfacl -R -m u:aegl-ai:rX "$commondir/objects" "$commondir/refs" || die acl_objects_refs
   if [ -e "$gitdir/HEAD" ]; then setfacl -m u:aegl-ai:r "$gitdir/HEAD" || die acl_gitdir_head; fi
