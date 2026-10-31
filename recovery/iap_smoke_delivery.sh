@@ -78,6 +78,28 @@ sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.a
 ' "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
   return 0
 }
+# A target's own ACL being correct is not enough: the sandbox identity must be able to
+# walk the whole chain to it. A linked worktree's common dir can sit under a 0750 $HOME
+# that carries no sandbox entry, so every ancestor must be traversable too. This grants
+# x ONLY (never read or write, never "/"), ONLY where traversal is currently missing,
+# top-down, and re-verifies each grant with the same dropped identity as the probe.
+ensure_traverse() { # <required-path>
+  local target="$1" p cur part
+  p="$(realpath -e "$target")" || die traverse_target "$target"
+  cur=""
+  local IFS=/
+  set -f
+  for part in $p; do
+    [ -n "$part" ] || continue
+    cur="$cur/$part"
+    [ "$cur" = "/" ] && continue
+    ai_access x "$cur" && continue
+    setfacl -m u:aegl-ai:x "$cur" || die traverse_grant "$cur"
+    ai_access x "$cur" || die traverse_verify "$cur"
+    say "TRAVERSE_GRANTED=$cur (u:aegl-ai:x)"
+  done
+  set +f
+}
 
 operator_state_path() {
   op_py 'import sys;sys.path.insert(0,sys.argv[1]);import bridge_state;print(bridge_state.state_dir())' "$STACK_BRIDGE"
@@ -269,8 +291,13 @@ stage_permissions() {
   case "$tf" in *x*) : ;; *) die acl_task_root_effective "aegl-ai effective='${tf:-none}' on $TASK_ROOT (need x)";; esac
   cf="$(getfacl -e -p "$commondir" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
   case "$cf" in *x*) : ;; *) die acl_commondir_effective "aegl-ai effective='${cf:-none}' on $commondir (need x)";; esac
+  # The checks above prove only the TARGET's ACL is effective — nothing about the chain.
+  # Make the sandbox identity able to walk every ancestor of the common dir and of the
+  # worktree admin dir (x-only), so no ancestor silently blocks an otherwise-correct target.
+  ensure_traverse "$commondir"
+  ensure_traverse "$gitdir"
   printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
-  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) traverse-verified=$TASK_ROOT,$commondir"
+  say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) target-acl-effective=$TASK_ROOT,$commondir (ancestor traverse ensured; reachability proven only by probe)"
 }
 
 stage_probe() {
