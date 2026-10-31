@@ -78,27 +78,69 @@ sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.a
 ' "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
   return 0
 }
-# A target's own ACL being correct is not enough: the sandbox identity must be able to
-# walk the whole chain to it. A linked worktree's common dir can sit under a 0750 $HOME
-# that carries no sandbox entry, so every ancestor must be traversable too. This grants
-# x ONLY (never read or write, never "/"), ONLY where traversal is currently missing,
-# top-down, and re-verifies each grant with the same dropped identity as the probe.
-ensure_traverse() { # <required-path>
-  local target="$1" p cur part
-  p="$(realpath -e "$target")" || die traverse_target "$target"
+# The ONLY production permission change this driver may make: grant the sandbox
+# identity traverse (x only) on the single directory the linked-worktree common dir
+# sits under. It is NOT a generic "grant anything unreachable" fix — any other blocked
+# ancestor is reported as a precise breakpoint and the run stops.
+TRAVERSE_APPROVED="/home/zhong"
+
+# Read-only: first ancestor directory (root downward) the sandbox identity cannot
+# traverse, or nothing when the whole chain is walkable.
+chain_blocker() { # <path> -> prints the first blocking dir, or nothing
+  local target="$1" p cur part; local -a parts=()
+  p="$(realpath -e "$target" 2>/dev/null)" || { printf '%s' "$target"; return; }
+  IFS=/ read -r -a parts <<< "${p#/}"
   cur=""
-  local IFS=/
-  set -f
-  for part in $p; do
+  for part in "${parts[@]}"; do
     [ -n "$part" ] || continue
     cur="$cur/$part"
-    [ "$cur" = "/" ] && continue
-    ai_access x "$cur" && continue
-    setfacl -m u:aegl-ai:x "$cur" || die traverse_grant "$cur"
-    ai_access x "$cur" || die traverse_verify "$cur"
-    say "TRAVERSE_GRANTED=$cur (u:aegl-ai:x)"
+    ai_access x "$cur" || { printf '%s' "$cur"; return; }
   done
-  set +f
+}
+
+# Apply the one approved change to $TRAVERSE_APPROVED, preserving the existing mask and
+# every other entry. Refuses on any surprise (missing/odd mask, conflicting entry,
+# non-directory or symlink) instead of expanding access, and proves afterwards that the
+# ONLY difference is the added aegl-ai x entry.
+grant_approved_traverse() {
+  local d="$TRAVERSE_APPROVED" mask cur before after b2 a2 n
+  [ -d "$d" ] && [ ! -L "$d" ] || die traverse_target_bad "$d"
+  mask="$(getfacl -p "$d" 2>/dev/null | awk -F: '/^mask::/{print $3}')"
+  [ -n "$mask" ] || die traverse_mask_missing "$d (no ACL mask; refusing to add one)"
+  case "$mask" in *x*) : ;; *) die traverse_mask_no_x "$d mask=${mask:-none}" ;; esac
+  cur="$(getfacl -p "$d" 2>/dev/null | awk -F: '/^user:aegl-ai:/{print $3}')"
+  case "$cur" in ""|--x) : ;; *) die traverse_conflict "$d aegl-ai=${cur:-none}" ;; esac
+  [ -z "$cur" ] || { say "TRAVERSE_ALREADY=$d (u:aegl-ai:--x)"; return 0; }
+  before="$(getfacl -p "$d")"
+  setfacl -n -m u:aegl-ai:x "$d" || die traverse_grant "$d"
+  ai_access x "$d" || die traverse_verify "$d"
+  after="$(getfacl -p "$d")"
+  b2="$(printf '%s\n' "$before" | grep -vE '^user:aegl-ai:')"
+  a2="$(printf '%s\n' "$after"  | grep -vE '^user:aegl-ai:')"
+  [ "$b2" = "$a2" ] || die traverse_side_effect "$d (mask or another entry changed)"
+  n="$(printf '%s\n' "$after" | grep -cE '^user:aegl-ai:--x$' || true)"
+  [ "$n" = 1 ] || die traverse_side_effect "$d (aegl-ai entry is not exactly --x)"
+  say "TRAVERSE_GRANTED=$d (u:aegl-ai:--x, mask preserved)"
+}
+
+# Read-only walk of a required target's full ancestor chain. The ONLY directory that may
+# be changed is $TRAVERSE_APPROVED, and only once; any other blocker stops the run.
+ensure_required_traverse() { # <required-path>
+  local target="$1" p cur part; local -a parts=()
+  p="$(realpath -e "$target")" || die traverse_target "$target"
+  IFS=/ read -r -a parts <<< "${p#/}"
+  cur=""
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] || continue
+    cur="$cur/$part"
+    ai_access x "$cur" && continue
+    if [ "$cur" = "$TRAVERSE_APPROVED" ]; then
+      grant_approved_traverse
+      ai_access x "$cur" || die traverse_verify "$cur"
+      continue
+    fi
+    die traverse_blocked "$cur (unapproved ancestor blocks; target=$target)"
+  done
 }
 
 operator_state_path() {
@@ -292,10 +334,10 @@ stage_permissions() {
   cf="$(getfacl -e -p "$commondir" 2>/dev/null | awk -F'#effective:' '/^user:aegl-ai:/{print $2}' | tr -d '[:space:]')"
   case "$cf" in *x*) : ;; *) die acl_commondir_effective "aegl-ai effective='${cf:-none}' on $commondir (need x)";; esac
   # The checks above prove only the TARGET's ACL is effective — nothing about the chain.
-  # Make the sandbox identity able to walk every ancestor of the common dir and of the
-  # worktree admin dir (x-only), so no ancestor silently blocks an otherwise-correct target.
-  ensure_traverse "$commondir"
-  ensure_traverse "$gitdir"
+  # Walk the full ancestor chain read-only; the only directory we may change is
+  # $TRAVERSE_APPROVED (once, x-only). Any other blocker is reported and stops the run.
+  ensure_required_traverse "$commondir"
+  ensure_required_traverse "$gitdir"
   printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
   say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) target-acl-effective=$TASK_ROOT,$commondir (ancestor traverse ensured; reachability proven only by probe)"
 }
@@ -305,6 +347,12 @@ stage_probe() {
   local gitdir commondir base st head
   gitdir="$(sed -n '1p' "$LEDGER/paths")"; commondir="$(sed -n '2p' "$LEDGER/paths")"
   base="$(ctl_git "$IAP" rev-parse HEAD)"
+  # Re-check the FULL ancestor chain of every required target with the same dropped
+  # identity (read-only), so a breakpoint names the exact blocking directory.
+  local q blk
+  for q in "$TASK_ROOT" "$commondir" "$gitdir" "$WORKTREE" "$SCRATCH"; do
+    blk="$(chain_blocker "$q")"; [ -z "$blk" ] || die probe_chain "$q blocked_at=$blk"
+  done
   ai_access x "$TASK_ROOT" || die probe_traverse "$TASK_ROOT ${AI_ACCESS_ERR:-}"
   ai_access x "$commondir" || die probe_commondir "$commondir ${AI_ACCESS_ERR:-}"
   ai_access r "$WORKTREE/$PLAN_FILE" || die probe_read "$WORKTREE/$PLAN_FILE ${AI_ACCESS_ERR:-}"

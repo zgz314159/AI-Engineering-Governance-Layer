@@ -49,43 +49,77 @@ check "B9.dir_exec_allowed"   "$(ok_x "$D"   && echo yes || echo no)" "yes"
 check "B10.file_exec_denied"  "$(ok_x "$D/f" && echo yes || echo no)" "no"
 check "B11.file_read_allowed" "$(ok_r "$D/f" && echo yes || echo no)" "yes"
 
-# --- 3b. ensure_traverse: target ACL fine but an ancestor blocks (offline unit) ----- #
-# Fake the identity and setfacl so the top-down walk can be driven without root:
-# everything is walkable except /home/zhong, which stays blocked until a grant lands.
-TRAV="$D/traverse.log"; : > "$TRAV"
-out="$(env DRV="$DRV" TRAV="$TRAV" bash -c '
+# --- 3b. narrowed ancestor change: only $TRAVERSE_APPROVED, mask preserved ---------- #
+# U1: an UNapproved blocker is refused AND that directory is left untouched.
+mkdir -p "$D/U1/x/y"
+TRV="$D/trv1.log"; : > "$TRV"
+u1="$(env DRV="$DRV" TRV="$TRV" BLK="$D/U1" bash -c '
   set -uo pipefail
-  source "$DRV"
-  FAIL_MARK=/nonexistent; CURRENT_STAGE=unit
-  GRANTED=0
-  setfacl() { printf "%s %s\n" "$2" "$3" >> "$TRAV"; GRANTED=1; }
-  ai_access() { case "$2" in
-      /home/zhong) [ "$GRANTED" = 1 ] && return 0 || return 1 ;;
-      *) return 0 ;;
-    esac; }
-  ensure_traverse /home/zhong/AndroidStudioProjects/ImageAnalysisFactory/.git && echo DONE
-' 2>&1)"
-check "C1.traverse_ran"       "$(grep -c '^DONE$' <<< "$out")" "1"
-check "C2.grant_only_blocker" "$(grep -c 'u:aegl-ai:x /home/zhong$' "$TRAV")" "1"
-check "C3.no_read_or_write"   "$(grep -c 'u:aegl-ai:[rw]' "$TRAV")" "0"
-check "C4.no_grant_on_root"   "$(grep -c ' /$' "$TRAV")" "0"
-check "C5.no_grant_on_home"   "$(grep -c ' /home$' "$TRAV")" "0"
-check "C6.exactly_one_grant"  "$(grep -c . "$TRAV")" "1"
+  source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit
+  setfacl() { printf "%s %s\n" "$2" "$3" >> "$TRV"; }
+  ai_access() { case "$2" in "$BLK") return 1 ;; *) return 0 ;; esac; }
+  ensure_required_traverse "$BLK/x/y" && echo DONE
+' 2>&1; echo "rc=$?")"
+check "C1.unapproved_refused"   "$(grep -c 'traverse_blocked' <<< "$u1")" "1"
+check "C2.unapproved_nonzero"   "$(grep -c 'rc=[1-9]' <<< "$u1")" "1"
+check "C3.unapproved_untouched" "$(grep -c . "$TRV")" "0"
 
-# unit: a bad target path fails closed instead of silently succeeding
-bad="$( ( source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit; ensure_traverse /no/such/path ) 2>&1; echo "rc=$?" )"
-check "C7.bad_target_fails"   "$(grep -c 'rc=[1-9]' <<< "$bad")" "1"
-check "C8.bad_target_reason"  "$(grep -c 'traverse_target' <<< "$bad")" "1"
+# U2: applying the approved change preserves the mask and every other entry (REAL ACL,
+# file-owner privileges), and the only difference is the added aegl-ai x entry.
+mkdir -p "$D/U2"; chmod 0755 "$D/U2"; setfacl -m u:nobody:--x "$D/U2"
+u2b="$(getfacl -p "$D/U2")"
+env DRV="$DRV" T="$D/U2" bash -c '
+  set -uo pipefail
+  source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit
+  TRAVERSE_APPROVED="$T"; ai_access() { return 0; }
+  grant_approved_traverse' >/dev/null 2>&1
+u2a="$(getfacl -p "$D/U2")"
+check "C4.approved_added"    "$(grep -cE '^user:aegl-ai:--x$' <<< "$u2a")" "1"
+check "C5.mask_unchanged"    "$(grep -cE '^mask::r-x$' <<< "$u2a")" "1"
+check "C6.other_entry_kept"  "$(grep -cE '^user:nobody:--x$' <<< "$u2a")" "1"
+check "C7.only_aegl_change" \
+  "$(diff <(printf '%s\n' "$u2b" | grep -vE '^user:aegl-ai:') \
+          <(printf '%s\n' "$u2a" | grep -vE '^user:aegl-ai:') >/dev/null && echo same || echo differ)" "same"
 
-# --- 3c. static wiring: ancestor walk is used, and the label no longer overclaims --- #
-check "D1.ensure_on_commondir"       "$(grep -c 'ensure_traverse "\$commondir"' "$DRV")" "1"
-check "D2.ensure_on_gitdir"          "$(grep -c 'ensure_traverse "\$gitdir"' "$DRV")" "1"
-check "D3.label_not_overclaiming"    "$(grep -c 'traverse-verified' "$DRV")" "0"
-check "D4.probe_precedes_contract"   "$(grep -c 'PREP_STAGES=(preflight baseline worktree permissions probe contract binding register ready)' "$DRV")" "1"
-check "D5.perms_same_identity"       "$(grep -c 'ai_access x "\$cur"' "$DRV")" "2"
+# U3: a mask that does not already allow x is refused, and nothing changes.
+mkdir -p "$D/U3"; chmod 0640 "$D/U3"; setfacl -m u:nobody:r-- "$D/U3"
+u3b="$(getfacl -p "$D/U3")"
+u3="$(env DRV="$DRV" T="$D/U3" bash -c '
+  set -uo pipefail
+  source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit
+  TRAVERSE_APPROVED="$T"; ai_access() { return 0; }
+  grant_approved_traverse' 2>&1; echo "rc=$?")"
+check "C8.mask_no_x_refused"   "$(grep -c 'traverse_mask_no_x' <<< "$u3")" "1"
+check "C9.mask_no_x_unchanged" "$([ "$u3b" = "$(getfacl -p "$D/U3")" ] && echo same || echo differ)" "same"
+
+# U4: a conflicting existing aegl-ai entry is refused, and nothing changes.
+mkdir -p "$D/U4"; chmod 0755 "$D/U4"; setfacl -m u:aegl-ai:rwx "$D/U4"
+u4b="$(getfacl -p "$D/U4")"
+u4="$(env DRV="$DRV" T="$D/U4" bash -c '
+  set -uo pipefail
+  source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit
+  TRAVERSE_APPROVED="$T"; ai_access() { return 0; }
+  grant_approved_traverse' 2>&1; echo "rc=$?")"
+check "C10.conflict_refused"   "$(grep -c 'traverse_conflict' <<< "$u4")" "1"
+check "C11.conflict_unchanged" "$([ "$u4b" = "$(getfacl -p "$D/U4")" ] && echo same || echo differ)" "same"
+
+# U5: a bad target path fails closed instead of silently succeeding.
+bad="$( ( source "$DRV"; FAIL_MARK=/nonexistent; CURRENT_STAGE=unit; ensure_required_traverse /no/such/path ) 2>&1; echo "rc=$?" )"
+check "C12.bad_target_fails"   "$(grep -c 'rc=[1-9]' <<< "$bad")" "1"
+check "C13.bad_target_reason"  "$(grep -c 'traverse_target' <<< "$bad")" "1"
+
+# --- 3c. static wiring: narrowed, single approved change, honest label -------------- #
+check "D1.approved_dir_exact"      "$(grep -c 'TRAVERSE_APPROVED="/home/zhong"' "$DRV")" "1"
+check "D2.chain_check_commondir"   "$(grep -c 'ensure_required_traverse "\$commondir"' "$DRV")" "1"
+check "D3.chain_check_gitdir"      "$(grep -c 'ensure_required_traverse "\$gitdir"' "$DRV")" "1"
+check "D4.mask_preserving_grant"   "$(grep -c 'setfacl -n -m u:aegl-ai:x' "$DRV")" "1"
+check "D5.no_generic_autogrant"    "$(grep -c 'ensure_traverse()' "$DRV")" "0"
+check "D6.probe_full_chain"        "$(grep -c 'chain_blocker' "$DRV")" "2"
+check "D7.probe_precedes_contract" "$(grep -c 'PREP_STAGES=(preflight baseline worktree permissions probe contract binding register ready)' "$DRV")" "1"
+check "D8.label_not_overclaiming"  "$(grep -c 'traverse-verified' "$DRV")" "0"
 
 # --- 4. checks needing a real dropped identity / root stay NOT_RUN ------------------ #
 log "NOT_RUN B12.cross-uid-acl (aegl-ai on a root-owned task root via named-user ACL)"
-log "NOT_RUN C9.ancestor-block-live (real aegl-ai blocked by a 0750 ancestor; root-only)"
-log "NOT_RUN D6.contract-register-not-run (requires the full root prep)"
+log "NOT_RUN C14.approved-grant-live (real /home/zhong change + real dropped identity; root-only)"
+log "NOT_RUN D9.contract-register-not-run (requires the full root prep)"
 log "SUMMARY rc=$RC"; exit "$RC"
