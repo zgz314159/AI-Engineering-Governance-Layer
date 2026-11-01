@@ -39,6 +39,13 @@ HELPER="$PKG/bin/iap_round_verdict.py"
 CURRENT_STAGE=""; FAIL_REPORTED=0
 
 say() { printf '%s\n' "$*"; }
+# Emit ONLY the structured CAMPAIGN_ROUND_DIAG lines already captured (never the raw
+# stdout/stderr of the campaign).
+emit_round_diag() { # <round.out>
+  local f="${1:-}"
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  grep -E '^CAMPAIGN_ROUND_DIAG ' -- "$f" || :
+}
 die() { FAIL_REPORTED=1; if [ -n "${FAIL_MARK:-}" ] && [ ! -e "$FAIL_MARK" ]; then : > "$FAIL_MARK" 2>/dev/null; fi; printf 'SMOKE_FAILED stage=%s reason=%s: %s\n' "${CURRENT_STAGE:-none}" "$1" "${2:-}" >&2; exit 1; }
 require_root() { if [ "${SMOKE_ALLOW_NONROOT:-0}" != 1 ] && [ "$(id -u)" -ne 0 ]; then die not_root "${CURRENT_STAGE}"; fi; }
 
@@ -530,6 +537,8 @@ stage_round() {
       --campaign-id "$CAMPAIGN_ID" --milestone S0 --start-sequence "$seq" --start-nonce "$nonce" \
       --start-in-reply-to "$reply" --max-rounds 1 --max-wall-seconds 900 --poll-seconds 5 ) 2>&1 )" || rc=$?
   printf '%s\n' "$out" > "$LEDGER/round.out"
+  # Surface the structured diagnostic BEFORE judging any failure.
+  emit_round_diag "$LEDGER/round.out"
   say "ROUND_CAMPAIGN_RC=$rc"
   # rc=3 is shared by LIMIT_REACHED and SAFETY_STOP — never treat it as pass or fail alone.
   verdict="$(/usr/bin/python3 "$HELPER" --mode round --rc "$rc" --campaign-id "$CAMPAIGN_ID" \
@@ -546,7 +555,6 @@ stage_accept() {
   require_root
   [ -s "$LEDGER/round.out" ] || die accept_missing "no round record: $LEDGER/round.out"
   [ -f "$HELPER" ] || die helper "accept verdict helper missing: $HELPER"
-  [ -s "$WORKTREE/EVIDENCE.txt" ] || die evidence_missing
   local want seq diag_task verdict
   want="$(cat "$LEDGER/chain.at_ready")"
   seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"

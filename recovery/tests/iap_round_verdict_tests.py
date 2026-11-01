@@ -19,6 +19,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HELPER = HERE.parent / "iap_round_verdict.py"
+DRIVER = HERE.parent / "iap_smoke_delivery_002.sh"
 TASK_ID = "IAP-SMOKE-002"
 SEQ = 7
 RESULT_SHA = "7" * 64
@@ -49,11 +50,11 @@ class Base(unittest.TestCase):
             "expected_sequence": sequence, "expected_nonce": "n", "expected_in_reply_to": "r",
             "status": status, "last_task_id": TASK_ID, "last_result_sha256": last_sha}))
 
-    def write_journal(self, *, outcome="SUCCESS", with_result=True):
+    def write_journal(self, *, outcome="SUCCESS", with_result=True, exit_code=0):
         lines = []
         if with_result:
             lines.append({"event": "RESULT", "task_id": TASK_ID, "sequence": SEQ,
-                          "outcome": outcome, "exit_code": 0, "result_sha256": RESULT_SHA})
+                          "outcome": outcome, "exit_code": exit_code, "result_sha256": RESULT_SHA})
         (self.bridge / "journal.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
 
     def write_campaign(self, *, outcome="LIMIT_REACHED"):
@@ -161,6 +162,40 @@ class AcceptVerdict(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("ACCEPT_CLEANUP=FAIL", r.stdout)
         self.assertIn("ACCEPT_SEND=FAIL", r.stdout)
+
+    def test_blocked_124_missing_evidence_shows_diag_and_four_verdicts(self):
+        # One round completes, but the task result is BLOCKED/124 and EVIDENCE.txt is absent.
+        self.write_campaign(outcome="LIMIT_REACHED")
+        self.write_journal(outcome="BLOCKED", exit_code=124)
+        self.worktree = self.root / "project"
+        self.worktree.mkdir()                      # EVIDENCE.txt deliberately absent
+        self.binding = self.root / "PREP-BINDING.json"
+        self.binding.write_text(json.dumps({"worktree": str(self.worktree), "commit": COMMIT}))
+        line = ("CAMPAIGN_ROUND_DIAG task_id=%s stage=EXECUTED exit_code=124 timed_out=True "
+                "timeout_phases=KILL,TERM cleanup=CONFIRMED send_status=CONFIRMED_SENT "
+                "result_sha256=%s" % (TASK_ID, RESULT_SHA))
+        self.round_out = self.root / "round.out"
+        self.round_out.write_text(line + "\n")
+
+        # (1) the round still counts as COMPLETED, so acceptance continues
+        r = self.round_verdict(rc=3)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("VERDICT=COMPLETED", r.stdout)
+        self.assertIn("task_outcome=BLOCKED", r.stdout)
+        self.assertIn("task_exit_code=124", r.stdout)
+
+        # (2) the driver's own emitter surfaces exactly that structured line (not raw output)
+        e = subprocess.run(["/bin/bash", "-c", 'source "$1"; emit_round_diag "$2"', "_",
+                            str(DRIVER), str(self.round_out)], capture_output=True, text=True)
+        self.assertEqual(e.returncode, 0, e.stderr)
+        self.assertEqual(e.stdout.strip(), line)
+
+        # (3) acceptance prints all four verdicts and fails — no early exit on missing evidence
+        a = self.accept_verdict()
+        self.assertNotEqual(a.returncode, 0)
+        for key in ("ACCEPT_TASK_RESULT=FAIL", "ACCEPT_EVIDENCE=FAIL",
+                    "ACCEPT_CLEANUP=PASS", "ACCEPT_SEND=PASS", "ACCEPT_RESULT=FAIL"):
+            self.assertIn(key, a.stdout)
 
 
 if __name__ == "__main__":
