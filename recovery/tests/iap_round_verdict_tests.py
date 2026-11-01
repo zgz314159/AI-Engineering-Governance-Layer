@@ -115,7 +115,7 @@ class RoundVerdict(Base):
         self.write_journal(with_result=False)
         r = self.round_verdict(rc=3)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("task_result=MISSING", r.stdout)
+        self.assertIn("task_result=NOT_OBSERVED", r.stdout)
 
     def test_pending_or_unadvanced_chain_stops(self):
         self.write_campaign(outcome="LIMIT_REACHED")

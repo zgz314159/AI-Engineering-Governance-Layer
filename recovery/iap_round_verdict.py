@@ -86,27 +86,27 @@ def mode_round(args):
     if args.rc not in (0, 3):
         reasons.append("unexpected_rc=%s" % args.rc)
     if campaign.get("terminal_outcome") != "LIMIT_REACHED":
-        reasons.append("campaign_outcome=%s" % (campaign.get("terminal_outcome") or "MISSING"))
+        reasons.append("campaign_outcome=%s" % (campaign.get("terminal_outcome") or "NOT_OBSERVED"))
     if result is None:
-        reasons.append("task_result=MISSING")
+        reasons.append("task_result=NOT_OBSERVED")
     if bridge.get("expected_sequence") != args.sequence + 1:
         reasons.append("chain_sequence=%s (want %s)" % (bridge.get("expected_sequence"), args.sequence + 1))
     if pending:
         reasons.append("pending_result=PRESENT")
     if bridge.get("status") != "WAITING_FOR_GPT":
-        reasons.append("bridge_status=%s" % (bridge.get("status") or "MISSING"))
+        reasons.append("bridge_status=%s" % (bridge.get("status") or "NOT_OBSERVED"))
     if result is not None and bridge.get("last_result_sha256") != result_sha:
         reasons.append("result_hash_mismatch")
 
     print("VERDICT=%s" % ("COMPLETED" if not reasons else "STOP"))
     print("campaign_rc=%s" % args.rc)
-    print("campaign_outcome=%s" % (campaign.get("terminal_outcome") or "MISSING"))
-    print("task_outcome=%s" % (result.get("outcome") if result else "MISSING"))
-    print("task_exit_code=%s" % (result.get("exit_code") if result else "MISSING"))
-    print("result_sha256=%s" % (result_sha or "MISSING"))
-    print("bridge_status=%s" % (bridge.get("status") or "MISSING"))
+    print("campaign_outcome=%s" % (campaign.get("terminal_outcome") or "NOT_OBSERVED"))
+    print("task_outcome=%s" % (result.get("outcome") if result else "NOT_OBSERVED"))
+    print("task_exit_code=%s" % (result.get("exit_code") if result else "NOT_OBSERVED"))
+    print("result_sha256=%s" % (result_sha or "NOT_OBSERVED"))
+    print("bridge_status=%s" % (bridge.get("status") or "NOT_OBSERVED"))
     print("expected_sequence=%s" % (bridge.get("expected_sequence")
-                                    if bridge.get("expected_sequence") is not None else "MISSING"))
+                                    if bridge.get("expected_sequence") is not None else "NOT_OBSERVED"))
     print("pending_result=%s" % ("PRESENT" if pending else "ABSENT"))
     if reasons:
         print("REASONS=%s" % "; ".join(reasons))
@@ -140,13 +140,13 @@ def mode_accept(args):
     ev_verdict, ev_detail = evidence_verdict(args.worktree, args.prep_binding)
 
     task_ok = result is not None and result.get("outcome") == "SUCCESS"
-    task_detail = (result.get("outcome") if result else "MISSING")
-    cleanup = diag.get("cleanup", "MISSING")
-    send = diag.get("send_status", "MISSING")
+    task_detail = (result.get("outcome") if result else "NOT_OBSERVED")
+    cleanup = diag.get("cleanup", "NOT_OBSERVED")
+    send = diag.get("send_status", "NOT_OBSERVED")
 
     print("ACCEPT_TASK_RESULT=%s detail=%s exit_code=%s"
           % ("PASS" if task_ok else "FAIL", task_detail,
-             result.get("exit_code") if result else "MISSING"))
+             result.get("exit_code") if result else "NOT_OBSERVED"))
     print("ACCEPT_EVIDENCE=%s detail=%s" % (ev_verdict, ev_detail))
     print("ACCEPT_CLEANUP=%s detail=%s" % ("PASS" if cleanup == "CONFIRMED" else "FAIL", cleanup))
     print("ACCEPT_SEND=%s detail=%s" % ("PASS" if send == "CONFIRMED_SENT" else "FAIL", send))
