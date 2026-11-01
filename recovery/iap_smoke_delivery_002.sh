@@ -33,6 +33,9 @@ EXPECT_BASE="${EXPECT_BASE:-177680708739a72a0d70bc6a9664245b00a2ef08}"
 OPERATOR="zhong"; OPERATOR_HOME="/home/zhong"; OP_PATH="/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin"
 CDP_URL="http://127.0.0.1:9333"
 LEDGER="${LEDGER:-/var/lib/aegl-smoke/$TASK_ID}"
+CAMPAIGN_ID="IAP-SMOKE-002"
+SUPERVISOR_ROOT="/home/zhong/.local/state/google-android-agent-stack/supervisor"
+HELPER="$PKG/bin/iap_round_verdict.py"
 CURRENT_STAGE=""; FAIL_REPORTED=0
 
 say() { printf '%s\n' "$*"; }
@@ -178,13 +181,18 @@ chain_now() {
 }
 
 stack_hashes_ok() {
+  # Runtime file pins generated from the promoted Stack commit
+  # (f32d18a4f1479854d3c28bcf21b1e31391041243); campaign_supervisor.py is included
+  # because this run actually invokes it. The check is strict — never relaxed.
   local f i=1 got want
   for f in orchestration/hermes/bridge/projects.py orchestration/hermes/bridge/protocol.py \
-           orchestration/hermes/bridge/contract_executor.py orchestration/hermes/bridge/bridge_cli.py; do
+           orchestration/hermes/bridge/contract_executor.py orchestration/hermes/bridge/bridge_cli.py \
+           orchestration/hermes/supervisor/campaign_supervisor.py; do
     case "$i" in 1) want=b09dd5e1a435d83383fbcc30ca440e96192e87f7a074b3972a4cc269c188b080 ;;
               2) want=d2e5c8d87ed42f37507266b308f92674182d1770af07aa50edcecbac59076f99 ;;
-              3) want=c4a612cc8533baa8433bd2040a2ea91d8590b79c87450454f3bddb2fac0dbcd5 ;;
-              4) want=15e3b14042730b3e7bb4aaab79d28182b3ace5bdd7a3aa022c3ebb9940cdc2e8 ;; esac
+              3) want=ee68e51db72f068ee5a52328dd01ac1844082b1ee26cd2eb5516f6163af6c0a7 ;;
+              4) want=16ab151de72bb99f9c7e5eaea51bedd2d456e35d0560c0a8f3fd7d70c518c3aa ;;
+              5) want=d4f736cd70624621027070bf386c88821b79cef051c3a06b65921f4d916901c2 ;; esac
     got="$(sha256sum "$STACK/$f" 2>/dev/null | awk '{print $1}')"
     [ "$got" = "$want" ] || die stack_hash "$f=${got:-unreadable}"
     i=$((i+1))
@@ -216,7 +224,7 @@ stage_preflight() {
   [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_exists "$WORKTREE/EVIDENCE.txt"
   stack_hashes_ok
   assert_operator_state_path
-  say "PREFLIGHT_OK evidence=absent stack=0b04e179 state=$(operator_state_path)"
+  say "PREFLIGHT_OK evidence=absent stack=f32d18a state=$(operator_state_path)"
 }
 
 # --- baseline identity: ALWAYS the operator (zhong), never root -------------------- #
@@ -513,37 +521,45 @@ stage_round() {
   assert_operator_state_path
   local now want; now="$(chain_now)"; want="$(cat "$LEDGER/chain.at_ready")"
   [ "$now" = "$want" ] || die chain_changed "$now != $want"
-  local seq nonce reply
+  local seq nonce reply rc=0 out verdict
   seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"
   nonce="$(sed -n 's/.*nonce=\([^ ]*\).*/\1/p' <<< "$want")"
   reply="$(sed -n 's/.*in_reply_to=\([^ ]*\).*/\1/p' <<< "$want")"
-  ( cd "$STACK" && as_op env BRIDGE_DIR="$BRIDGE_DIR" /usr/bin/python3 orchestration/hermes/supervisor/campaign_cli.py run \
-      --campaign-id IAP-SMOKE-002 --milestone S0 --start-sequence "$seq" --start-nonce "$nonce" \
-      --start-in-reply-to "$reply" --max-rounds 1 --max-wall-seconds 900 --poll-seconds 5 ) || die round "campaign_cli rc=$?"
-  say "ROUND_DONE (one bridge round, max-rounds=1)"
+  [ -f "$HELPER" ] || die helper "round verdict helper missing: $HELPER"
+  out="$( ( cd "$STACK" && as_op env BRIDGE_DIR="$BRIDGE_DIR" /usr/bin/python3 orchestration/hermes/supervisor/campaign_cli.py run \
+      --campaign-id "$CAMPAIGN_ID" --milestone S0 --start-sequence "$seq" --start-nonce "$nonce" \
+      --start-in-reply-to "$reply" --max-rounds 1 --max-wall-seconds 900 --poll-seconds 5 ) 2>&1 )" || rc=$?
+  printf '%s\n' "$out" > "$LEDGER/round.out"
+  say "ROUND_CAMPAIGN_RC=$rc"
+  # rc=3 is shared by LIMIT_REACHED and SAFETY_STOP — never treat it as pass or fail alone.
+  verdict="$(/usr/bin/python3 "$HELPER" --mode round --rc "$rc" --campaign-id "$CAMPAIGN_ID" \
+      --supervisor-root "$SUPERVISOR_ROOT" --bridge-dir "$BRIDGE_DIR" \
+      --task-id "$TASK_ID" --sequence "$seq" 2>&1)" || {
+    printf '%s\n' "$verdict"
+    die round_incomplete "$(printf '%s\n' "$verdict" | tr '\n' ' ')"
+  }
+  printf '%s\n' "$verdict"
+  say "ROUND_DONE (one bridge round, max-rounds=1, verdict=COMPLETED)"
 }
 
 stage_accept() {
   require_root
+  [ -s "$LEDGER/round.out" ] || die accept_missing "no round record: $LEDGER/round.out"
+  [ -f "$HELPER" ] || die helper "accept verdict helper missing: $HELPER"
   [ -s "$WORKTREE/EVIDENCE.txt" ] || die evidence_missing
-  python3 - "$WORKTREE/EVIDENCE.txt" "$TASK_ROOT/PREP-BINDING.json" <<'PY' || die evidence_mismatch "EVIDENCE does not match PREP-BINDING/identity"
-import json,re,sys
-ev=[l.rstrip("\n") for l in open(sys.argv[1],encoding="utf-8")]
-b=json.load(open(sys.argv[2],encoding="utf-8"))
-wt,commit=b["worktree"],b["commit"]
-if len(ev)!=4: print("lines=%d"%len(ev)); raise SystemExit(1)
-if ev[0]!="id -un: aegl-ai": print(ev[0]); raise SystemExit(1)
-if ev[1]!="pwd: "+wt: print(ev[1]); raise SystemExit(1)
-if ev[2]!="git rev-parse HEAD: "+commit: print(ev[2]); raise SystemExit(1)
-m=re.fullmatch(r"python3 --version: Python (3\.\d+\.\d+)", ev[3])
-if not m: print(ev[3]); raise SystemExit(1)
-print("OBSERVED_SANDBOX_PYTHON=%s"%m.group(1))
-PY
-  if pgrep -f "hermes -p android-stack" >/dev/null 2>&1; then die process_left hermes; fi
-  if pgrep -f aegl-hermes-sandbox >/dev/null 2>&1; then die process_left sandbox; fi
+  local want seq diag_task verdict
+  want="$(cat "$LEDGER/chain.at_ready")"
+  seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"
+  diag_task="$(sed -n 's/^CAMPAIGN_ROUND_DIAG .*task_id=\([^ ]*\).*/\1/p' "$LEDGER/round.out" | tail -1)"
+  [ "$diag_task" = "$TASK_ID" ] || die accept_diag_task "diagnostic task_id='${diag_task:-MISSING}' != $TASK_ID"
+  verdict="$(/usr/bin/python3 "$HELPER" --mode accept --task-id "$TASK_ID" --sequence "$seq" \
+      --bridge-dir "$BRIDGE_DIR" --round-out "$LEDGER/round.out" \
+      --worktree "$WORKTREE" --prep-binding "$TASK_ROOT/PREP-BINDING.json" 2>&1)" || {
+    printf '%s\n' "$verdict"
+    die accept_failed "$(printf '%s\n' "$verdict" | tr '\n' ' ')"
+  }
+  printf '%s\n' "$verdict"
   say "ACCEPT_EVIDENCE_OK sha256=$(sha256sum "$WORKTREE/EVIDENCE.txt" | awk '{print $1}')"
-  say "ACCEPT_PROCESSES_OK"
-  say "ACCEPT_SEND=judge from the round output (CONFIRMED_SENT required; ALREADY_PRESENT/manual != auto-send PASS)"
 }
 
 PREP_STAGES=(preflight baseline worktree permissions probe contract binding register ready)
