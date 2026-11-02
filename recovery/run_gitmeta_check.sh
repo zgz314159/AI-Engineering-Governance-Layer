@@ -40,7 +40,7 @@ run_launcher() { # <log> [extra args...] -> RUN_RC
 }
 field() { sed -n "s/^$2=//p" "$1" | tail -1; }
 show() { grep -aE "$1" "$2" || true; }
-PAT='^(check mode|  git metadata|  post-drop entries|    drop_verify=|    exec_spec=|    exec |COMMON=|COMMON_RC=|REV_PARSE_|STATUS_RC=|PERM_|CHECK_FAILURES=|BLOCKED)'
+PAT='^(check mode|  git metadata|  post-drop entries|    drop_verify=|    exec_spec=|    exec |COMMON=|COMMON_RC=|REV_PARSE_|STATUS_RC=|PERM_|CHECK_FAILURES=|GIT_META_FAILED|BLOCKED)'
 
 say "=== 0. host, the SAME identity (baseline sanity: MUST pass) ==="
 "$SETPRIV" --reuid="$AI_UID" --regid="$AI_GID" --clear-groups --no-new-privs -- \

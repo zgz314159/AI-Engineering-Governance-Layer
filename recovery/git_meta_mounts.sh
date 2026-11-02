@@ -44,7 +44,7 @@ case "$GITDIR" in "$COMMON/worktrees/"*) : ;; *) die gitdir_outside "$GITDIR" ;;
 # 3. registration must agree in both directions
 [ "$(cat "$GITDIR/gitdir" 2>/dev/null)" = "$WT/.git" ] \
   || die gitdir_backlink "$(cat "$GITDIR/gitdir" 2>/dev/null)"
-WL="$(git "${TRUST[@]}" -C "$COMMON" worktree list --porcelain 2>&1)" \
+WL="$(git "${TRUST[@]}" -C "$REAL_REPO" worktree list --porcelain 2>&1)" \
   || die worktree_list "rc=$? $(printf '%s' "$WL" | head -c 400 | tr '\n' ' ')"
 printf '%s\n' "$WL" | grep -qxF -- "worktree $REAL_WT" || die not_registered "$REAL_WT"
 # 4. ownership: the shared metadata belongs to the repo owner; the admin dir may be
