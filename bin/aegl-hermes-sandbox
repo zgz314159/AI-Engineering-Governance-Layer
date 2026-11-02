@@ -147,8 +147,12 @@ chown root:"$AI_GROUP" "$RUN/broker"; chmod 0750 "$RUN/broker"
 chown "$AI_USER":"$AI_GROUP" "$RUN/home"; chmod 0750 "$RUN/home"
 chown -R root:root "$RUN/stage"; chmod -R a+rX,o-w "$RUN/stage"
 SOCK="$RUN/broker/model.sock"; PORT=8877
+BPID=""
+cleanup(){ [ -n "$BPID" ] && kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
+trap cleanup EXIT TERM INT
 
-# --- trusted broker: credential read as DATA from its ORIGINAL location ------- #
+# --- trusted broker: only for a real (modeled) run ------------------------------------ #
+if [ -z "$CHECK_CMD" ]; then
 # it ALSO answers pre_tool_call on the same socket, running the VERIFIED read-only guard copy
 # under a fixed unprivileged runner (never the broker identity, never user-writable code).
 GUARD_COPY="$LIBDIR/guard/contract_guard.py"
@@ -164,11 +168,12 @@ AEGL_GUARD_AI_GID="$AI_GID" AEGL_TASK="$TASK" \
 HERMES_CONTRACT_PACKAGE="$CONTRACT" \
   "$BROKER_BIN" serve >"$RUN/broker.log" 2>&1 &
 BPID=$!
-cleanup(){ kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
-trap cleanup EXIT TERM INT
 for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 0.1; done
 [ -S "$SOCK" ] || die "model broker did not start (see $RUN/broker.log)"
 chown root:"$AI_GROUP" "$SOCK"; chmod 0660 "$SOCK"
+else
+say "  check mode: no broker, no shim, no model call, no credential read"
+fi
 
 # --- task config + generated android-stack profile ---------------------------- #
 # The client is installed 0644 (not executable), so the hook must invoke it through an explicit
@@ -367,7 +372,7 @@ chown -R "$AI_USER":"$AI_GROUP" "$ST"
 GIT_MOUNTS=()
 GIT_META_HELPER="$(pick git_meta_mounts.sh)"
 [ -f "$GIT_META_HELPER" ] || die "git metadata helper missing: $GIT_META_HELPER"
-GIT_MOUNTS_RAW="$("$GIT_META_HELPER" "$WT_R" "$RUN/gitadmin" "$PROJ" ${CHECK_BASELINE:+--baseline})" \
+GIT_MOUNTS_RAW="$(/bin/bash "$GIT_META_HELPER" "$WT_R" "$RUN/gitadmin" "$PROJ" ${CHECK_BASELINE:+--baseline})" \
   || die "git metadata mapping failed for $WT_R"
 while IFS= read -r m; do [ -n "$m" ] && GIT_MOUNTS+=("$m"); done <<< "$GIT_MOUNTS_RAW"
 say "  git metadata: ${#GIT_MOUNTS[@]} mount(s)${CHECK_BASELINE:+ (baseline: intentionally none)}"

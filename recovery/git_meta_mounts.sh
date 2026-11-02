@@ -48,8 +48,9 @@ COMMON_OWNER="$(stat -c '%U' "$COMMON")"
 [ "$(stat -c '%U' "$GITDIR")" != "$AI_USER" ] || die owner_is_ai "$GITDIR is $AI_USER"
 [ "$COMMON_OWNER" != "$AI_USER" ] || die owner_is_ai "$COMMON is $AI_USER"
 
-# 5. per-task WRITABLE view of ONLY this worktree's admin dir
-rm -rf -- "$VIEW"; mkdir -p -- "$VIEW"
+# 5. per-task WRITABLE view of ONLY this worktree's admin dir — always a FRESH directory
+[ ! -e "$VIEW" ] || die view_exists "$VIEW already exists (refusing to overwrite)"
+mkdir -m 0700 -- "$VIEW" || die view_create "$VIEW"
 cp -a "$GITDIR/." "$VIEW/" || die view_copy "$GITDIR"
 chown -R "$AI_USER:$AI_GROUP" "$VIEW" || die view_chown "$VIEW"
 

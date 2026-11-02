@@ -1,0 +1,35 @@
+say(){ printf '%s\n' "$*"; }
+T="${TMPDIR:-/tmp}"; fail=0
+common="$(git rev-parse --git-common-dir 2>"$T/common.err")"; crc=$?
+say "COMMON=$common"; say "COMMON_RC=$crc"
+[ "$crc" -eq 0 ] || { say "COMMON_ERR=$(head -c 400 "$T/common.err" | tr '\n' ' ')"; fail=1; }
+git rev-parse HEAD >"$T/head.out" 2>"$T/head.err"; rc=$?
+say "REV_PARSE_RC=$rc"
+say "REV_PARSE_ERR=$(head -c 400 "$T/head.err" | tr '\n' ' ')"
+say "REV_PARSE_HEAD=$(head -c 200 "$T/head.out" | tr -d '\n')"
+[ "$rc" -eq 0 ] || fail=1
+git status --porcelain >"$T/status.out" 2>"$T/status.err"; rc=$?
+say "STATUS_RC=$rc"; say "STATUS_ERR=$(head -c 400 "$T/status.err" | tr '\n' ' ')"
+[ "$rc" -eq 0 ] || fail=1
+python3 - "$common" <<PY
+import os
+import sys
+common = sys.argv[1]
+bad = 0
+for label, path in (("core", common), ("refs", common + "/refs"),
+                    ("objects", common + "/objects"), ("config", common + "/config")):
+    try:
+        writable = os.access(path, os.W_OK)
+        ro = bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError as exc:
+        print("PERM_%s error=%s" % (label, type(exc).__name__))
+        bad = 1
+        continue
+    print("PERM_%s writable=%s mount_ro=%s" % (label, writable, ro))
+    if writable or not ro:
+        bad = 1
+sys.exit(bad)
+PY
+[ $? -eq 0 ] || fail=1
+say "CHECK_FAILURES=$fail"
+exit "$fail"

@@ -457,37 +457,26 @@ stage_permissions() {
 # --- in-sandbox Git metadata check (no model, no send, no shim) ------------------------ #
 # The host-side probe below cannot see this: the sandbox overlays /home/zhong with a
 # skeleton, so unless the worktree's Git metadata is re-mounted Git cannot resolve HEAD.
-sandbox_check_cmd() {
-  cat <<'CHK'
-common="$(git rev-parse --git-common-dir 2>&1)"; printf 'COMMON=%s\n' "$common"
-out="$(git rev-parse HEAD 2>&1 | head -c 400)"; rc=${PIPESTATUS[0]}
-printf 'REV_PARSE_HEAD=%s\n' "$out"; printf 'REV_PARSE_RC=%s\n' "$rc"
-git status --porcelain >/dev/null 2>&1; printf 'STATUS_RC=%s\n' "$?"
-if touch "$common/.aegl_probe" 2>/dev/null; then printf 'WRITE_core=ALLOWED\n'; else printf 'WRITE_core=DENIED\n'; fi
-if touch "$common/refs/.aegl_probe" 2>/dev/null; then printf 'WRITE_refs=ALLOWED\n'; else printf 'WRITE_refs=DENIED\n'; fi
-if touch "$common/objects/.aegl_probe" 2>/dev/null; then printf 'WRITE_objects=ALLOWED\n'; else printf 'WRITE_objects=DENIED\n'; fi
-if (printf '' >> "$common/config") 2>/dev/null; then printf 'WRITE_config=ALLOWED\n'; else printf 'WRITE_config=DENIED\n'; fi
-exit "$rc"
-CHK
-}
+sandbox_check_cmd() { cat "$PKG/bin/gitmeta.check"; }
 
 sandbox_git_check() {
   local cmd_file="$LEDGER/sandbox-git-check.cmd" out rc=0
   sandbox_check_cmd > "$cmd_file" || die probe_sandbox_cmd "$cmd_file"
   out="$( "$SANDBOX_BIN" --task "$TASK_ID" --check "$(cat "$cmd_file")" 2>&1 )" || rc=$?
   printf '%s\n' "$out" > "$LEDGER/sandbox-git-check.out"
-  printf '%s\n' "$out" | grep -E '^(COMMON=|REV_PARSE_HEAD=|REV_PARSE_RC=|STATUS_RC=|WRITE_)' || true
+  printf '%s\n' "$out" | grep -E '^(COMMON=|COMMON_RC=|REV_PARSE_RC=|REV_PARSE_HEAD=|STATUS_RC=|PERM_|CHECK_FAILURES=)' || true
   printf '%s\n' "$out" | grep -qxF 'REV_PARSE_RC=0' \
-    || die probe_sandbox_rev_parse "rc=$rc $(printf '%s\n' "$out" | grep -E '^(COMMON=|REV_PARSE_)' | tr '\n' ' ')"
+    || die probe_sandbox_rev_parse "rc=$rc $(printf '%s\n' "$out" | grep -E '^(COMMON=|COMMON_RC=|REV_PARSE_(RC|ERR)=)' | tr '\n' ' ')"
   printf '%s\n' "$out" | grep -qxF "REV_PARSE_HEAD=$EXPECT_BASE" \
     || die probe_sandbox_head "$(printf '%s\n' "$out" | grep '^REV_PARSE_HEAD=' | tr '\n' ' ')"
   printf '%s\n' "$out" | grep -qxF 'STATUS_RC=0' || die probe_sandbox_status "rc=$rc"
   local k
   for k in core refs objects config; do
-    printf '%s\n' "$out" | grep -qxF "WRITE_$k=DENIED" \
-      || die probe_sandbox_write "$k writable inside the sandbox"
+    printf '%s\n' "$out" | grep -qxF "PERM_$k writable=False mount_ro=True" \
+      || die probe_sandbox_perm "$k $(printf '%s\n' "$out" | grep "^PERM_$k " | tr '\n' ' ')"
   done
-  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata=read-only"
+  printf '%s\n' "$out" | grep -qxF 'CHECK_FAILURES=0' || die probe_sandbox_fail "rc=$rc"
+  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata read-only (os.access + mount ro)"
 }
 
 stage_probe() {
