@@ -428,6 +428,30 @@ chmod 0755 "$SK" "$SK/.hermes" "$SK/.local/bin"
 # --- trusted root prep: private ns + aliases, then drop to host aegl-ai BEFORE bwrap ---- #
 # bwrap starts as aegl-ai (non-setuid) and uses its AppArmor-permitted user namespace; there
 # is NO capability-requiring identity switch inside bwrap.
+# --- post-drop entry projection: the dropped identity must READ what it runs ------------- #
+# prep.sh execs these AFTER setpriv to aegl-ai, so they cannot live in the root-exclusive
+# package. Project ONLY these two stdlib-only entries into this run's trusted control dir,
+# verify the content against the frozen payload, then drop. root owns it; aegl-ai may read
+# and traverse it but cannot write it.
+CTL="$RUN/ctl"; mkdir -p "$CTL"
+project() { # <src> -> resolved projected path
+  local src="$1" name
+  name="$(basename "$src")"
+  [ -f "$src" ] || die "post-drop entry missing: $src"
+  install -o root -g root -m 0644 "$src" "$CTL/$name.new" || die "projection copy $name"
+  [ "$(sha256sum "$src" | awk '{print $1}')" = "$(sha256sum "$CTL/$name.new" | awk '{print $1}')" ] \
+    || die "projection mismatch $name"
+  mv -f "$CTL/$name.new" "$CTL/$name" || die "projection swap $name"
+  readlink -f "$CTL/$name"
+}
+CTL_DROP_VERIFY="$(project "$DROP_VERIFY")"
+CTL_EXEC_SPEC="$(project "$EXEC_SPEC")"
+chown -R root:root "$CTL"; chmod 0755 "$CTL"; chmod 0644 "$CTL"/*
+chmod 0644 "$SPEC"
+say "  post-drop entries (projected from the frozen payload, content verified):"
+say "    drop_verify=$CTL_DROP_VERIFY sha=$(sha256sum "$CTL_DROP_VERIFY" | awk '{print $1}') owner=$(stat -c '%U:%G %a' "$CTL_DROP_VERIFY")"
+say "    exec_spec=$CTL_EXEC_SPEC sha=$(sha256sum "$CTL_EXEC_SPEC" | awk '{print $1}') owner=$(stat -c '%U:%G %a' "$CTL_EXEC_SPEC")"
+
 cat > "$RUN/prep.sh" <<EOF
 #!/bin/bash
 set -e
@@ -439,10 +463,15 @@ mount --bind '$GEN' '$SRC/gen'
 mount --bind '$GUARD_SRC' '$SRC/guard'
 exec '$SETPRIV' --reuid '$AI_UID' --regid '$AI_GID' --clear-groups --no-new-privs \
   --bounding-set=-all --inh-caps=-all --ambient-caps=-all -- \\
-  python3 '$DROP_VERIFY' --uid '$AI_UID' --gid '$AI_GID' -- \\
-  python3 '$EXEC_SPEC' '$SPEC'
+  python3 '$CTL_DROP_VERIFY' --uid '$AI_UID' --gid '$AI_GID' -- \\
+  python3 '$CTL_EXEC_SPEC' '$SPEC'
 EOF
 chown root:root "$RUN/prep.sh"; chmod 0755 "$RUN/prep.sh"
+if grep -q '/root/' "$RUN/prep.sh"; then
+  die "prep.sh would hand a /root path to the dropped identity"
+fi
+say "  prep.sh post-drop command:"
+sed -n '/^exec /,$p' "$RUN/prep.sh" | sed 's/^/    /'
 # --- the real chain runs UNDER strace; the credential broker stays OUTSIDE the traced branch
 # only file open/create results and errnos are captured (no network, buffers, credentials, env)
 diag_ev --phase sandbox_prep_done --task "$TASK"

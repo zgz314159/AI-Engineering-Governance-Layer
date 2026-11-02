@@ -40,6 +40,7 @@ run_launcher() { # <log> [extra args...] -> RUN_RC
 }
 field() { sed -n "s/^$2=//p" "$1" | tail -1; }
 show() { grep -aE "$1" "$2" || true; }
+PAT='^(check mode|  git metadata|  post-drop entries|    drop_verify=|    exec_spec=|    exec |COMMON=|COMMON_RC=|REV_PARSE_|STATUS_RC=|PERM_|CHECK_FAILURES=|BLOCKED)'
 
 say "=== 0. host, the SAME identity (baseline sanity: MUST pass) ==="
 "$SETPRIV" --reuid="$AI_UID" --regid="$AI_GID" --clear-groups --no-new-privs -- \
@@ -53,7 +54,7 @@ say "HOST_RC=$hrc"
 
 say "=== 1. pre-fix mount set (expected: reach the internal check and FAIL there) ==="
 run_launcher "$TMPD/baseline.log" --check-baseline
-show '^(check mode|  git metadata|COMMON=|COMMON_RC=|REV_PARSE_|STATUS_RC=|PERM_|CHECK_FAILURES=|BLOCKED)' "$TMPD/baseline.log"
+show "$PAT" "$TMPD/baseline.log"
 say "BASELINE_EXIT=$RUN_RC"
 say "BASELINE_GIT_RC=$(field "$TMPD/baseline.log" REV_PARSE_RC)"
 say "BASELINE_COMMON_RC=$(field "$TMPD/baseline.log" COMMON_RC)"
@@ -67,7 +68,7 @@ if [ "$RUN_RC" -eq 0 ]; then say "BASELINE_EXIT_UNEXPECTEDLY_ZERO"; FAIL=1; fi
 
 say "=== 2. fixed mount set (expected: reach the internal check and PASS) ==="
 run_launcher "$TMPD/fixed.log"
-show '^(check mode|  git metadata|COMMON=|COMMON_RC=|REV_PARSE_|STATUS_RC=|PERM_|CHECK_FAILURES=|BLOCKED)' "$TMPD/fixed.log"
+show "$PAT" "$TMPD/fixed.log"
 say "FIXED_EXIT=$RUN_RC"
 say "FIXED_GIT_RC=$(field "$TMPD/fixed.log" REV_PARSE_RC)"
 say "FIXED_STATUS_RC=$(field "$TMPD/fixed.log" STATUS_RC)"
