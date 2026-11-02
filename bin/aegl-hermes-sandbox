@@ -20,7 +20,13 @@ TRUSTED_TASK_REGISTRY="${AEGL_MODEL_TASK_REGISTRY:-/var/lib/aegl-model/registry.
 CONFIG="${AEGL_MODEL_CONFIG:-/etc/aegl/model/config}"
 LIBDIR="${AEGL_MODEL_LIBDIR:-/usr/local/lib/aegl-model}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-pick(){ [ -f "$LIBDIR/$1" ] && printf '%s' "$LIBDIR/$1" || printf '%s' "$SELF_DIR/../recovery/$1"; }
+pick(){
+  # When the caller PINS the lib dir (a frozen, verified copy) there is NO fallback to a
+  # user-writable source tree: a missing dependency resolves to a path that cannot exist.
+  if [ -f "$LIBDIR/$1" ]; then printf '%s' "$LIBDIR/$1"
+  elif [ -n "${AEGL_MODEL_LIBDIR:-}" ]; then printf '%s' "$LIBDIR/.MISSING-$1"
+  else printf '%s' "$SELF_DIR/../recovery/$1"; fi
+}
 BROKER_BIN="$LIBDIR/aegl-model-broker"; [ -x "$BROKER_BIN" ] || BROKER_BIN="$SELF_DIR/aegl-model-broker"
 SHIM="$(pick loopback_shim.py)"
 DIAG_PY="$(pick diag_events.py)"
@@ -151,12 +157,15 @@ BPID=""
 cleanup(){ [ -n "$BPID" ] && kill "$BPID" 2>/dev/null; rm -rf "$RUN"; }
 trap cleanup EXIT TERM INT
 
+# --- guard wiring: needed by the generated profile mount in BOTH modes ------------------ #
+# (the broker and the credential path below stay skipped for a --check run)
+GUARD_COPY="$LIBDIR/guard/contract_guard.py"
+GUARD_CLIENT="$(pick guard_hook_client.py)"
+
 # --- trusted broker: only for a real (modeled) run ------------------------------------ #
 if [ -z "$CHECK_CMD" ]; then
 # it ALSO answers pre_tool_call on the same socket, running the VERIFIED read-only guard copy
 # under a fixed unprivileged runner (never the broker identity, never user-writable code).
-GUARD_COPY="$LIBDIR/guard/contract_guard.py"
-GUARD_CLIENT="$(pick guard_hook_client.py)"
 GUARD_RUNNER="$(python3 -c 'import json,sys;print(json.dumps(sys.argv[1:]))' \
   "$SETPRIV" --reuid "$AI_UID" --regid "$AI_GID" --clear-groups --no-new-privs -- )"
 AEGL_MODEL_SOCKET="$SOCK" AEGL_MODEL_UPSTREAM="$UPSTREAM" \
@@ -303,6 +312,9 @@ rc=\$?
 printf 'SANDBOX_CHECK_RC=%s\n' "\$rc"
 exit \$rc
 EOF
+  # the payload the DROPPED process runs must be exactly the verified check text
+  grep -qF -- "$CHECK_CMD" "$RUN/sandbox-run.sh" \
+    || die "check payload was not projected verbatim into the task-level runner"
 else
 cat > "$RUN/sandbox-run.sh" <<EOF
 #!/bin/bash
@@ -406,6 +418,8 @@ python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN"
   --entry "$SRC/entry" --installs-view "$VIEW" "${MOUNT_ARGS[@]}" --guard-src "$SRC/guard" \
   --guard-dest "$GUARD_DEST" --contract-package "$CONTRACT" \
   ${INFO_FD:+--info-fd "$INFO_FD"} -- "${HERMES_ARGS[@]}" > "$SPEC" || die "spec build failed"
+# nothing the dropped identity can see may point at the root-exclusive package
+if grep -q '/root/' "$SPEC"; then die "sandbox spec references /root (refusing to expose it)"; fi
 # create EVERY mount target under the read-only skeleton, derived from the ACTUAL argv
 python3 "$PREPARE" "$SPEC" "$SK" || die "mount-target preparation failed"
 chown -R root:"$AI_GROUP" "$RUN/stage"; chmod -R g+rX,o-rwx "$RUN/stage"

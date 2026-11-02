@@ -25,9 +25,14 @@ die() { printf 'GIT_META_FAILED reason=%s: %s\n' "$1" "${2:-}" >&2; exit 1; }
 REAL_WT="$(realpath -e "$WT")" || die worktree "$WT"
 REAL_REPO="$(realpath -e "$REPO")" || die repo "$REPO"
 TRUST=(-c "safe.directory=$REAL_WT" -c "safe.directory=$REAL_REPO")
-COMMON="$(git "${TRUST[@]}" -C "$REAL_WT" rev-parse --git-common-dir 2>/dev/null)" || die rev_parse_common
+# every Git call keeps its REAL rc and its raw (bounded) stderr — nothing is discarded
+rc=0
+COMMON="$(git "${TRUST[@]}" -C "$REAL_WT" rev-parse --git-common-dir 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || die rev_parse_common "rc=$rc $(printf '%s' "$COMMON" | head -c 400 | tr '\n' ' ')"
 [ "${COMMON#/}" != "$COMMON" ] || COMMON="$REAL_WT/$COMMON"
-GITDIR="$(git "${TRUST[@]}" -C "$REAL_WT" rev-parse --absolute-git-dir 2>/dev/null)" || die rev_parse_gitdir
+rc=0
+GITDIR="$(git "${TRUST[@]}" -C "$REAL_WT" rev-parse --absolute-git-dir 2>&1)" || rc=$?
+[ "$rc" -eq 0 ] || die rev_parse_gitdir "rc=$rc $(printf '%s' "$GITDIR" | head -c 400 | tr '\n' ' ')"
 COMMON="$(realpath -e "$COMMON")" || die common_missing "$COMMON"
 GITDIR="$(realpath -e "$GITDIR")" || die gitdir_missing "$GITDIR"
 
@@ -39,8 +44,9 @@ case "$GITDIR" in "$COMMON/worktrees/"*) : ;; *) die gitdir_outside "$GITDIR" ;;
 # 3. registration must agree in both directions
 [ "$(cat "$GITDIR/gitdir" 2>/dev/null)" = "$WT/.git" ] \
   || die gitdir_backlink "$(cat "$GITDIR/gitdir" 2>/dev/null)"
-git "${TRUST[@]}" -C "$COMMON" worktree list --porcelain 2>/dev/null \
-  | grep -qxF -- "worktree $REAL_WT" || die not_registered "$REAL_WT"
+WL="$(git "${TRUST[@]}" -C "$COMMON" worktree list --porcelain 2>&1)" \
+  || die worktree_list "rc=$? $(printf '%s' "$WL" | head -c 400 | tr '\n' ' ')"
+printf '%s\n' "$WL" | grep -qxF -- "worktree $REAL_WT" || die not_registered "$REAL_WT"
 # 4. ownership: the shared metadata belongs to the repo owner; the admin dir may be
 #    root-owned (the trusted side creates worktrees) but must NEVER be the sandbox identity.
 COMMON_OWNER="$(stat -c '%U' "$COMMON")"

@@ -31,5 +31,7 @@ for label, path in (("core", common), ("refs", common + "/refs"),
 sys.exit(bad)
 PY
 [ $? -eq 0 ] || fail=1
+# precise cleanup: only this run's known temp files (all values are already echoed above)
+rm -f "$T/common.err" "$T/head.err" "$T/head.out" "$T/status.err" "$T/status.out"
 say "CHECK_FAILURES=$fail"
 exit "$fail"
