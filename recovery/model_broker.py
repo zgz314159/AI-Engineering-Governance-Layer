@@ -24,6 +24,8 @@ import re
 import socket
 import ssl
 import sys
+import threading
+import time
 import urllib.parse
 
 try:  # BRIDGE-DIAG-003: structured, non-sensitive phase events; never breaks the broker
@@ -39,6 +41,13 @@ def _ev(phase, **kw) -> None:
         _diag.emit(phase, **kw)
     except Exception:  # noqa: BLE001 - diagnostics must never disturb the data path
         pass
+
+
+# Bounded upstream connect (DNS -> TCP -> TLS). One socket timeout cannot bound
+# getaddrinfo, and a connect timeout equal to the task budget makes a stall invisible:
+# the wrapper kills the task before the broker's own timeout can report anything.
+CONNECT_DEADLINE_S = 25.0  # total DNS+TCP+TLS budget; stays well below the task budget
+CONNECT_STAGE_S = 8.0      # per-address TCP / TLS cap, further limited by what is left
 
 
 DEFAULT_AUTH_HEADER = "Authorization"
@@ -390,6 +399,112 @@ def _error_category(status: int, payload: bytes) -> str:
     return "UNKNOWN"
 
 
+def _family_name(family) -> str:
+    return {socket.AF_INET: "IPv4", socket.AF_INET6: "IPv6"}.get(family, str(family))
+
+
+def _resolve_bounded(host, port, timeout):
+    """getaddrinfo bounded by a wall-clock budget (a socket timeout cannot bound it).
+
+    The system resolution order and every address family are kept as-is: no fixed IP,
+    no family filtering, no proxy.
+    """
+    box = {}
+
+    def work():
+        try:
+            box["addrs"] = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except BaseException as exc:  # noqa: BLE001
+            box["err"] = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError("resolution exceeded %.1fs" % timeout)
+    if "err" in box:
+        raise OSError(box["err"])
+    return box.get("addrs") or []
+
+
+def _connect_bounded(up, host, port, ctx, seq) -> None:
+    """Bounded DNS -> TCP -> TLS establishment under ONE monotonic deadline.
+
+    Each address's TCP and TLS wait is bounded by both the remaining budget and
+    CONNECT_STAGE_S. Before any HTTP request is written a failed address falls through
+    to the next one; the request itself is never retried or resent. On success the
+    connection's ORIGINAL send/read timeout is restored, so no short connect timeout is
+    left behind. SNI and certificate verification are unchanged (the caller's context).
+    """
+    deadline = time.monotonic() + CONNECT_DEADLINE_S
+    _ev("upstream_connect_start", seq=seq)
+    started = time.monotonic()
+    try:
+        addrs = _resolve_bounded(host, port, max(0.1, deadline - time.monotonic()))
+    except BaseException as exc:  # noqa: BLE001
+        _ev("upstream_dns_done", seq=seq, error=type(exc).__name__,
+            arg="resolved=0 elapsed_ms=%d" % int((time.monotonic() - started) * 1000))
+        raise
+    _ev("upstream_dns_done", seq=seq,
+        arg="resolved=%d elapsed_ms=%d" % (len(addrs), int((time.monotonic() - started) * 1000)))
+    last = None
+    for index, (family, _type, _proto, _canon, sockaddr) in enumerate(addrs):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last = last or TimeoutError("connect deadline exceeded before address %d" % index)
+            break
+        _ev("upstream_tcp_start", seq=seq,
+            arg="addr=%d family=%s remaining_ms=%d"
+                % (index, _family_name(family), int(remaining * 1000)))
+        started = time.monotonic()
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(min(CONNECT_STAGE_S, remaining))
+            sock.connect(sockaddr)
+        except BaseException as exc:  # noqa: BLE001
+            last = exc
+            _ev("upstream_tcp_fail", seq=seq, error=type(exc).__name__,
+                arg="addr=%d family=%s elapsed_ms=%d"
+                    % (index, _family_name(family), int((time.monotonic() - started) * 1000)))
+            sock.close()
+            continue
+        _ev("upstream_tcp_done", seq=seq,
+            arg="addr=%d family=%s elapsed_ms=%d"
+                % (index, _family_name(family), int((time.monotonic() - started) * 1000)))
+        if ctx is None:  # plain http upstream: no TLS stage
+            up.sock = sock
+            sock.settimeout(up.timeout)
+            _ev("upstream_connect_done", seq=seq, arg="addr=%d tls=off" % index)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last = TimeoutError("connect deadline exceeded before TLS on address %d" % index)
+            sock.close()
+            break
+        _ev("upstream_tls_start", seq=seq, arg="addr=%d remaining_ms=%d" % (index, int(remaining * 1000)))
+        started = time.monotonic()
+        try:
+            sock.settimeout(min(CONNECT_STAGE_S, remaining))
+            tls = ctx.wrap_socket(sock, server_hostname=host)
+        except BaseException as exc:  # noqa: BLE001
+            last = exc
+            _ev("upstream_tls_fail", seq=seq, error=type(exc).__name__,
+                arg="addr=%d elapsed_ms=%d" % (index, int((time.monotonic() - started) * 1000)))
+            try:
+                sock.close()
+            except OSError:
+                pass
+            continue
+        tls.settimeout(up.timeout)  # restore the original send/response-read timeout
+        up.sock = tls
+        _ev("upstream_tls_done", seq=seq,
+            arg="addr=%d version=%s elapsed_ms=%d"
+                % (index, tls.version() or "?", int((time.monotonic() - started) * 1000)))
+        _ev("upstream_connect_done", seq=seq, arg="addr=%d" % index)
+        return
+    raise (last or TimeoutError("connect deadline exceeded"))
+
+
 def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: str) -> None:
     head, body = _read_headers(conn)
     lines = head.split("\r\n") if "\r\n" in head else head.split("\n")
@@ -436,6 +551,7 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         ctx = ssl.create_default_context()
         up = http.client.HTTPSConnection(url.hostname, url.port or 443, context=ctx, timeout=120)
     else:
+        ctx = None
         up = http.client.HTTPConnection(url.hostname, url.port or 80, timeout=120)
     fwd = {k: v for k, v in headers.items() if k not in ("host", "connection", "content-length", "authorization")}
     fwd["Host"] = url.hostname
@@ -461,12 +577,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
                _auth_format(credential)))
     try:
         _ev("upstream_req_start", seq=req_seq, arg=target)
-        # A diagnostic run separates TCP/TLS establishment from HTTP sending. Normally
-        # request() connects lazily; without a sink the original lazy path is unchanged.
-        if os.environ.get("AEGL_DIAG_DIR"):
-            _ev("upstream_connect_start", seq=req_seq)
-            up.connect()
-            _ev("upstream_connect_done", seq=req_seq)
+        # Bounded DNS -> TCP -> TLS under one monotonic deadline. The HTTP request is
+        # written only once connected, and is never retried or resent.
+        _connect_bounded(up, url.hostname, url.port or (443 if ctx is not None else 80), ctx, req_seq)
         up.request(method, target, body=body if body else None, headers=fwd)
         _ev("upstream_req_write_done", seq=req_seq, arg=target)
         resp = up.getresponse()
