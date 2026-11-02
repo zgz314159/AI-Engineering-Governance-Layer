@@ -80,12 +80,21 @@ def run_case(base, server, capture):
             text = events_file.read_text()
             events = [json.loads(line) for line in text.splitlines()]
             phases = [event['phase'] for event in events]
-            expected = ['broker_req_recv', 'upstream_req_start',
-                        'upstream_connect_start', 'upstream_connect_done',
-                        'upstream_req_write_done', 'upstream_resp_headers',
-                        'upstream_body_read_done', 'client_handoff_done']
+            expected = ['credential_source', 'broker_req_recv', 'request_meta',
+                        'upstream_req_start', 'upstream_connect_start',
+                        'upstream_dns_done', 'upstream_tcp_start', 'upstream_tcp_done',
+                        'upstream_connect_done', 'upstream_req_write_done',
+                        'upstream_resp_headers', 'upstream_body_read_done',
+                        'client_handoff_done']
             assert phases == expected, phases
-            assert {event['seq'] for event in events} == {1}
+            # the startup event is process-scoped: no request sequence number
+            assert 'seq' not in events[0], events[0]
+            assert {e['seq'] for e in events if 'seq' in e} == {1}
+            assert {event.get('task') for event in events} == {'LOCAL_CONNECT_CHECK'}
+            # plain-http upstream: one address, TCP only, no TLS stage
+            assert not any(p.startswith('upstream_tls_') for p in phases), phases
+            tcp_done = [e for e in events if e['phase'] == 'upstream_tcp_done']
+            assert len(tcp_done) == 1 and tcp_done[0]['arg'].startswith('addr=0 family=IPv4 '), tcp_done
             assert 'LOCAL_TEST_ONLY' not in text
             assert 'messages' not in text and 'Authorization' not in text
         else:
