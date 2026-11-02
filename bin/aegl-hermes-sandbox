@@ -34,15 +34,19 @@ SETPRIV="/usr/bin/setpriv"
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'BLOCKED: %s\n' "$*" >&2; exit 1; }
 
-TASK=""; INFO_FD=""; HERMES_ARGS=()
+TASK=""; INFO_FD=""; HERMES_ARGS=(); CHECK_CMD=""; CHECK_BASELINE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --task) TASK="${2:-}"; shift 2 ;;
     --info-fd) INFO_FD="${2:-}"; shift 2 ;;
+    --check) CHECK_CMD="${2:-}"; shift 2 ;;
+    --check-baseline) CHECK_BASELINE=1; shift ;;
     --) shift; HERMES_ARGS=("$@"); break ;;
     *) die "unknown option: $1" ;;
   esac
 done
+[ -z "$CHECK_CMD" ] || [ "${#HERMES_ARGS[@]}" -eq 0 ] || die "--check takes no hermes args"
+[ -z "$CHECK_BASELINE" ] || [ -n "$CHECK_CMD" ] || die "--check-baseline requires --check"
 [ "$(id -u)" = 0 ] || die "must run as root (to prepare mounts and drop to $AI_USER)"
 case "$TASK" in ""|*[!A-Za-z0-9._-]*) die "restricted task_id required" ;; esac
 [ "${#TASK}" -le 64 ] || die "task_id too long"
@@ -73,6 +77,8 @@ done
 # sink dir is NEVER removed here; the trusted driver refuses to start if one already exists.
 DIAG_ROOT=/var/tmp/aegl-diag
 DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 "
+# a no-model check run must never append to the task's diagnostic sink
+[ -n "$CHECK_CMD" ] && DIAG_ENABLED_TASKS=" "
 DIAG_DIR=""
 diag_ev(){ :; }
 case "$DIAG_ENABLED_TASKS" in
@@ -282,6 +288,17 @@ chown -R root:"$AI_GROUP" "$RUN/stage"; chmod -R g+rX,o-rwx "$RUN/stage"
 chmod 0755 "$SK" "$SK/.hermes" "$SK/.hermes/profiles" "$SK/.hermes/profiles/android-stack" "$SK/.local/bin" "$RUN/stage/run-aegl" "$SK$(dirname "${GUARD_DEST#/home/zhong}")"
 
 # --- in-sandbox runner -------------------------------------------------------- #
+if [ -n "$CHECK_CMD" ]; then
+  # no-model check: the SAME mounts and the SAME identity drop, no shim, no model call
+  cat > "$RUN/sandbox-run.sh" <<EOF
+#!/bin/bash
+set -u
+$CHECK_CMD
+rc=\$?
+printf 'SANDBOX_CHECK_RC=%s\n' "\$rc"
+exit \$rc
+EOF
+else
 cat > "$RUN/sandbox-run.sh" <<EOF
 #!/bin/bash
 python3 '$SHIM' --listen 127.0.0.1:$PORT --unix '$SOCK' >/dev/null 2>&1 &
@@ -290,6 +307,7 @@ shim=\$!; sleep 0.6
 kill \$shim 2>/dev/null
 exit \$rc
 EOF
+fi
 chmod 0755 "$RUN/sandbox-run.sh"
 
 # --- bwrap spec (root mounts, no userns) + trusted drop entry ------------------ #
@@ -343,6 +361,17 @@ ST="$RUN/runstate"; mkdir -p "$ST/home-sessions" "$ST/home-logs" "$ST/home-cache
 chown -R "$AI_USER":"$AI_GROUP" "$ST"
 
 
+# --- Git metadata: real Git plus the trusted registration decide the paths, never the raw
+# gitfile text. The shared metadata is mounted READ-ONLY; only THIS task's worktree admin
+# gets a writable per-task view, and the host admin dir is never written. ----------------- #
+GIT_MOUNTS=()
+GIT_META_HELPER="$(pick git_meta_mounts.sh)"
+[ -f "$GIT_META_HELPER" ] || die "git metadata helper missing: $GIT_META_HELPER"
+GIT_MOUNTS_RAW="$("$GIT_META_HELPER" "$WT_R" "$RUN/gitadmin" "$PROJ" ${CHECK_BASELINE:+--baseline})" \
+  || die "git metadata mapping failed for $WT_R"
+while IFS= read -r m; do [ -n "$m" ] && GIT_MOUNTS+=("$m"); done <<< "$GIT_MOUNTS_RAW"
+say "  git metadata: ${#GIT_MOUNTS[@]} mount(s)${CHECK_BASELINE:+ (baseline: intentionally none)}"
+
 MOUNTS=()
 # install state (writable view is a fixed spec element); the generation content is read-only
 for d in venv workspace; do
@@ -365,6 +394,7 @@ MOUNTS+=("bind:$ST/home-sessions:/home/zhong/.hermes/sessions")
 MOUNTS+=("bind:$ST/home-logs:/home/zhong/.hermes/logs")
 MOUNTS+=("bind:$ST/home-cache:/home/zhong/.hermes/cache")
 MOUNT_ARGS=(); for m in "${MOUNTS[@]}"; do MOUNT_ARGS+=(--mount "$m"); done
+for m in "${GIT_MOUNTS[@]}"; do MOUNT_ARGS+=(--mount "$m"); done
 
 python3 "$SPEC_PY" --bwrap "$BWRAP" --uid "$AI_UID" --gid "$AI_GID" --run "$RUN" \
   --wt "$WT_R" --scr "$SCR_R" --runtime "$SRC/runtime" --tools "$SRC/tools" \

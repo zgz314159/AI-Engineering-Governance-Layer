@@ -454,6 +454,42 @@ stage_permissions() {
   say "ACL_OK admin=$gitdir (rwX) objects/refs=$commondir (rX) task-root-traverse=$AI_USER,$OPERATOR target-acl-effective=$TASK_ROOT,$commondir (reachability proven only by probe)"
 }
 
+# --- in-sandbox Git metadata check (no model, no send, no shim) ------------------------ #
+# The host-side probe below cannot see this: the sandbox overlays /home/zhong with a
+# skeleton, so unless the worktree's Git metadata is re-mounted Git cannot resolve HEAD.
+sandbox_check_cmd() {
+  cat <<'CHK'
+common="$(git rev-parse --git-common-dir 2>&1)"; printf 'COMMON=%s\n' "$common"
+out="$(git rev-parse HEAD 2>&1 | head -c 400)"; rc=${PIPESTATUS[0]}
+printf 'REV_PARSE_HEAD=%s\n' "$out"; printf 'REV_PARSE_RC=%s\n' "$rc"
+git status --porcelain >/dev/null 2>&1; printf 'STATUS_RC=%s\n' "$?"
+if touch "$common/.aegl_probe" 2>/dev/null; then printf 'WRITE_core=ALLOWED\n'; else printf 'WRITE_core=DENIED\n'; fi
+if touch "$common/refs/.aegl_probe" 2>/dev/null; then printf 'WRITE_refs=ALLOWED\n'; else printf 'WRITE_refs=DENIED\n'; fi
+if touch "$common/objects/.aegl_probe" 2>/dev/null; then printf 'WRITE_objects=ALLOWED\n'; else printf 'WRITE_objects=DENIED\n'; fi
+if (printf '' >> "$common/config") 2>/dev/null; then printf 'WRITE_config=ALLOWED\n'; else printf 'WRITE_config=DENIED\n'; fi
+exit "$rc"
+CHK
+}
+
+sandbox_git_check() {
+  local cmd_file="$LEDGER/sandbox-git-check.cmd" out rc=0
+  sandbox_check_cmd > "$cmd_file" || die probe_sandbox_cmd "$cmd_file"
+  out="$( "$SANDBOX_BIN" --task "$TASK_ID" --check "$(cat "$cmd_file")" 2>&1 )" || rc=$?
+  printf '%s\n' "$out" > "$LEDGER/sandbox-git-check.out"
+  printf '%s\n' "$out" | grep -E '^(COMMON=|REV_PARSE_HEAD=|REV_PARSE_RC=|STATUS_RC=|WRITE_)' || true
+  printf '%s\n' "$out" | grep -qxF 'REV_PARSE_RC=0' \
+    || die probe_sandbox_rev_parse "rc=$rc $(printf '%s\n' "$out" | grep -E '^(COMMON=|REV_PARSE_)' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF "REV_PARSE_HEAD=$EXPECT_BASE" \
+    || die probe_sandbox_head "$(printf '%s\n' "$out" | grep '^REV_PARSE_HEAD=' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'STATUS_RC=0' || die probe_sandbox_status "rc=$rc"
+  local k
+  for k in core refs objects config; do
+    printf '%s\n' "$out" | grep -qxF "WRITE_$k=DENIED" \
+      || die probe_sandbox_write "$k writable inside the sandbox"
+  done
+  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata=read-only"
+}
+
 stage_probe() {
   require_root
   local gitdir commondir base st head
@@ -484,7 +520,9 @@ stage_probe() {
   if ai_access w "$commondir/config"; then die probe_config "config writable"; fi
   if ai_access w "$commondir/objects"; then die probe_objects "object DB writable"; fi
   if ai_access w "$IAP"; then die probe_formal "$IAP writable"; fi
-  say "PROBE_OK traverse/read/write(worktree,scratch)/git=HEAD+status; formal refs/config/objects/tree read-only (access(2), ACL-aware)"
+  # same identity, same worktree — but inside the REAL sandbox mounts, not on the host
+  sandbox_git_check
+  say "PROBE_OK traverse/read/write(worktree,scratch)/git=HEAD+status; formal refs/config/objects/tree read-only (access(2), ACL-aware); in-sandbox git metadata OK"
 }
 
 stage_contract() {
