@@ -41,11 +41,14 @@ SANDBOX_BIN="$SANDBOX_DIR/aegl-hermes-sandbox"
 SANDBOX_PAYLOAD="$PKG/payload/aegl-hermes-sandbox"
 SANDBOX_BEFORE_SHA="06aab45259a1fe2e220260dc962137c227468e49f5d6027cfb9fc534380ee41a"
 SANDBOX_AFTER_SHA="70de6baae488a45f15bf83e280300bfeecd6694549b9ecc028ba81a7d8542932"
-SANDBOX_ALLOWLIST='DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-005 "'
+SANDBOX_ALLOWLIST='DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 IAP-SMOKE-005 "'
 # The broker is NOT touched by this package: it must already be the reviewed candidate.
 BROKER_BIN="$SANDBOX_DIR/model_broker.py"
 BROKER_SHA="ab0d4c36cb27f1b23cc1510f3650f10df8375dd72db4078eb2a99ad41d93c3e3"
 EXPECT_COMMON="/home/zhong/AndroidStudioProjects/ImageAnalysisFactory/.git"
+EXPECT_HELPER_SHA="f93bbfdd286e6a554c10edcdda6dd40a20d32d1ffbcb17dc56091bbeac8ac50a"
+EXPECT_BRIDGE_SEQ="9"
+REGISTRY="${REGISTRY:-/var/lib/aegl-model/registry.json}"
 # whitelisted diagnostic summary (metadata only; the raw arg is never printed)
 DIAG_SINK_DIR="/var/tmp/aegl-diag/$TASK_ID"
 DIAG_HELPER="$PKG/bin/iap_diag_summary.py"
@@ -90,6 +93,8 @@ op_py_env() {
 #     evaluate with os.access as the dropped identity instead.
 AI_USER="aegl-ai"
 AI_HOME="/home/aegl-ai"
+AI_GROUP="$(id -gn "$AI_USER" 2>/dev/null)" || die ai_group "cannot resolve group of $AI_USER"
+[ -n "$AI_GROUP" ] || die ai_group "empty group for $AI_USER"
 AI_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ai_uid() { id -u "$AI_USER"; }
 ai_gid() { id -g "$AI_USER"; }
@@ -245,8 +250,12 @@ diag_summary() { # <events.jsonl>
 # --- the ONLY deployed change: add this task to the sandbox diagnostic allowlist ------- #
 deployed_hashes(){ # hashes of the OTHER installed aegl-model files (must not change)
   local f
-  for f in aegl-model-broker aegl-model-config model_broker.py capture_evidence.py diag_events.py bind_fd_exec.py; do
-    [ -f "$SANDBOX_DIR/$f" ] && sha256sum "$SANDBOX_DIR/$f"
+  for f in aegl-model-broker aegl-model-config model_broker.py git_meta_mounts.sh \
+           capture_evidence.py diag_events.py bind_fd_exec.py sandbox_spec.py prepare_targets.py \
+           exec_spec.py drop_verify.py loopback_shim.py model_config.py guard_hook_client.py \
+           guard/contract_guard.py; do
+    [ -f "$SANDBOX_DIR/$f" ] || die deployed_missing "$SANDBOX_DIR/$f"
+    sha256sum "$SANDBOX_DIR/$f"
   done
 }
 
@@ -254,6 +263,21 @@ stage_sandbox_diag() {
   require_root
   [ -f "$SANDBOX_PAYLOAD" ] || die sandbox_payload "missing payload: $SANDBOX_PAYLOAD"
   [ -f "$SANDBOX_BIN" ] || die sandbox_bin "missing installed sandbox: $SANDBOX_BIN"
+  # BEFORE any replacement: the candidate must be the approved payload AND carry EXACTLY the
+  # expected allowlist (all existing entries kept, only IAP-SMOKE-005 added).
+  local ph
+  ph="$(sha256sum "$SANDBOX_PAYLOAD" | awk '{print $1}')"
+  [ "$ph" = "$SANDBOX_AFTER_SHA" ] || die sandbox_payload_hash "$ph != $SANDBOX_AFTER_SHA"
+  grep -qxF -- "$SANDBOX_ALLOWLIST" "$SANDBOX_PAYLOAD" \
+    || die sandbox_payload_allowlist "candidate does not carry exactly: $SANDBOX_ALLOWLIST"
+  # the Git-metadata helper must already be deployed, exactly, and not a symlink
+  [ -f "$SANDBOX_DIR/git_meta_mounts.sh" ] || die helper_missing "$SANDBOX_DIR/git_meta_mounts.sh"
+  [ ! -L "$SANDBOX_DIR/git_meta_mounts.sh" ] || die helper_symlink "$SANDBOX_DIR/git_meta_mounts.sh"
+  [ "$(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')" = "$EXPECT_HELPER_SHA" ] \
+    || die helper_hash "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh") $(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')"
+  [ "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")" = "root:root 755" ] \
+    || die helper_mode "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")"
+  [ "$(sha256sum "$BROKER_BIN" | awk '{print $1}')" = "$BROKER_SHA" ] || die broker_unknown "$BROKER_BIN"
   local before after snap_before snap_after
   before="$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
   say "SANDBOX_BEFORE=$before"
@@ -346,47 +370,20 @@ baseline_state() { # ABSENT | ZHONG_EMPTY_INIT | ROOT_EMPTY_INIT | HAS_COMMIT | 
 }
 
 stage_baseline() {
-  local st; st="$(baseline_state)"
-  say "BASELINE_STATE=$st"
-  case "$st" in
-    ROOT_EMPTY_INIT) die git_meta_root_owned "run --stage repair-git-owner (scoped to .git) before baseline" ;;
-    UNKNOWN) die baseline_unknown "unexpected .git state; refusing init/add/commit" ;;
-    HAS_COMMIT)
-      local files dirty
-      files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
-      dirty="$(op_git status --porcelain)"
-      [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
-      [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
-      say "BASELINE_EXISTS_OK commit=$(op_git rev-parse HEAD) tracked=1"
-      return 0 ;;
-    ABSENT|ZHONG_EMPTY_INIT)
-      local id n e
-      id="$(op_git_id)"; n="$(sed -n '1p' <<< "$id")"; e="$(sed -n '2p' <<< "$id")"
-      if [ "$st" = ABSENT ]; then op_git init -q -b main || die git_init "$IAP"; fi
-      op_git -c user.name="$n" -c user.email="$e" add -- "$PLAN_FILE" || die git_add "$PLAN_FILE"
-      op_git -c user.name="$n" -c user.email="$e" commit -q -m "IAP baseline: plan only" || die git_commit
-      local files; files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
-      [ "$files" = "$PLAN_FILE" ] || die baseline_scope "tracked=$files"
-      say "BASELINE_OK author=$n commit=$(op_git rev-parse HEAD) tracked=1" ;;
-  esac
-}
-
-stage_repair_git_owner() { # root: scoped repair of THIS run's root-created empty init
   require_root
-  local gitd="$IAP/.git" objects refs extra
-  [ -d "$gitd" ] || die repair_absent "$gitd"
-  [ ! -L "$gitd" ] || die repair_symlink "$gitd"
-  [ "$(stat -c '%U' "$gitd")" = root ] || die repair_not_root_owned "$(stat -c '%U' "$gitd")"
-  objects="$(find "$gitd/objects" -type f 2>/dev/null | wc -l)"
-  refs="$(ls -A "$gitd/refs/heads" 2>/dev/null | wc -l)"
-  [ "$objects" -eq 0 ] || die repair_objects "objects=$objects (not an empty init)"
-  [ "$refs" -eq 0 ] || die repair_refs "refs/heads non-empty"
-  [ ! -e "$gitd/index" ] || die repair_index "index exists"
-  [ ! -e "$gitd/logs" ] || die repair_logs "logs exist"
-  extra="$(find "$IAP" -mindepth 1 -maxdepth 1 ! -name .git ! -name "$PLAN_FILE" -print -quit)"
-  [ -z "$extra" ] || die repair_tree "unexpected member: $extra"
-  chown -R "$OPERATOR:$OPERATOR" "$gitd" || die repair_chown
-  say "REPAIR_OK scope=$gitd owner=$OPERATOR (no delete/reset/clean; business tree untouched)"
+  # VERIFY ONLY. This entry never initialises, adds, commits or repairs anything: an
+  # unexpected state stops the run so the operator can look at it.
+  local st files dirty head
+  st="$(baseline_state)"
+  say "BASELINE_STATE=$st"
+  [ "$st" = HAS_COMMIT ] || die baseline_unexpected "$st (this entry never creates or repairs a baseline)"
+  files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+  [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
+  dirty="$(op_git status --porcelain)"
+  [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
+  head="$(op_git rev-parse HEAD)"
+  [ "$head" = "$EXPECT_BASE" ] || die baseline_head "$head != $EXPECT_BASE"
+  say "BASELINE_VERIFIED commit=$head tracked=1 clean=1"
 }
 
 stage_worktree() {
@@ -441,6 +438,56 @@ stage_permissions() {
   op_access r "$WORKTREE" || die need_read "$OPERATOR needs r on $WORKTREE"
   printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
   say "PERMISSIONS_OK existing-access-only task-root-traverse=$AI_USER,$OPERATOR formal-git-metadata=untouched (no ACL added to $commondir)"
+}
+
+# --- live state acceptance: NEVER skipped by a done marker ----------------------------- #
+registry_fields_ok() { # <path> <task> -> 0 only when all FOUR fields match exactly
+  local reg="${REGISTRY:-$REGISTRY_PATH}" task="$1" want wt scr proj con got
+  want="$(python3 - "$reg" "$task" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[1], encoding="utf-8"))
+e = reg.get(sys.argv[2]) or {}
+print("\n".join(str(e.get(k) or "") for k in ("worktree", "scratch", "project", "contract_package")))
+PY
+)" || return 1
+  got="$(printf '%s\n%s\n%s\n%s\n' "$TASK_ROOT/project" "$SCRATCH" "$IAP" "$PKG_DEST")"
+  [ "$want" = "$got" ] || { REGISTRY_DIFF="wanted=[$got] registry=[$want]"; return 1; }
+  return 0
+}
+
+verify_live_state() {
+  require_root
+  # 005's own scene, verified field by field — never trusted from a marker
+  [ -d "$TASK_ROOT" ] && [ ! -L "$TASK_ROOT" ] || die live_task_root "$TASK_ROOT"
+  [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] || die live_worktree "$WORKTREE"
+  [ -d "$SCRATCH" ] && [ ! -L "$SCRATCH" ] || die live_scratch "$SCRATCH"
+  gitdir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '1p')"
+  commondir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '2p')"
+  [ -n "$gitdir" ] && [ -n "$commondir" ] || die live_paths "no recorded git paths"
+  [ -f "$TASK_ROOT/PREP-BINDING.json" ] || die live_binding_missing "$TASK_ROOT/PREP-BINDING.json"
+  /usr/bin/python3 - "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$PKG_DEST" <<'PY' \
+    || die live_binding_mismatch "$TASK_ROOT/PREP-BINDING.json (refusing to overwrite)"
+import json, os, sys
+b = json.load(open(sys.argv[1], encoding="utf-8"))
+if os.path.realpath(b.get("worktree", "")) != os.path.realpath(sys.argv[2]):
+    sys.exit("worktree")
+if os.path.realpath(b.get("contract_package", "")) != os.path.realpath(sys.argv[3]):
+    sys.exit("contract_package")
+PY
+  [ -f "$PKG_DEST/implementation-contract.json" ] || die live_contract_missing "$PKG_DEST"
+  [ -f "$PKG_DEST/manifest.json" ] || die live_contract_manifest "$PKG_DEST"
+  [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+    || die live_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+  local rf="ok"
+  registry_fields_ok "$TASK_ID" || rf="$REGISTRY_DIFF"
+  [ "$rf" = "ok" ] || die live_registry "$rf"
+  [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die live_evidence "$WORKTREE/EVIDENCE.txt exists (prep must not create it)"
+  say "LIVE_STATE_OK registry=4/4 contract=binding=$EXPECT_MANIFEST_SHA evidence=absent"
+}
+
+bridge_ok() { # 0 only for the expected live Bridge state
+  [ "$(chain_now)" = "status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT" ] || return 1
+  return 0
 }
 
 # --- in-sandbox Git metadata check (no model, no send, no shim) ------------------------ #
@@ -660,7 +707,7 @@ stage_accept() {
   say "ACCEPT_EVIDENCE_OK sha256=$(sha256sum "$WORKTREE/EVIDENCE.txt" | awk '{print $1}')"
 }
 
-PREP_STAGES=(preflight sandbox_diag baseline worktree permissions contract binding register ready probe)
+PREP_STAGES=(preflight sandbox_diag baseline worktree permissions contract binding register probe ready)
 EXEC_STAGES=(send wait round accept)
 main() {
   set -Eeuo pipefail
@@ -680,7 +727,15 @@ main() {
     if done_marker "$s"; then say "SKIP $s (done)"; continue; fi
     CURRENT_STAGE="$s"; "stage_${s//-/_}"; mark "$s"
   done
-  if [ "$mode" = prep ]; then say "PREP_COMPLETE (no model called, nothing sent)"; fi
+  if [ "$mode" = prep ]; then
+    verify_live_state
+    bridge_ok || die bridge_before_prep "$(chain_now)"
+    [ "$(cat "$LEDGER/chain.at_ready" 2>/dev/null)" = "$(chain_now)" ] \
+      || die chain_changed_during_prep "$(chain_now) != $(cat "$LEDGER/chain.at_ready" 2>/dev/null)"
+    [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_created "prep must never create EVIDENCE.txt"
+    say "BRIDGE_OK status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT unchanged_during_prep=1"
+    say "PREP_COMPLETE (live state verified; no model called, nothing sent, no EVIDENCE.txt)"
+  fi
 }
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   main "$@"
