@@ -125,11 +125,6 @@ op_access() { # <r|w|x> <path> -> rc 0 when $OPERATOR may access <path>
   local mode="$1" path="$2"
   as_op /usr/bin/python3 -I -c "$_ACCESS_PY" "$mode" "$path" >/dev/null 2>&1
 }
-# The ONLY production permission change this driver may make: grant the sandbox
-# identity traverse (x only) on the single directory the linked-worktree common dir
-# sits under. It is NOT a generic "grant anything unreachable" fix — any other blocked
-# ancestor is reported as a precise breakpoint and the run stops.
-TRAVERSE_APPROVED="/home/zhong"
 
 # Read-only: first ancestor directory (root downward) the sandbox identity cannot
 # traverse, or nothing when the whole chain is walkable.
@@ -145,12 +140,10 @@ chain_blocker() { # <path> -> prints the first blocking dir, or nothing
   done
 }
 
-# Apply the one approved change to $TRAVERSE_APPROVED, preserving the existing mask and
 # every other entry. Refuses on any surprise (missing/odd mask, conflicting entry,
 # non-directory or symlink) instead of expanding access, and proves afterwards that the
 # ONLY difference is the added aegl-ai x entry.
 grant_approved_traverse() {
-  local d="$TRAVERSE_APPROVED" mask cur before after b2 a2 n
   [ -d "$d" ] && [ ! -L "$d" ] || die traverse_target_bad "$d"
   mask="$(getfacl -p "$d" 2>/dev/null | awk -F: '/^mask::/{print $3}')"
   [ -n "$mask" ] || die traverse_mask_missing "$d (no ACL mask; refusing to add one)"
@@ -171,24 +164,6 @@ grant_approved_traverse() {
 }
 
 # Read-only walk of a required target's full ancestor chain. The ONLY directory that may
-# be changed is $TRAVERSE_APPROVED, and only once; any other blocker stops the run.
-ensure_required_traverse() { # <required-path>
-  local target="$1" p cur part; local -a parts=()
-  p="$(realpath -e "$target")" || die traverse_target "$target"
-  IFS=/ read -r -a parts <<< "${p#/}"
-  cur=""
-  for part in "${parts[@]}"; do
-    [ -n "$part" ] || continue
-    cur="$cur/$part"
-    ai_access x "$cur" && continue
-    if [ "$cur" = "$TRAVERSE_APPROVED" ]; then
-      grant_approved_traverse
-      ai_access x "$cur" || die traverse_verify "$cur"
-      continue
-    fi
-    die traverse_blocked "$cur (unapproved ancestor blocks; target=$target)"
-  done
-}
 
 operator_state_path() {
   op_py 'import sys;sys.path.insert(0,sys.argv[1]);import bridge_state;print(bridge_state.state_dir())' "$STACK_BRIDGE"
@@ -278,6 +253,10 @@ stage_sandbox_diag() {
   [ "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")" = "root:root 755" ] \
     || die helper_mode "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")"
   [ "$(sha256sum "$BROKER_BIN" | awk '{print $1}')" = "$BROKER_SHA" ] || die broker_unknown "$BROKER_BIN"
+  [ ! -e "$SANDBOX_BIN.new" ] \
+    || die sandbox_staging "$SANDBOX_BIN.new exists (unknown staged content; refusing to overwrite)"
+  [ ! -e "$SANDBOX_DIR/git_meta_mounts.sh.new" ] \
+    || die helper_staging "$SANDBOX_DIR/git_meta_mounts.sh.new exists (unknown staged content)"
   local before after snap_before snap_after
   before="$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
   say "SANDBOX_BEFORE=$before"
@@ -302,6 +281,8 @@ stage_sandbox_diag() {
 
 stage_preflight() {
   say "[preflight] baseline state / evidence / stack / state path"
+  # no write of any kind may happen before the live Bridge is the expected one
+  bridge_ok || die bridge_before_writes "$(chain_now)"
   local st files dirty
   st="$(baseline_state)"
   say "PREFLIGHT_BASELINE_STATE=$st"
