@@ -4,7 +4,9 @@
 # Calls the REAL functions of the frozen driver. No real Bridge write, no 005 prep, no model.
 set -uo pipefail
 
-D="$(cd "$(dirname "$0")/.." && pwd)/iap_smoke_delivery_005.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+D="$HERE/../bin/run_smoke.sh"          # frozen-package layout
+[ -f "$D" ] || { echo "MISSING $D (run the suite from a staged package copy)"; exit 1; }
 T="$(mktemp -d /var/tmp/aegl-005-tests.XXXXXX)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 ok() { pass=$((pass + 1)); printf 'PASS %s\n' "$1"; }
@@ -15,6 +17,8 @@ export SMOKE_ALLOW_NONROOT=1 LEDGER="$T/ledger"
 mkdir -p "$LEDGER"
 # shellcheck disable=SC1090
 source "$D" || { echo SOURCE_FAILED; exit 1; }
+# as_op drops to the operator, so it must be able to traverse/read THIS temp dir only
+if [ "$(id -u)" -eq 0 ]; then chmod 0755 "$T"; mkdir -p "$T/bridge"; chmod 0755 "$T/bridge"; fi
 
 # --- fixtures: real state.json / pending / registry, under $T ---------------------------
 BRIDGE_DIR="$T/bridge"; mkdir -p "$BRIDGE_DIR"
@@ -108,6 +112,24 @@ grep -q 'chain.before_prep' "$D" && ok prep_start_snapshot_used || no "no prep-s
 # 6. removed legacy code / baseline verify-only -------------------------------------------
 ! grep -q 'grant_approved_traverse\|TRAVERSE_APPROVED' "$D" && ok legacy_traversal_gone || no "legacy traversal code present"
 ! grep -qE 'op_git (init|add|commit)|stage_repair_git_owner' "$D" && ok baseline_verify_only || no "baseline create/repair present"
+
+# 7. root-only: verify_live_state rejects bad binding commit / mode / symlink -----------------
+if [ "$(id -u)" -eq 0 ]; then
+  S="$T/scene"; mkdir -p "$S/wt" "$S/pkg" "$S/scratch" "$S/ledger"; : > "$S/ledger/chain.before_prep"
+  git -C "$S/wt" init -q -b main 2>/dev/null; git -C "$S/wt" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
+  TASK_ROOT="$S"; WORKTREE="$S/wt"; SCRATCH="$S/scratch"; LEDGER="$S/ledger"; PKG_DEST="$S/pkg"
+  printf 'anchor=x\n' > "$S/pkg/manifest.json"
+  cp "$S/pkg/manifest.json" "$S/pkg/keep.json"
+  printf '{"worktree":"%s","commit":"%s","contract_package":"%s"}\n' "$S/wt" "$EXPECT_BASE" "$S/pkg" > "$S/PREP-BINDING.json"
+  chmod 0644 "$S/PREP-BINDING.json"
+  runs verify_live_state && no "verify_live_state accepted a wrong commit" || ok live_rejects_wrong_commit
+  ln -sf "$S/PREP-BINDING.json" "$S/link.json"
+  runs binding_accept "$S/link.json" "$S/wt" "$EXPECT_BASE" "$S/pkg" && no "symlink accepted" || ok live_rejects_symlink
+  chmod 0666 "$S/PREP-BINDING.json"
+  runs binding_accept "$S/PREP-BINDING.json" "$S/wt" "$EXPECT_BASE" "$S/pkg" && no "bad mode accepted" || ok live_rejects_bad_mode
+else
+  printf 'NOT_RUN verify_live_state rejection cases (needs root)\n'
+fi
 
 printf 'FIXTURES pass=%d fail=%d\n' "$pass" "$fail"
 exit "$fail"

@@ -275,7 +275,9 @@ stage_preflight() {
     chain_now > "$LEDGER/chain.before_prep" || die snapshot_write
     say "CHAIN_SNAPSHOT_SAVED $(cat "$LEDGER/chain.before_prep")"
   fi
-  if [ -e "$TASK_ROOT" ] || [ -e "$WORKTREE" ]; then verify_live_state; fi
+  # ANY pre-existing 005 artifact must be verified before it is modified: the contract,
+  # registry, binding and ledger live OUTSIDE the task root, so their presence alone counts.
+  verify_existing_scene
   local st files dirty
   st="$(baseline_state)"
   say "PREFLIGHT_BASELINE_STATE=$st"
@@ -430,6 +432,39 @@ PY
   return 0
 }
 
+verify_existing_scene() { # every already-present 005 artifact, wherever it lives
+  require_root
+  local any=0
+  if [ -e "$PKG_DEST" ]; then
+    any=1
+    [ -f "$PKG_DEST/manifest.json" ] || die existing_contract "$PKG_DEST"
+    [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+      || die existing_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+    /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die existing_contract_members "$PKG_DEST"
+import hashlib, json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+for e in m.get("entries", []):
+    f = os.path.join(sys.argv[1], e["path"])
+    if not os.path.isfile(f) or hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
+        sys.exit("bad %s" % e["path"])
+MEMPYP
+  fi
+  if [ -f "$REGISTRY" ] && python3 - "$REGISTRY" "$TASK_ID" <<'PY'
+import json, sys
+sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1], encoding="utf-8")) else 1)
+PY
+  then any=1; registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"; fi
+  if [ -e "$TASK_ROOT/PREP-BINDING.json" ]; then
+    any=1
+    binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
+  fi
+  if [ -d "$LEDGER" ]; then
+    any=1
+    [ -f "$LEDGER/chain.before_prep" ] || die existing_ledger "$LEDGER (no prep-start snapshot)"
+  fi
+  [ "$any" -eq 0 ] && say "EXISTING_SCENE=none (first prep)" || say "EXISTING_SCENE_VERIFIED"
+}
+
 verify_live_state() {
   require_root
   # 005's own scene, verified field by field — never trusted from a marker
@@ -444,7 +479,13 @@ verify_live_state() {
   case "$cq" in /*) : ;; *) cq="$WORKTREE/$cq" ;; esac
   [ "$(realpath -e "$cq")" = "$commondir" ] || die live_commondir_changed
   [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] || die live_head
-  [ -z "$(op_git status --porcelain)" ] || die live_dirty
+  # the 005 worktree's OWN clean state, keeping Git's real exit code
+  local st sterr="$LEDGER/live.status.err" src=0
+  st="$(ctl_git "$WORKTREE" status --porcelain 2>"$sterr")" || src=$?
+  [ "$src" -eq 0 ] || die live_status_rc "rc=$src $(head -c 400 "$sterr" | tr '\n' ' ')"
+  [ -z "$st" ] || die live_worktree_dirty "005 worktree is dirty: $st"
+  # the formal IAP tree stays a SEPARATE, independent check
+  [ -z "$(op_git status --porcelain)" ] || die live_formal_dirty "formal IAP tree is dirty"
   /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die live_contract_members "$PKG_DEST"
 import hashlib, json, os, sys
 m = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
@@ -455,16 +496,8 @@ for e in m.get("entries", []):
     if hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
         sys.exit("hash %s" % e["path"])
 MEMPYP
-  [ -f "$TASK_ROOT/PREP-BINDING.json" ] || die live_binding_missing "$TASK_ROOT/PREP-BINDING.json"
-  /usr/bin/python3 - "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$PKG_DEST" <<'PY' \
-    || die live_binding_mismatch "$TASK_ROOT/PREP-BINDING.json (refusing to overwrite)"
-import json, os, sys
-b = json.load(open(sys.argv[1], encoding="utf-8"))
-if os.path.realpath(b.get("worktree", "")) != os.path.realpath(sys.argv[2]):
-    sys.exit("worktree")
-if os.path.realpath(b.get("contract_package", "")) != os.path.realpath(sys.argv[3]):
-    sys.exit("contract_package")
-PY
+  # the ONE acceptor: content, owner, mode, non-symlink, and all three fields
+  binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
   [ -f "$PKG_DEST/implementation-contract.json" ] || die live_contract_missing "$PKG_DEST"
   [ -f "$PKG_DEST/manifest.json" ] || die live_contract_manifest "$PKG_DEST"
   [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
