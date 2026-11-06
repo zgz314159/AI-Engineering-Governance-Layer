@@ -468,7 +468,7 @@ MEMPYP
   fi
   if [ -e "$REGISTRY" ]; then
     local has=0
-    python3 - "$REGISTRY" "$TASK_ID" <<'PY'
+    if python3 - "$REGISTRY" "$TASK_ID" <<'PY'
 import json, sys
 try:
     reg = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -476,7 +476,11 @@ except Exception as exc:
     sys.stderr.write("%s: %s\n" % (type(exc).__name__, exc)); sys.exit(2)
 sys.exit(0 if sys.argv[2] in reg else 1)
 PY
-    has=$?
+    then
+      has=0
+    else
+      has=$?
+    fi
     if [ "$has" -eq 0 ]; then
       any=1
       registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"
