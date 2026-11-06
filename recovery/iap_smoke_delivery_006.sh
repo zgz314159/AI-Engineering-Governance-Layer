@@ -67,7 +67,32 @@ require_root() { if [ "${SMOKE_ALLOW_NONROOT:-0}" != 1 ] && [ "$(id -u)" -ne 0 ]
 
 ANCHOR="$(sha256sum "$PKG/MANIFEST.sha256" 2>/dev/null | awk '{print $1}')"; ANCHOR="${ANCHOR:-NOMANIFEST}"
 mark() { mkdir -p "$LEDGER" || die ledger_dir "$LEDGER"; printf 'anchor=%s stage=%s\n' "$ANCHOR" "$1" > "$LEDGER/$1.done" || die ledger_write "$1"; }
-done_marker() { local f="$LEDGER/$1.done"; if [ ! -f "$f" ]; then return 1; fi; if [ "$(cat "$f")" != "anchor=$ANCHOR stage=$1" ]; then say "MARKER_STALE $1"; return 1; fi; return 0; }
+# --- approved continuation (IAP-SMOKE-006 only) ---------------------------------------
+# The approved predecessor prepared this exact scene through `register`. Only that
+# anchor, this task/scene and these stages may be reused; nothing is generic. The
+# predecessor package itself is re-verified member by member before any reuse.
+CONT_ANCHOR="1928f5ed5a01e4624e7ab1b4403ed683a32ad82d2966d584707105c821a77c99"
+CONT_REQUIRED_STAGES=" sandbox_diag baseline worktree permissions contract binding register "
+CONT_ACCEPT_STAGES=" preflight sandbox_diag baseline worktree permissions contract binding register "
+CONT_RECORD="$LEDGER/continuation.from"
+CONT_ACTIVE=0; CONT_PKG=""
+marker_stage_allowed() { case "$CONT_ACCEPT_STAGES" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+marker_anchor_ok() { # <file> <stage> — current anchor, or the approved old one for these stages
+  local f="$1" stage="$2"
+  [ -f "$f" ] || return 1
+  [ "$(cat "$f")" = "anchor=$ANCHOR stage=$stage" ] && return 0
+  if [ "$CONT_ACTIVE" = 1 ] && marker_stage_allowed "$stage" \
+     && [ "$(cat "$f")" = "anchor=$CONT_ANCHOR stage=$stage" ]; then
+    return 0
+  fi
+  return 1
+}
+done_marker() { local stage="$1" f="$LEDGER/$1.done"; [ -f "$f" ] || return 1; marker_anchor_ok "$f" "$stage" && return 0; say "MARKER_STALE $stage"; return 1; }
+continuation_record() {
+  printf 'predecessor=%s\npackage_anchor=%s\ntask=%s\ntask_root=%s\nworktree=%s\ncontract=%s\ncontract_package=%s\n' \
+    "$CONT_ANCHOR" "$ANCHOR" "$TASK_ID" "$TASK_ROOT" "$EXPECT_BASE" "$EXPECT_MANIFEST_SHA" "$PKG_DEST"
+}
+continuation_record_ok() { [ -f "$CONT_RECORD" ] && [ "$(cat "$CONT_RECORD")" = "$(continuation_record)" ]; }
 
 # --- operator-side execution (never root's HOME, never sudo -E) ------------------- #
 _op_env() { if [ "$(id -u)" -eq 0 ]; then printf 'runuser'; else printf 'direct'; fi; }
@@ -502,13 +527,74 @@ PY
     # an existing ledger without a prep-start snapshot is an abnormal scene: stop, never
     # backfill it here and then call the scene verified
     [ -f "$LEDGER/chain.before_prep" ] || die existing_ledger "$LEDGER exists without chain.before_prep"
+    local m stage
     for m in "$LEDGER"/*.done; do
       [ -e "$m" ] || continue
-      grep -q "^anchor=$ANCHOR stage=$(basename "$m" .done)$" "$m" \
-        || die existing_marker "$m is stale (unknown anchor/stage)"
+      stage="$(basename "$m" .done)"
+      marker_anchor_ok "$m" "$stage" || die existing_marker "$m is stale (unknown anchor/stage)"
     done
   fi
   [ "$any" -eq 0 ] && say "EXISTING_SCENE=none (first prep)" || say "EXISTING_SCENE_VERIFIED"
+}
+
+# --- restricted continuation from the approved predecessor ---------------------------- #
+# Only --continue-006 <approved-package>, only IAP-SMOKE-006, only the hardcoded old
+# anchor and the listed stages. Every check is read-only; nothing is re-created.
+continuation_preflight() {
+  require_root
+  [ "$CONT_ACTIVE" = 1 ] || return 0
+  [ "$TASK_ID" = "IAP-SMOKE-006" ] || die continuation_task "$TASK_ID"
+  [ -n "$CONT_PKG" ] && [ -d "$CONT_PKG" ] && [ ! -L "$CONT_PKG" ] \
+    || die continuation_package "${CONT_PKG:-missing}"
+  [ -f "$CONT_PKG/MANIFEST.sha256" ] || die continuation_manifest "$CONT_PKG/MANIFEST.sha256"
+  local got
+  got="$(sha256sum "$CONT_PKG/MANIFEST.sha256" | awk '{print $1}')"
+  [ "$got" = "$CONT_ANCHOR" ] || die continuation_anchor "$got != $CONT_ANCHOR"
+  ( cd "$CONT_PKG" && sha256sum -c --quiet MANIFEST.sha256 ) \
+    || die continuation_members "$CONT_PKG members do not match the approved anchor"
+  bridge_ok || die continuation_bridge "$(chain_now)"
+  [ -d "$LEDGER" ] || die continuation_ledger "$LEDGER"
+  [ -f "$LEDGER/chain.before_prep" ] || die continuation_snapshot "$LEDGER/chain.before_prep"
+  [ "$(cat "$LEDGER/chain.before_prep")" = "$(chain_now)" ] \
+    || die continuation_chain "$(cat "$LEDGER/chain.before_prep") != $(chain_now)"
+  local s f
+  for s in $CONT_REQUIRED_STAGES; do
+    f="$LEDGER/$s.done"
+    [ -f "$f" ] || die continuation_marker_missing "$s"
+    [ "$(cat "$f")" = "anchor=$CONT_ANCHOR stage=$s" ] \
+      || die continuation_marker "$s: $(cat "$f")"
+  done
+  [ ! -e "$DIAG_SINK_DIR" ] || die continuation_sink "$DIAG_SINK_DIR exists"
+  [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die continuation_evidence "$WORKTREE/EVIDENCE.txt exists"
+  [ -d "$TASK_ROOT" ] && [ ! -L "$TASK_ROOT" ] || die continuation_task_root "$TASK_ROOT"
+  [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] || die continuation_worktree "$WORKTREE"
+  [ -d "$SCRATCH" ] && [ ! -L "$SCRATCH" ] || die continuation_scratch "$SCRATCH"
+  wt_registered || die continuation_worktree_registered "$WORKTREE is not registered"
+  [ "$(ctl_git "$IAP" rev-parse HEAD)" = "$EXPECT_BASE" ] \
+    || die continuation_base "$(ctl_git "$IAP" rev-parse HEAD) != $EXPECT_BASE"
+  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] \
+    || die continuation_head "$(ctl_git "$WORKTREE" rev-parse HEAD) != $EXPECT_BASE"
+  [ -z "$(ctl_git "$WORKTREE" status --porcelain)" ] || die continuation_dirty "$WORKTREE"
+  binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
+  [ -f "$PKG_DEST/manifest.json" ] || die continuation_contract "$PKG_DEST/manifest.json"
+  [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+    || die continuation_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+  [ "$(python3 -c "import json;print(json.load(open('$PKG_DEST/READY.json'))['status'])")" = READY ] \
+    || die continuation_contract_ready "$PKG_DEST/READY.json"
+  registry_fields_ok "$TASK_ID" || die continuation_registry "$REGISTRY_DIFF"
+  [ "$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')" = "$SANDBOX_AFTER_SHA" ] \
+    || die continuation_launcher "$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
+  grep -qxF -- "$SANDBOX_ALLOWLIST" "$SANDBOX_BIN" || die continuation_allowlist "$SANDBOX_BIN"
+  [ "$(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')" = "$EXPECT_HELPER_SHA" ] \
+    || die continuation_helper "$SANDBOX_DIR/git_meta_mounts.sh"
+  [ "$(sha256sum "$BROKER_BIN" | awk '{print $1}')" = "$BROKER_SHA" ] || die continuation_broker "$BROKER_BIN"
+  if [ -e "$CONT_RECORD" ]; then
+    continuation_record_ok || die continuation_record "$CONT_RECORD does not match this package/scene"
+  else
+    continuation_record > "$CONT_RECORD.new" || die continuation_record_write "$CONT_RECORD.new"
+    mv -f -- "$CONT_RECORD.new" "$CONT_RECORD" || die continuation_record_move "$CONT_RECORD"
+  fi
+  say "CONTINUATION_OK predecessor=$CONT_ANCHOR package=$ANCHOR reused_stages=${CONT_REQUIRED_STAGES# }"
 }
 
 verify_live_state() {
@@ -590,7 +676,8 @@ if [ -w "\$BINDING" ]; then
 else
   say "BINDING_WRITABLE=False"
 fi
-say "BINDING_OWNER_MODE=\$(stat -c '%U:%G %a' "\$BINDING" 2>/dev/null || echo unreadable)"
+say "BINDING_OWNER=\$(stat -c '%U:%G' "\$BINDING" 2>/dev/null || echo unreadable)"
+say "BINDING_MODE=\$(stat -c '%a' "\$BINDING" 2>/dev/null || echo unreadable)"
 python3 - "\$BINDING" "\$PWD" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST" <<'PY'
 import json, os, sys
 path, cwd, wt, commit, pkg = sys.argv[1:6]
@@ -632,10 +719,10 @@ sandbox_git_check() {
   done
   printf '%s\n' "$out" | grep -qxF 'BINDING_READ=True' || die probe_sandbox_binding_read "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
   printf '%s\n' "$out" | grep -qxF 'BINDING_WRITABLE=False' || die probe_sandbox_binding_write "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
-  printf '%s\n' "$out" | grep -qxF 'BINDING_OWNER_MODE=root:root 644' || die probe_sandbox_binding_mode "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'BINDING_MODE=644' || die probe_sandbox_binding_mode "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
   printf '%s\n' "$out" | grep -qxF 'BINDING_CONTENT=OK' || die probe_sandbox_binding_content "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
   printf '%s\n' "$out" | grep -qxF 'CHECK_FAILURES=0' || die probe_sandbox_fail "rc=$rc"
-  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata read-only (os.access + mount ro); binding=read-only content=OK"
+  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata read-only (os.access + mount ro); binding read-only mode=0644 content=OK (sandbox owner names are diagnostic only)"
 }
 
 stage_probe() {
@@ -653,6 +740,8 @@ stage_probe() {
   ai_access x "$commondir" || die probe_commondir "$commondir ${AI_ACCESS_ERR:-}"
   ai_access r "$TASK_ROOT/PREP-BINDING.json" || die probe_binding_read "$TASK_ROOT/PREP-BINDING.json ${AI_ACCESS_ERR:-}"
   if ai_access w "$TASK_ROOT/PREP-BINDING.json"; then die probe_binding_writable "$TASK_ROOT/PREP-BINDING.json"; fi
+  # HOST authority before every probe: regular file, no symlink, numeric 0:0, 0644, content.
+  binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
   ai_access r "$WORKTREE/$PLAN_FILE" || die probe_read "$WORKTREE/$PLAN_FILE ${AI_ACCESS_ERR:-}"
   ai_access w "$WORKTREE" || die probe_write "$WORKTREE ${AI_ACCESS_ERR:-}"
   ai_access w "$SCRATCH" || die probe_scratch "$SCRATCH ${AI_ACCESS_ERR:-}"
@@ -702,7 +791,9 @@ binding_accept() { # <path> <worktree> <commit> <contract_package>
   local path="$1"
   [ -f "$path" ] || die binding_missing "$path"
   [ ! -L "$path" ] || die binding_symlink "$path"
-  [ "$(stat -c '%U:%G %a' "$path")" = "root:root 644" ] || die binding_mode "$(stat -c '%U:%G %a' "$path")"
+  # HOST authority: numeric UID/GID 0:0 and mode 0644. Sandbox identity names are
+  # namespace-mapped and are never used to prove host ownership.
+  [ "$(stat -c '%u:%g %a' "$path")" = "0:0 644" ] || die binding_mode "$(stat -c '%u:%g %a' "$path")"
   /usr/bin/python3 - "$path" "$2" "$3" "$4" <<'BINDPY' || die binding_mismatch "$path (refusing to overwrite)"
 import json, os, sys
 b = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -757,6 +848,10 @@ stage_ready() {
 # --- explicit, one-shot operator stages -------------------------------------------- #
 stage_send() {
   require_root
+  # a continuation is only executable from the package/scene recorded at prep time
+  if [ -e "$CONT_RECORD" ]; then
+    continuation_record_ok || die continuation_source "$CONT_RECORD does not match this package/scene"
+  fi
   done_marker ready || die prerequisite_not_done ready
   verify_live_state           # a reused prep is re-verified before anything is sent
   assert_operator_state_path
@@ -870,8 +965,9 @@ main() {
   rm -f "$FAIL_MARK" 2>/dev/null || if [ -e "$FAIL_MARK" ]; then say "FAIL_MARK_CLEANUP_FAILED"; fi
   trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$FAIL_REPORTED" != 1 ] && { [ ! -e "${FAIL_MARK:-/nonexistent}" ]; }; then printf "SMOKE_ABORT stage=%s rc=%s cmd=%.160s\n" "${CURRENT_STAGE:-none}" "$rc" "$BASH_COMMAND" >&2; fi' EXIT
   local mode=prep only=""
-  while [ $# -gt 0 ]; do case "$1" in --execute) mode=execute; shift ;; --stage) only="${2:-}"; shift 2 ;; --status) mode=status; shift ;; *) die usage "$1" ;; esac; done
+  while [ $# -gt 0 ]; do case "$1" in --execute) mode=execute; shift ;; --stage) only="${2:-}"; shift 2 ;; --status) mode=status; shift ;; --continue-006) CONT_ACTIVE=1; CONT_PKG="${2:-}"; [ -n "$CONT_PKG" ] || die usage "--continue-006 requires the approved package path"; shift 2 ;; *) die usage "$1" ;; esac; done
   if [ "$mode" = status ]; then say "anchor=$ANCHOR ledger=$LEDGER"; ls -1 "$LEDGER" 2>/dev/null || say "(no stages)"; cat "$BRIDGE_DIR/state.json" 2>/dev/null; return 0; fi
+  if [ "$CONT_ACTIVE" = 1 ]; then continuation_preflight; fi
   local stages=()
   if [ -n "${SMOKE_PREP_STAGES:-}" ]; then IFS=: read -r -a stages <<< "$SMOKE_PREP_STAGES"
   else stages=("${PREP_STAGES[@]}"); fi
