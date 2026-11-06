@@ -65,6 +65,7 @@ state WAITING_FOR_GPT 9 NONCE_A REPLY_A
 # binding_write/binding_accept assert root:root 0644, so this block is only meaningful
 # as root. Run the suite with sudo to exercise it.
 if [ "$(id -u)" -eq 0 ]; then
+  B1="$T/binding1"; mkdir -p "$B1/wt" "$B1/pkg" "$B1/other"   # created BEFORE first use
   bp="$B1/PREP-BINDING.json"
   runs binding_write "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/pkg" && ok binding_write_ok || no "binding_write failed"
   runs binding_accept "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/pkg" && ok binding_accept_ok || no "binding_accept rejected its own file"
