@@ -263,8 +263,11 @@ stage_preflight() {
   say "[preflight] baseline state / evidence / stack / state path"
   # no write of any kind may happen before the live Bridge is the expected one
   bridge_ok || die bridge_before_writes "$(chain_now)"
-  # the REAL chain snapshot is taken BEFORE any install or task write; an existing one must
-  # already match and is never overwritten (a later snapshot proves nothing)
+  # FIRST: read-only verification of every pre-existing 005 artifact — nothing is created,
+  # owned, re-permissioned or rewritten before this passes.
+  verify_existing_scene
+  # ONLY THEN: the real chain snapshot is taken BEFORE any install or task write; an existing
+  # one must already match and is never overwritten (a later snapshot proves nothing).
   if [ -e "$LEDGER/chain.before_prep" ]; then
     [ -s "$LEDGER/chain.before_prep" ] || die snapshot_empty "$LEDGER/chain.before_prep"
     [ "$(cat "$LEDGER/chain.before_prep")" = "$(chain_now)" ] \
@@ -275,9 +278,6 @@ stage_preflight() {
     chain_now > "$LEDGER/chain.before_prep" || die snapshot_write
     say "CHAIN_SNAPSHOT_SAVED $(cat "$LEDGER/chain.before_prep")"
   fi
-  # ANY pre-existing 005 artifact must be verified before it is modified: the contract,
-  # registry, binding and ledger live OUTSIDE the task root, so their presence alone counts.
-  verify_existing_scene
   local st files dirty
   st="$(baseline_state)"
   say "PREFLIGHT_BASELINE_STATE=$st"
@@ -432,9 +432,13 @@ PY
   return 0
 }
 
-verify_existing_scene() { # every already-present 005 artifact, wherever it lives
+verify_existing_scene() { # read-only; every already-present 005 artifact, wherever it lives
   require_root
   local any=0
+  for p in "$TASK_ROOT" "$WORKTREE" "$SCRATCH" "$LEDGER" "$PKG_DEST"; do
+    [ -L "$p" ] && die existing_symlink "$p is a symlink (preserved, not followed)"
+  done
+  [ -e "$TASK_ROOT" ] && [ ! -d "$TASK_ROOT" ] && die existing_unknown "$TASK_ROOT is not a directory"
   if [ -e "$PKG_DEST" ]; then
     any=1
     [ -f "$PKG_DEST/manifest.json" ] || die existing_contract "$PKG_DEST"
@@ -449,18 +453,33 @@ for e in m.get("entries", []):
         sys.exit("bad %s" % e["path"])
 MEMPYP
   fi
-  if [ -f "$REGISTRY" ] && python3 - "$REGISTRY" "$TASK_ID" <<'PY'
+  if [ -e "$REGISTRY" ]; then
+    local has=0
+    python3 - "$REGISTRY" "$TASK_ID" <<'PY' || die existing_registry_unreadable "$REGISTRY (read/parse failed; not treated as 'no 005')"
 import json, sys
-sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1], encoding="utf-8")) else 1)
+try:
+    reg = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    sys.stderr.write("%s: %s\n" % (type(exc).__name__, exc)); sys.exit(2)
+sys.exit(0 if sys.argv[2] in reg else 1)
 PY
-  then any=1; registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"; fi
+    has=$?
+    [ "$has" -eq 1 ] || { any=1; registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"; }
+  fi
   if [ -e "$TASK_ROOT/PREP-BINDING.json" ]; then
     any=1
     binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
   fi
   if [ -d "$LEDGER" ]; then
     any=1
-    [ -f "$LEDGER/chain.before_prep" ] || die existing_ledger "$LEDGER (no prep-start snapshot)"
+    # an existing ledger without a prep-start snapshot is an abnormal scene: stop, never
+    # backfill it here and then call the scene verified
+    [ -f "$LEDGER/chain.before_prep" ] || die existing_ledger "$LEDGER exists without chain.before_prep"
+    for m in "$LEDGER"/*.done; do
+      [ -e "$m" ] || continue
+      grep -q "^anchor=$ANCHOR stage=$(basename "$m" .done)$" "$m" \
+        || die existing_marker "$m is stale (unknown anchor/stage)"
+    done
   fi
   [ "$any" -eq 0 ] && say "EXISTING_SCENE=none (first prep)" || say "EXISTING_SCENE_VERIFIED"
 }

@@ -113,22 +113,50 @@ grep -q 'chain.before_prep' "$D" && ok prep_start_snapshot_used || no "no prep-s
 ! grep -q 'grant_approved_traverse\|TRAVERSE_APPROVED' "$D" && ok legacy_traversal_gone || no "legacy traversal code present"
 ! grep -qE 'op_git (init|add|commit)|stage_repair_git_owner' "$D" && ok baseline_verify_only || no "baseline create/repair present"
 
-# 7. root-only: verify_live_state rejects bad binding commit / mode / symlink -----------------
+# 7. root-only: a COMPLETE valid fixture, then ONE change per case -----------------------------
 if [ "$(id -u)" -eq 0 ]; then
-  S="$T/scene"; mkdir -p "$S/wt" "$S/pkg" "$S/scratch" "$S/ledger"; : > "$S/ledger/chain.before_prep"
-  git -C "$S/wt" init -q -b main 2>/dev/null; git -C "$S/wt" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base
-  TASK_ROOT="$S"; WORKTREE="$S/wt"; SCRATCH="$S/scratch"; LEDGER="$S/ledger"; PKG_DEST="$S/pkg"
-  printf 'anchor=x\n' > "$S/pkg/manifest.json"
-  cp "$S/pkg/manifest.json" "$S/pkg/keep.json"
-  printf '{"worktree":"%s","commit":"%s","contract_package":"%s"}\n' "$S/wt" "$EXPECT_BASE" "$S/pkg" > "$S/PREP-BINDING.json"
-  chmod 0644 "$S/PREP-BINDING.json"
-  runs verify_live_state && no "verify_live_state accepted a wrong commit" || ok live_rejects_wrong_commit
-  ln -sf "$S/PREP-BINDING.json" "$S/link.json"
-  runs binding_accept "$S/link.json" "$S/wt" "$EXPECT_BASE" "$S/pkg" && no "symlink accepted" || ok live_rejects_symlink
-  chmod 0666 "$S/PREP-BINDING.json"
-  runs binding_accept "$S/PREP-BINDING.json" "$S/wt" "$EXPECT_BASE" "$S/pkg" && no "bad mode accepted" || ok live_rejects_bad_mode
+  B="$T/binding"
+  mkdir -p "$B/wt" "$B/pkg" "$B/scratch" "$B/ledger"
+  git -C "$B/wt" init -q -b main || { echo GIT_FIXTURE_FAILED; exit 1; }
+  git -C "$B/wt" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base || { echo GIT_FIXTURE_FAILED; exit 1; }
+  FIXHEAD="$(git -C "$B/wt" rev-parse HEAD)"
+  git -C "$B/wt" rev-parse --absolute-git-dir > "$B/ledger/paths"
+  git -C "$B/wt" rev-parse --git-common-dir  >> "$B/ledger/paths"
+  printf 'anchor=%s stage=preflight\n' "$ANCHOR" > "$B/ledger/preflight.done"
+  printf 'main\n' > "$B/pkg/A.md"; printf 'b\n' > "$B/pkg/B.md"
+  python3 - "$B/pkg" <<'PY'
+import hashlib, json, os, sys
+pkg = sys.argv[1]
+e = [{"path": n, "sha256": hashlib.sha256(open(os.path.join(pkg, n), "rb").read()).hexdigest()}
+     for n in ("A.md", "B.md")]
+json.dump({"package": "FIXTURE", "entries": e}, open(os.path.join(pkg, "manifest.json"), "w"))
+PY
+  python3 - "$T/fixreg.json" "$B" <<'PY'
+import json, sys
+json.dump({"IAP-SMOKE-005": {"worktree": sys.argv[2] + "/wt", "scratch": sys.argv[2] + "/scratch",
+    "project": "/home/zhong/AndroidStudioProjects/ImageAnalysisFactory",
+    "contract_package": sys.argv[2] + "/pkg"}}, open(sys.argv[1], "w"))
+PY
+  # valid fixture: point the pins at the fixture and require the REAL verify_live_state to pass
+  TASK_ROOT="$B"; WORKTREE="$B/wt"; SCRATCH="$B/scratch"; LEDGER="$B/ledger"; PKG_DEST="$B/pkg"
+  REGISTRY="$T/fixreg.json"; EXPECT_BASE="$FIXHEAD"; EXPECT_MANIFEST_SHA="$(sha256sum "$B/pkg/manifest.json" | awk '{print $1}')"
+  binding_write "$B/PREP-BINDING.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" || { echo BINDING_FIXTURE_FAILED; exit 1; }
+  binding_accept "$B/PREP-BINDING.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" || { echo BINDING_FIXTURE_FAILED; exit 1; }
+  runs_reason() { local want="$1"; shift; local err; err="$( ( "$@" ) 2>&1 >/dev/null )";     printf '%s' "$err" | grep -q "reason=$want" && return 0; printf '  (got: %s)\n' "$err"; return 1; }
+  runs verify_live_state && ok live_valid_fixture_passes || no "valid fixture rejected by verify_live_state"
+  runs_reason binding_mismatch binding_accept "$B/PREP-BINDING.json" "$WORKTREE" "0000000000000000000000000000000000000000" "$PKG_DEST" \
+    && ok live_rejects_wrong_commit || no "wrong commit not rejected as binding_mismatch"
+  chmod 0666 "$B/PREP-BINDING.json"
+  runs_reason binding_mode binding_accept "$B/PREP-BINDING.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" \
+    && ok binding_rejects_bad_mode || no "bad mode not rejected as binding_mode"
+  chmod 0644 "$B/PREP-BINDING.json"; ln -sf "$B/PREP-BINDING.json" "$B/link.json"
+  runs_reason binding_symlink binding_accept "$B/link.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" \
+    && ok binding_rejects_symlink || no "symlink not rejected as binding_symlink"
+  printf 'dirty\n' > "$WORKTREE/A.md"
+  runs_reason live_worktree_dirty verify_live_state && ok live_rejects_dirty_worktree || no "dirty worktree not rejected"
+  git -C "$WORKTREE" checkout -q -- A.md
 else
-  printf 'NOT_RUN verify_live_state rejection cases (needs root)\n'
+  printf 'NOT_RUN live-fixture rejection cases (needs root)\n'
 fi
 
 printf 'FIXTURES pass=%d fail=%d\n' "$pass" "$fail"
