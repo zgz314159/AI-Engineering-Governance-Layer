@@ -82,7 +82,7 @@ done
 # supplied by a caller, so an unprivileged caller cannot redirect root output. An existing
 # sink dir is NEVER removed here; the trusted driver refuses to start if one already exists.
 DIAG_ROOT=/var/tmp/aegl-diag
-DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 IAP-SMOKE-005 "
+DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 IAP-SMOKE-005 IAP-SMOKE-006 "
 # a no-model check run must never append to the task's diagnostic sink
 [ -n "$CHECK_CMD" ] && DIAG_ENABLED_TASKS=" "
 DIAG_DIR=""
