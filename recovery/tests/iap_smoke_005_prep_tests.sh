@@ -65,16 +65,16 @@ state WAITING_FOR_GPT 9 NONCE_A REPLY_A
 # binding_write/binding_accept assert root:root 0644, so this block is only meaningful
 # as root. Run the suite with sudo to exercise it.
 if [ "$(id -u)" -eq 0 ]; then
-  bp="$B/PREP-BINDING.json"
-  runs binding_write "$bp" "$B/wt" "$EXPECT_BASE" "$B/pkg" && ok binding_write_ok || no "binding_write failed"
-  runs binding_accept "$bp" "$B/wt" "$EXPECT_BASE" "$B/pkg" && ok binding_accept_ok || no "binding_accept rejected its own file"
+  bp="$B1/PREP-BINDING.json"
+  runs binding_write "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/pkg" && ok binding_write_ok || no "binding_write failed"
+  runs binding_accept "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/pkg" && ok binding_accept_ok || no "binding_accept rejected its own file"
   before_sum="$(sha256sum "$bp")"
-  runs binding_accept "$bp" "$B/wt" "0000000000000000000000000000000000000000" "$B/pkg" \
+  runs binding_accept "$bp" "$B1/wt" "0000000000000000000000000000000000000000" "$B1/pkg" \
     && no "binding_accept accepted a wrong commit" || ok binding_accept_rejects_wrong_commit
-  runs binding_accept "$bp" "$B/wt" "$EXPECT_BASE" "$B/other" \
+  runs binding_accept "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/other" \
     && no "binding_accept accepted a wrong contract_package" || ok binding_accept_rejects_wrong_contract
   [ "$(sha256sum "$bp")" = "$before_sum" ] && ok binding_file_bytes_unchanged || no "binding file was rewritten"
-  runs binding_write "$bp" "$B/wt" "$EXPECT_BASE" "$B/pkg" \
+  runs binding_write "$bp" "$B1/wt" "$EXPECT_BASE" "$B1/pkg" \
     && no "binding_write overwrote an existing binding" || ok binding_write_refuses_overwrite
 
 else
@@ -115,31 +115,42 @@ grep -q 'chain.before_prep' "$D" && ok prep_start_snapshot_used || no "no prep-s
 
 # 7. root-only: a COMPLETE valid fixture, then ONE change per case -----------------------------
 if [ "$(id -u)" -eq 0 ]; then
-  B="$T/binding"
-  mkdir -p "$B/wt" "$B/pkg" "$B/scratch" "$B/ledger"
-  git -C "$B/wt" init -q -b main || { echo GIT_FIXTURE_FAILED; exit 1; }
-  git -C "$B/wt" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base || { echo GIT_FIXTURE_FAILED; exit 1; }
-  FIXHEAD="$(git -C "$B/wt" rev-parse HEAD)"
-  git -C "$B/wt" rev-parse --absolute-git-dir > "$B/ledger/paths"
-  git -C "$B/wt" rev-parse --git-common-dir  >> "$B/ledger/paths"
+  B="$T/live"
+  mkdir -p "$B/scratch" "$B/ledger" "$B1/pkg"
+  # an isolated "formal" repo + a REAL registered worktree, so nothing depends on the host tree
+  IAP="$B/formal"; mkdir -p "$IAP"
+  git -C "$IAP" init -q -b main || { echo GIT_FIXTURE_FAILED; exit 1; }
+  printf 'plan\n' > "$IAP/PLAN.md"
+  git -C "$IAP" add PLAN.md || { echo GIT_FIXTURE_FAILED; exit 1; }
+  git -C "$IAP" -c user.name=t -c user.email=t@x commit -q -m base || { echo GIT_FIXTURE_FAILED; exit 1; }
+  WORKTREE="$B/project"
+  git -C "$IAP" worktree add -q "$WORKTREE" -b wt || { echo GIT_FIXTURE_FAILED; exit 1; }
+  FIXHEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
+  printf 'tracked\n' > "$WORKTREE/PLAN.md"
+  git -C "$WORKTREE" -c user.name=t -c user.email=t@x commit -q -am tracked || { echo GIT_FIXTURE_FAILED; exit 1; }
+  FIXHEAD="$(git -C "$WORKTREE" rev-parse HEAD)"
+  git -C "$WORKTREE" rev-parse --absolute-git-dir > "$B/ledger/paths"
+  git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir >> "$B/ledger/paths"
   printf 'anchor=%s stage=preflight\n' "$ANCHOR" > "$B/ledger/preflight.done"
   printf 'main\n' > "$B/pkg/A.md"; printf 'b\n' > "$B/pkg/B.md"
-  python3 - "$B/pkg" <<'PY'
+  printf '{"contract_id":"FIXTURE"}\n' > "$B/pkg/implementation-contract.json"
+  python3 - "$B1/pkg" <<'PY'
 import hashlib, json, os, sys
 pkg = sys.argv[1]
-e = [{"path": n, "sha256": hashlib.sha256(open(os.path.join(pkg, n), "rb").read()).hexdigest()}
-     for n in ("A.md", "B.md")]
-json.dump({"package": "FIXTURE", "entries": e}, open(os.path.join(pkg, "manifest.json"), "w"))
+names = ("A.md", "B.md", "implementation-contract.json")
+json.dump({"package": "FIXTURE", "entries": [
+    {"path": n, "sha256": hashlib.sha256(open(os.path.join(pkg, n), "rb").read()).hexdigest()} for n in names]},
+    open(os.path.join(pkg, "manifest.json"), "w"))
 PY
-  python3 - "$T/fixreg.json" "$B" <<'PY'
+  python3 - "$T/fixreg.json" "$B" "$IAP" <<'PY'
 import json, sys
-json.dump({"IAP-SMOKE-005": {"worktree": sys.argv[2] + "/wt", "scratch": sys.argv[2] + "/scratch",
-    "project": "/home/zhong/AndroidStudioProjects/ImageAnalysisFactory",
-    "contract_package": sys.argv[2] + "/pkg"}}, open(sys.argv[1], "w"))
+b, iap = sys.argv[2], sys.argv[3]
+json.dump({"IAP-SMOKE-005": {"worktree": b + "/project", "scratch": b + "/scratch",
+    "project": iap, "contract_package": b + "/pkg"}}, open(sys.argv[1], "w"))
 PY
-  # valid fixture: point the pins at the fixture and require the REAL verify_live_state to pass
-  TASK_ROOT="$B"; WORKTREE="$B/wt"; SCRATCH="$B/scratch"; LEDGER="$B/ledger"; PKG_DEST="$B/pkg"
-  REGISTRY="$T/fixreg.json"; EXPECT_BASE="$FIXHEAD"; EXPECT_MANIFEST_SHA="$(sha256sum "$B/pkg/manifest.json" | awk '{print $1}')"
+  TASK_ROOT="$B"; SCRATCH="$B/scratch"; LEDGER="$B/ledger"; PKG_DEST="$B1/pkg"
+  REGISTRY="$T/fixreg.json"; EXPECT_BASE="$FIXHEAD"
+  EXPECT_MANIFEST_SHA="$(sha256sum "$B/pkg/manifest.json" | awk '{print $1}')"
   binding_write "$B/PREP-BINDING.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" || { echo BINDING_FIXTURE_FAILED; exit 1; }
   binding_accept "$B/PREP-BINDING.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" || { echo BINDING_FIXTURE_FAILED; exit 1; }
   runs_reason() { local want="$1"; shift; local err; err="$( ( "$@" ) 2>&1 >/dev/null )";     printf '%s' "$err" | grep -q "reason=$want" && return 0; printf '  (got: %s)\n' "$err"; return 1; }
@@ -152,11 +163,21 @@ PY
   chmod 0644 "$B/PREP-BINDING.json"; ln -sf "$B/PREP-BINDING.json" "$B/link.json"
   runs_reason binding_symlink binding_accept "$B/link.json" "$WORKTREE" "$FIXHEAD" "$PKG_DEST" \
     && ok binding_rejects_symlink || no "symlink not rejected as binding_symlink"
-  printf 'dirty\n' > "$WORKTREE/A.md"
+  printf 'dirty\n' >> "$WORKTREE/PLAN.md"
   runs_reason live_worktree_dirty verify_live_state && ok live_rejects_dirty_worktree || no "dirty worktree not rejected"
-  git -C "$WORKTREE" checkout -q -- A.md
+  git -C "$WORKTREE" checkout -q -- PLAN.md
 else
   printf 'NOT_RUN live-fixture rejection cases (needs root)\n'
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  E="$T/scene"; mkdir -p "$E"; printf '{}\n' > "$E/reg-empty.json"
+  REGISTRY="$E/reg-empty.json"
+  runs verify_existing_scene && ok existing_scene_valid_empty_registry || no "empty valid registry rejected"
+  printf '{not json\n' > "$E/reg-bad.json"; REGISTRY="$E/reg-bad.json"
+  runs_reason existing_registry_unreadable verify_existing_scene && ok existing_scene_bad_registry_rejected || no "bad JSON registry not rejected"
+else
+  printf 'NOT_RUN verify_existing_scene cases (needs root)\n'
 fi
 
 printf 'FIXTURES pass=%d fail=%d\n' "$pass" "$fail"

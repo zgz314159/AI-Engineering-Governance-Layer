@@ -438,7 +438,20 @@ verify_existing_scene() { # read-only; every already-present 005 artifact, where
   for p in "$TASK_ROOT" "$WORKTREE" "$SCRATCH" "$LEDGER" "$PKG_DEST"; do
     [ -L "$p" ] && die existing_symlink "$p is a symlink (preserved, not followed)"
   done
-  [ -e "$TASK_ROOT" ] && [ ! -d "$TASK_ROOT" ] && die existing_unknown "$TASK_ROOT is not a directory"
+  if [ -e "$TASK_ROOT" ]; then
+    any=1
+    [ -d "$TASK_ROOT" ] || die existing_unknown "$TASK_ROOT is not a directory"
+    [ "$(stat -c '%U' "$TASK_ROOT")" = root ] \
+      || die existing_owner "$TASK_ROOT owner=$(stat -c '%U' "$TASK_ROOT") (unknown scene; refusing to chown/chmod)"
+    [ -e "$WORKTREE" ] && { [ -d "$WORKTREE" ] || die existing_unknown "$WORKTREE is not a directory"; }
+    [ -e "$SCRATCH" ] && { [ -d "$SCRATCH" ] || die existing_unknown "$SCRATCH is not a directory"; }
+    # the scene must be THIS task's: the registry has to declare exactly these paths
+    registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"
+    if [ -e "$WORKTREE/.git" ]; then
+      ctl_git "$IAP" worktree list --porcelain 2>/dev/null | grep -qxF -- "worktree $WORKTREE" \
+        || die existing_worktree "$WORKTREE is not a registered worktree of $IAP"
+    fi
+  fi
   if [ -e "$PKG_DEST" ]; then
     any=1
     [ -f "$PKG_DEST/manifest.json" ] || die existing_contract "$PKG_DEST"
@@ -455,7 +468,7 @@ MEMPYP
   fi
   if [ -e "$REGISTRY" ]; then
     local has=0
-    python3 - "$REGISTRY" "$TASK_ID" <<'PY' || die existing_registry_unreadable "$REGISTRY (read/parse failed; not treated as 'no 005')"
+    python3 - "$REGISTRY" "$TASK_ID" <<'PY'
 import json, sys
 try:
     reg = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -464,7 +477,14 @@ except Exception as exc:
 sys.exit(0 if sys.argv[2] in reg else 1)
 PY
     has=$?
-    [ "$has" -eq 1 ] || { any=1; registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"; }
+    if [ "$has" -eq 0 ]; then
+      any=1
+      registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"
+    elif [ "$has" -eq 1 ]; then
+      say "REGISTRY_VALID_WITHOUT_005 (first prep allowed)"
+    else
+      die existing_registry_unreadable "$REGISTRY (rc=$has: read/parse failed; NOT treated as 'no 005')"
+    fi
   fi
   if [ -e "$TASK_ROOT/PREP-BINDING.json" ]; then
     any=1
