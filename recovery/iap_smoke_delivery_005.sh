@@ -143,26 +143,6 @@ chain_blocker() { # <path> -> prints the first blocking dir, or nothing
 # every other entry. Refuses on any surprise (missing/odd mask, conflicting entry,
 # non-directory or symlink) instead of expanding access, and proves afterwards that the
 # ONLY difference is the added aegl-ai x entry.
-grant_approved_traverse() {
-  [ -d "$d" ] && [ ! -L "$d" ] || die traverse_target_bad "$d"
-  mask="$(getfacl -p "$d" 2>/dev/null | awk -F: '/^mask::/{print $3}')"
-  [ -n "$mask" ] || die traverse_mask_missing "$d (no ACL mask; refusing to add one)"
-  case "$mask" in *x*) : ;; *) die traverse_mask_no_x "$d mask=${mask:-none}" ;; esac
-  cur="$(getfacl -p "$d" 2>/dev/null | awk -F: '/^user:aegl-ai:/{print $3}')"
-  case "$cur" in ""|--x) : ;; *) die traverse_conflict "$d aegl-ai=${cur:-none}" ;; esac
-  [ -z "$cur" ] || { say "TRAVERSE_ALREADY=$d (u:aegl-ai:--x)"; return 0; }
-  before="$(getfacl -p "$d")"
-  setfacl -n -m u:aegl-ai:x "$d" || die traverse_grant "$d"
-  ai_access x "$d" || die traverse_verify "$d"
-  after="$(getfacl -p "$d")"
-  b2="$(printf '%s\n' "$before" | grep -vE '^user:aegl-ai:')"
-  a2="$(printf '%s\n' "$after"  | grep -vE '^user:aegl-ai:')"
-  [ "$b2" = "$a2" ] || die traverse_side_effect "$d (mask or another entry changed)"
-  n="$(printf '%s\n' "$after" | grep -cE '^user:aegl-ai:--x$' || true)"
-  [ "$n" = 1 ] || die traverse_side_effect "$d (aegl-ai entry is not exactly --x)"
-  say "TRAVERSE_GRANTED=$d (u:aegl-ai:--x, mask preserved)"
-}
-
 # Read-only walk of a required target's full ancestor chain. The ONLY directory that may
 
 operator_state_path() {
@@ -283,6 +263,19 @@ stage_preflight() {
   say "[preflight] baseline state / evidence / stack / state path"
   # no write of any kind may happen before the live Bridge is the expected one
   bridge_ok || die bridge_before_writes "$(chain_now)"
+  # the REAL chain snapshot is taken BEFORE any install or task write; an existing one must
+  # already match and is never overwritten (a later snapshot proves nothing)
+  if [ -e "$LEDGER/chain.before_prep" ]; then
+    [ -s "$LEDGER/chain.before_prep" ] || die snapshot_empty "$LEDGER/chain.before_prep"
+    [ "$(cat "$LEDGER/chain.before_prep")" = "$(chain_now)" ] \
+      || die chain_snapshot_mismatch "$(cat "$LEDGER/chain.before_prep") != $(chain_now)"
+    say "CHAIN_SNAPSHOT_REUSED $LEDGER/chain.before_prep"
+  else
+    mkdir -p "$LEDGER" || die ledger_dir
+    chain_now > "$LEDGER/chain.before_prep" || die snapshot_write
+    say "CHAIN_SNAPSHOT_SAVED $(cat "$LEDGER/chain.before_prep")"
+  fi
+  if [ -e "$TASK_ROOT" ] || [ -e "$WORKTREE" ]; then verify_live_state; fi
   local st files dirty
   st="$(baseline_state)"
   say "PREFLIGHT_BASELINE_STATE=$st"
@@ -424,13 +417,14 @@ stage_permissions() {
 # --- live state acceptance: NEVER skipped by a done marker ----------------------------- #
 registry_fields_ok() { # <path> <task> -> 0 only when all FOUR fields match exactly
   local reg="${REGISTRY:-$REGISTRY_PATH}" task="$1" want wt scr proj con got
+  [ -f "$reg" ] || { REGISTRY_DIFF="registry unreadable: $reg"; return 1; }
   want="$(python3 - "$reg" "$task" <<'PY'
 import json, sys
 reg = json.load(open(sys.argv[1], encoding="utf-8"))
 e = reg.get(sys.argv[2]) or {}
 print("\n".join(str(e.get(k) or "") for k in ("worktree", "scratch", "project", "contract_package")))
 PY
-)" || return 1
+)" || { REGISTRY_DIFF="registry unreadable/unparsable: $reg"; return 1; }
   got="$(printf '%s\n%s\n%s\n%s\n' "$TASK_ROOT/project" "$SCRATCH" "$IAP" "$PKG_DEST")"
   [ "$want" = "$got" ] || { REGISTRY_DIFF="wanted=[$got] registry=[$want]"; return 1; }
   return 0
@@ -445,6 +439,22 @@ verify_live_state() {
   gitdir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '1p')"
   commondir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '2p')"
   [ -n "$gitdir" ] && [ -n "$commondir" ] || die live_paths "no recorded git paths"
+  [ "$(ctl_git "$WORKTREE" rev-parse --absolute-git-dir)" = "$gitdir" ] || die live_gitdir_changed
+  local cq; cq="$(ctl_git "$WORKTREE" rev-parse --git-common-dir)"
+  case "$cq" in /*) : ;; *) cq="$WORKTREE/$cq" ;; esac
+  [ "$(realpath -e "$cq")" = "$commondir" ] || die live_commondir_changed
+  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] || die live_head
+  [ -z "$(op_git status --porcelain)" ] || die live_dirty
+  /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die live_contract_members "$PKG_DEST"
+import hashlib, json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+for e in m.get("entries", []):
+    f = os.path.join(sys.argv[1], e["path"])
+    if not os.path.isfile(f):
+        sys.exit("missing %s" % e["path"])
+    if hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
+        sys.exit("hash %s" % e["path"])
+MEMPYP
   [ -f "$TASK_ROOT/PREP-BINDING.json" ] || die live_binding_missing "$TASK_ROOT/PREP-BINDING.json"
   /usr/bin/python3 - "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$PKG_DEST" <<'PY' \
     || die live_binding_mismatch "$TASK_ROOT/PREP-BINDING.json (refusing to overwrite)"
@@ -466,9 +476,18 @@ PY
   say "LIVE_STATE_OK registry=4/4 contract=binding=$EXPECT_MANIFEST_SHA evidence=absent"
 }
 
-bridge_ok() { # 0 only for the expected live Bridge state
-  [ "$(chain_now)" = "status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT" ] || return 1
-  return 0
+bridge_ok() { # 0 only for the expected live Bridge state — parsed independently
+  local pending="${PENDING_PATH:-$BRIDGE_DIR/pending_result.json}"
+  op_py 'import json,os,sys
+p = json.load(open(sys.argv[1], encoding="utf-8"))
+pending = sys.argv[2]
+ok = (p.get("status") == "WAITING_FOR_GPT"
+      and str(p.get("expected_sequence")) == sys.argv[3]
+      and not os.path.exists(pending))
+if not ok:
+    sys.stderr.write("bridge status=%s seq=%s pending=%s\n"
+                     % (p.get("status"), p.get("expected_sequence"), os.path.exists(pending)))
+sys.exit(0 if ok else 1)' "$BRIDGE_DIR/state.json" "$pending" "$EXPECT_BRIDGE_SEQ"
 }
 
 # --- in-sandbox Git metadata check (no model, no send, no shim) ------------------------ #
@@ -549,14 +568,46 @@ stage_contract() {
   say "CONTRACT_OK $PKG_DEST"
 }
 
+binding_write() { # <path> <worktree> <commit> <contract_package>
+  local path="$1"
+  [ ! -e "$path" ] || die binding_exists "$path (refusing to overwrite; verify it instead)"
+  printf '{"worktree":"%s","commit":"%s","contract_package":"%s"}\n' "$2" "$3" "$4" > "$path" || die binding_write
+  chown root:root "$path" || die binding_chown
+  chmod 0644 "$path" || die binding_chmod
+}
+
+binding_accept() { # <path> <worktree> <commit> <contract_package>
+  local path="$1"
+  [ -f "$path" ] || die binding_missing "$path"
+  [ ! -L "$path" ] || die binding_symlink "$path"
+  [ "$(stat -c '%U:%G %a' "$path")" = "root:root 644" ] || die binding_mode "$(stat -c '%U:%G %a' "$path")"
+  /usr/bin/python3 - "$path" "$2" "$3" "$4" <<'BINDPY' || die binding_mismatch "$path (refusing to overwrite)"
+import json, os, sys
+b = json.load(open(sys.argv[1], encoding="utf-8"))
+if os.path.realpath(b.get("worktree", "")) != os.path.realpath(sys.argv[2]):
+    sys.exit("worktree")
+if b.get("commit") != sys.argv[3]:
+    sys.exit("commit")
+if os.path.realpath(b.get("contract_package", "")) != os.path.realpath(sys.argv[4]):
+    sys.exit("contract_package")
+BINDPY
+}
+
 stage_binding() {
   require_root
   done_marker baseline || die prerequisite_not_done baseline
-  local base; base="$(ctl_git "$IAP" rev-parse HEAD)"
-  printf '{"worktree":"%s","commit":"%s"}\n' "$WORKTREE" "$base" > "$TASK_ROOT/PREP-BINDING.json" || die binding_write
-  chown root:root "$TASK_ROOT/PREP-BINDING.json" || die binding_chown
-  chmod 0644 "$TASK_ROOT/PREP-BINDING.json" || die binding_chmod
-  say "PREP_BINDING_OK commit=$base"
+  local base path="$TASK_ROOT/PREP-BINDING.json"
+  base="$(ctl_git "$IAP" rev-parse HEAD)"
+  [ "$base" = "$EXPECT_BASE" ] || die binding_baseline "$base != $EXPECT_BASE"
+  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$base" ] || die binding_worktree_head
+  if [ -e "$path" ]; then
+    binding_accept "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    say "PREP_BINDING_REUSED (verified) commit=$base"
+  else
+    binding_write "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    binding_accept "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    say "PREP_BINDING_OK commit=$base"
+  fi
 }
 
 stage_register() {
@@ -585,6 +636,7 @@ stage_ready() {
 stage_send() {
   require_root
   done_marker ready || die prerequisite_not_done ready
+  verify_live_state           # a reused prep is re-verified before anything is sent
   assert_operator_state_path
   local now; now="$(chain_now)"
   local want; want="$(cat "$LEDGER/chain.at_ready")"
@@ -704,15 +756,16 @@ main() {
   if [ "$mode" = execute ]; then stages+=("${EXEC_STAGES[@]}"); fi
   if [ -n "$only" ]; then CURRENT_STAGE="$only"; "stage_${only//-/_}"; mark "$only"; return 0; fi
   local s
+  local force=" preflight verify_live_state "
   for s in "${stages[@]}"; do
-    if done_marker "$s"; then say "SKIP $s (done)"; continue; fi
+    case "$force" in *" $s "*) : ;; *) if done_marker "$s"; then say "SKIP $s (done)"; continue; fi ;; esac
     CURRENT_STAGE="$s"; "stage_${s//-/_}"; mark "$s"
   done
   if [ "$mode" = prep ]; then
     verify_live_state
     bridge_ok || die bridge_before_prep "$(chain_now)"
-    [ "$(cat "$LEDGER/chain.at_ready" 2>/dev/null)" = "$(chain_now)" ] \
-      || die chain_changed_during_prep "$(chain_now) != $(cat "$LEDGER/chain.at_ready" 2>/dev/null)"
+    [ "$(cat "$LEDGER/chain.before_prep" 2>/dev/null)" = "$(chain_now)" ] \
+      || die chain_changed_during_prep "$(chain_now) != $(cat "$LEDGER/chain.before_prep" 2>/dev/null)"
     [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_created "prep must never create EVIDENCE.txt"
     say "BRIDGE_OK status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT unchanged_during_prep=1"
     say "PREP_COMPLETE (live state verified; no model called, nothing sent, no EVIDENCE.txt)"
