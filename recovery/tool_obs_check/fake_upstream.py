@@ -2,10 +2,14 @@
 """Synthetic HTTPS model upstream for the isolated tool-observation check.
 
 It never contacts a real model service, never reads credentials and returns only fixed,
-harmless tool calls. Request 1 asks for a successful local command, request 2 for a
-non-zero-exit command, request 3 for a guard-blocked write, later requests return text.
+harmless tool calls.
+
+Modes:
+  main              success command, non-zero-exit command, guard-blocked scratch write
+  observer-failure  worktree write (allowed, must execute), guard-blocked scratch write
 
 CLI: fake_upstream.py --cert PEM --key PEM --port-file PATH --block-path ABS
+                       [--mode main|observer-failure] [--alive-path ABS]
 Writes the chosen 127.0.0.1 port to --port-file, then serves until killed.
 """
 
@@ -59,14 +63,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.rfile.read(length)
         index = self.server.count
         self.server.count += 1
-        if index == 0:
-            response = _tool_call("ok", "printf OBS_OK")
-        elif index == 1:
-            response = _tool_call("fail", "sh -c 'exit 7'")
-        elif index == 2:
-            response = _tool_call("block", "sh -c 'printf blocked > %s'" % self.server.block_path)
+        if self.server.mode == "observer-failure":
+            if index == 0:
+                response = _tool_call("alive", "sh -c 'printf alive > %s'" % self.server.alive_path)
+            elif index == 1:
+                response = _tool_call("block2", "sh -c 'printf blocked > %s'" % self.server.block_path)
+            else:
+                response = _text()
         else:
-            response = _text()
+            if index == 0:
+                response = _tool_call("ok", "printf OBS_OK")
+            elif index == 1:
+                response = _tool_call("fail", "sh -c 'exit 7'")
+            elif index == 2:
+                response = _tool_call("block", "sh -c 'printf blocked > %s'" % self.server.block_path)
+            else:
+                response = _text()
         body = json.dumps(response).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -84,11 +96,17 @@ def main(argv):
     ap.add_argument("--key", required=True)
     ap.add_argument("--port-file", required=True)
     ap.add_argument("--block-path", required=True)
+    ap.add_argument("--mode", choices=("main", "observer-failure"), default="main")
+    ap.add_argument("--alive-path", default="")
     args = ap.parse_args(argv)
+    if args.mode == "observer-failure" and not args.alive_path:
+        raise SystemExit("observer-failure mode needs --alive-path")
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.count = 0
+    server.mode = args.mode
     server.block_path = args.block_path
+    server.alive_path = args.alive_path
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(args.cert, args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True)
