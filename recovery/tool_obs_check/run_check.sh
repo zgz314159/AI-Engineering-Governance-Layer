@@ -6,6 +6,7 @@
 #                 wiring, assertion negative cases). No root, no sandbox.
 #   default       root-only isolated check (NOT run by this preparation round).
 set -uo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 PKG="$(cd "$(dirname "$0")/.." && pwd)"
 MODE="full"
@@ -65,8 +66,13 @@ check_manifest() {
 check_syntax() {
   bash -n "$PKG/bin/aegl-hermes-sandbox" && ok "launcher_syntax" || no "launcher_syntax"
   bash -n "$PKG/bin/run_smoke.sh" && ok "entry_syntax" || no "entry_syntax"
-  python3 -m py_compile "$PKG/bin/fake_upstream.py" "$PKG/bin/assert_observation.py" \
-    "$PKG/bin/observer_dead_client.py" && ok "check_python_syntax" || no "check_python_syntax"
+  python3 - "$PKG" <<'PY' && ok "check_python_syntax" || no "check_python_syntax"
+import sys
+base = sys.argv[1]
+for name in ("fake_upstream.py", "assert_observation.py", "observer_dead_client.py",
+             "assert_guard_capture.py"):
+    compile(open(base + "/bin/" + name, encoding="utf-8").read(), name, "exec")
+PY
 }
 
 make_contract() { # <dir> <source-root>
@@ -168,6 +174,41 @@ create_view() { # <src-pkg> <dst-view>
   return 0
 }
 
+create_dead_view() { # <view> <deadview> <dead-client> — only tool_event_client.py differs
+  local view="$1" dead="$2" client="$3" rel mode
+  [ ! -e "$dead" ] && [ ! -L "$dead" ] || return 1
+  install -d -m 0755 "$dead" "$dead/bin" "$dead/bin/guard" || return 1
+  for rel in "${VIEW_FILES[@]}"; do
+    case "$rel" in aegl-model-broker) mode=0755 ;; *) mode=0644 ;; esac
+    install -m "$mode" "$view/bin/$rel" "$dead/bin/$rel" || return 1
+  done
+  install -m 0644 "$client" "$dead/bin/tool_event_client.py" || return 1
+  for rel in "${VIEW_FILES[@]}"; do
+    [ -f "$dead/bin/$rel" ] || return 1
+    local got want
+    got="$(sha256sum "$dead/bin/$rel" | awk '{print $1}')"
+    want="$(sha256sum "$view/bin/$rel" | awk '{print $1}')"
+    if [ "$rel" = "tool_event_client.py" ]; then
+      [ "$got" != "$want" ] || return 1
+    else
+      [ "$got" = "$want" ] || return 1
+    fi
+  done
+  return 0
+}
+
+clean_worktree_product() { # <repo> <worktree> <alive> <expected-owner>
+  local repo="$1" wt="$2" alive="$3" owner="$4" st rc=0
+  [ -f "$alive" ] && [ ! -L "$alive" ] || return 1
+  [ "$(cat "$alive")" = "alive" ] || return 1
+  [ "$(stat -c '%U' "$alive")" = "$owner" ] || return 1
+  rm -f -- "$alive" || return 1
+  st="$(git -C "$wt" status --porcelain 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  [ -z "$st" ] || return 1
+  git -C "$repo" worktree remove "$wt"
+}
+
 check_trusted_view() {
   local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-view.XXXXXX)" || { no trusted_view; return; }
   if create_view "$PKG" "$tmp/view" && [ ! -L "$tmp/view" ]; then
@@ -178,6 +219,93 @@ check_trusted_view() {
   local rel
   for rel in "${VIEW_FILES[@]}"; do rm -f "$tmp/view/bin/$rel"; done
   rmdir "$tmp/view/bin/guard" "$tmp/view/bin" "$tmp/view" "$tmp" 2>/dev/null || true
+}
+
+check_dead_view() {
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-dv.XXXXXX)" || { no dead_view; return; }
+  if create_view "$PKG" "$tmp/view" \
+     && create_dead_view "$tmp/view" "$tmp/deadview" "$PKG/bin/observer_dead_client.py"; then
+    local rel bad=0
+    for rel in "${VIEW_FILES[@]}"; do
+      [ -f "$tmp/deadview/bin/$rel" ] || bad=1
+    done
+    for rel in "${VIEW_FILES[@]}"; do
+      [ "$rel" = "tool_event_client.py" ] && continue
+      [ "$(sha256sum "$tmp/deadview/bin/$rel" | awk '{print $1}')" = "$(sha256sum "$tmp/view/bin/$rel" | awk '{print $1}')" ] || bad=1
+    done
+    [ "$(sha256sum "$tmp/deadview/bin/tool_event_client.py" | awk '{print $1}')" != "$(sha256sum "$tmp/view/bin/tool_event_client.py" | awk '{print $1}')" ] || bad=1
+    [ "$(sha256sum "$tmp/deadview/bin/tool_event_client.py" | awk '{print $1}')" = "$(sha256sum "$PKG/bin/observer_dead_client.py" | awk '{print $1}')" ] || bad=1
+    [ "$bad" -eq 0 ] && ok dead_view || no dead_view
+  else
+    no dead_view
+  fi
+  local rel
+  for rel in "${VIEW_FILES[@]}"; do rm -f "$tmp/deadview/bin/$rel" "$tmp/view/bin/$rel"; done
+  rmdir "$tmp/deadview/bin/guard" "$tmp/deadview/bin" "$tmp/deadview" \
+        "$tmp/view/bin/guard" "$tmp/view/bin" "$tmp/view" "$tmp" 2>/dev/null || true
+}
+
+check_guard_capture() {
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-gc.XXXXXX)" || { no guard_capture; return; }
+  python3 - "$tmp" <<'PY'
+import json, sys
+d = sys.argv[1]
+base = {"rc": 2, "stdout": "{}", "verdict": {"action": "block", "message": "x"},
+        "error": None, "task": "BRIDGE-DIAG-003", "tool_call_id": "call-block",
+        "operation": "terminal", "target": "/x/guard-blocked",
+        "request_matched": True, "request_name": "terminal",
+        "request_args": {"command": "x"}, "request_args_match": True,
+        "evidence": "appended", "_recorded": True}
+def write(name, **changes):
+    rec = dict(base)
+    rec.update(changes)
+    with open(d + "/" + name, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+write("valid")
+write("allow", rc=0, verdict={"action": "allow"})
+write("other", tool_call_id="other")
+with open(d + "/empty", "w", encoding="utf-8") as fh:
+    fh.write("")
+write("incomplete", request_args_match=False)
+write("norec", _recorded=False)
+PY
+  local good=0 bad=0 name
+  python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/valid" --call-id call-block \
+    --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null && good=1
+  for name in allow other empty incomplete norec; do
+    python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/$name" --call-id call-block \
+      --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 && bad=$((bad + 1))
+  done
+  [ "$good" -eq 1 ] && [ "$bad" -eq 0 ] && ok guard_capture || no guard_capture
+  rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
+}
+
+check_worktree_product_cleanup() {
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-wt.XXXXXX)" || { no worktree_product_cleanup; return; }
+  local flag=0
+  if git init -q "$tmp/repo" \
+     && git -C "$tmp/repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base \
+     && git -C "$tmp/repo" worktree add -q "$tmp/wt" -b wt; then
+    printf 'alive' > "$tmp/wt/observer-alive"
+    printf 'unknown' > "$tmp/wt/unknown-file"
+    local rc1=0
+    clean_worktree_product "$tmp/repo" "$tmp/wt" "$tmp/wt/observer-alive" "$(id -un)" >/dev/null 2>&1 || rc1=$?
+    local kept=0; [ -d "$tmp/wt" ] && kept=1
+    local neg=0; [ "$rc1" -ne 0 ] && [ "$kept" -eq 1 ] && neg=1
+    printf 'alive' > "$tmp/wt/observer-alive"
+    rm -f "$tmp/wt/unknown-file"
+    local rc2=0
+    clean_worktree_product "$tmp/repo" "$tmp/wt" "$tmp/wt/observer-alive" "$(id -un)" >/dev/null 2>&1 || rc2=$?
+    local gone=0; [ ! -e "$tmp/wt" ] && gone=1
+    [ "$neg" -eq 1 ] && [ "$rc2" -eq 0 ] && [ "$gone" -eq 1 ] && flag=1
+  fi
+  [ "$flag" -eq 1 ] && ok worktree_product_cleanup || no worktree_product_cleanup
+  if [ -d "$tmp/wt" ]; then git -C "$tmp/repo" worktree remove "$tmp/wt" 2>/dev/null || true; fi
+  if [ -d "$tmp/repo" ]; then
+    find "$tmp/repo" -type f 2>/dev/null | while IFS= read -r p; do rm -f "$p"; done
+    find "$tmp/repo" -depth -type d 2>/dev/null | while IFS= read -r p; do rmdir "$p" 2>/dev/null || true; done
+  fi
+  rmdir "$tmp" 2>/dev/null || true
 }
 
 make_valid_sink() { # <path>
@@ -227,8 +355,9 @@ check_assert_negatives() {
   mutate_sink "$tmp/valid" "$tmp/missing_post" "rows[:] = [r for i, r in enumerate(rows) if not (r.get('phase') == 'tool_post_observe' and r.get('seq') == 2)]"
   mutate_sink "$tmp/valid" "$tmp/duplicate_post" "rows[:] = rows + [next(r for r in rows if r.get('phase') == 'tool_post_observe' and r.get('seq') == 1)]"
   mutate_sink "$tmp/valid" "$tmp/extra_pre" "rows[:] = rows + [{'phase': 'tool_pre_observe', 'seq': 4, 'arg': 'src=hook trust=diagnostic when=pre corr=1 tool=terminal status=OK err=UNKNOWN'}]"
+  mutate_sink "$tmp/valid" "$tmp/post_before_pre" "rows[:] = [r for r in rows if r.get('phase') == 'model_response'] + [r for r in rows if r.get('phase') == 'model_tool_request'] + [r for r in rows if r.get('phase') == 'tool_post_observe'] + [r for r in rows if r.get('phase') == 'tool_pre_observe']"
   local name
-  for name in pre_seq1 exit70 missing_post duplicate_post extra_pre; do
+  for name in pre_seq1 exit70 missing_post duplicate_post extra_pre post_before_pre; do
     python3 "$PKG/bin/assert_observation.py" --events "$tmp/$name" --forbidden "$tmp/none" >/dev/null 2>&1 \
       && bad=$((bad + 1))
   done
@@ -279,6 +408,9 @@ self_test() {
   check_profile_fixture
   check_model_config_fixture
   check_trusted_view
+  check_dead_view
+  check_guard_capture
+  check_worktree_product_cleanup
   check_assert_negatives
   check_fake_upstream
   notrun root_bwrap_check_mode_sink_absence
@@ -347,19 +479,17 @@ root_check() {
   install -d -m 0755 "$fixture/task" "$fixture/task/project" "$fixture/task/scratch" \
     "$fixture/repo" "$fixture/contract" "$fixture/diag-root" "$fixture/diag-root-observer" \
     "$fixture/run-root" "$fixture/run-root-observer" "$fixture/tls" \
-    "$fixture/view" "$fixture/deadview" || { echo "OBS_CHECK=FAIL phase=fixture_dirs"; exit 1; }
+    "$fixture/view" || { echo "OBS_CHECK=FAIL phase=fixture_dirs"; exit 1; }
   for d in "$fixture" "$fixture/task" "$fixture/task/project" "$fixture/task/scratch" \
            "$fixture/repo" "$fixture/contract" "$fixture/diag-root" \
            "$fixture/diag-root-observer" "$fixture/run-root" "$fixture/run-root-observer" \
-           "$fixture/tls" "$fixture/view" "$fixture/deadview"; do record "$d"; done
+           "$fixture/tls" "$fixture/view"; do record "$d"; done
 
   create_view "$PKG" "$fixture/view" || { echo "OBS_CHECK=FAIL phase=trusted_view"; exit 1; }
   find "$fixture/view" -type f | while IFS= read -r p; do record "$p"; done
   find "$fixture/view" -type d | while IFS= read -r p; do record "$p"; done
-  cp -a "$fixture/view" "$fixture/deadview" \
+  create_dead_view "$fixture/view" "$fixture/deadview" "$PKG/bin/observer_dead_client.py" \
     || { echo "OBS_CHECK=FAIL phase=dead_view"; exit 1; }
-  install -m 0644 "$PKG/bin/observer_dead_client.py" "$fixture/deadview/bin/tool_event_client.py" \
-    || { echo "OBS_CHECK=FAIL phase=dead_view_client"; exit 1; }
   chown -R root:root "$fixture/view" "$fixture/deadview"
   chmod 0755 "$fixture/view/bin/aegl-model-broker" "$fixture/deadview/bin/aegl-model-broker"
   find "$fixture/deadview" -type f | while IFS= read -r p; do record "$p"; done
@@ -511,13 +641,23 @@ EOF
   [ ! -e "$fixture/run-root/BRIDGE-DIAG-003" ] && root_ok run_dir_removed \
     || root_no run_dir_removed
   [ -f "$sink_main" ] && root_ok sink_survives_run_dir_removal || root_no sink_survives_run_dir_removal
+  local capture_main="$fixture/diag-root/BRIDGE-DIAG-003/guard-capture.jsonl"
+  if python3 "$PKG/bin/assert_guard_capture.py" --capture "$capture_main" \
+       --call-id obs-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null; then
+    root_ok guard_capture_main_block
+  else
+    root_no guard_capture_main_block
+  fi
 
+  record "$fixture/task/project/observer-alive"
   rc=0
   out="$(run_ns "$fixture/diag-root-observer" "$fixture/run-root-observer" "$fixture/deadview/bin" \
          "$fixture/model.observer.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
          hermes -p android-stack chat --oneshot --query-file "$fixture/prompt.txt" 2>&1)" || rc=$?
   [ "$rc" -eq 0 ] && root_ok observer_failure_run_exit || root_no observer_failure_run_exit "rc=$rc"
   if [ -f "$fixture/task/project/observer-alive" ] \
+     && [ "$(cat "$fixture/task/project/observer-alive")" = "alive" ] \
+     && [ "$(stat -c '%U' "$fixture/task/project/observer-alive")" = aegl-ai ] \
      && [ ! -e "$fixture/task/scratch/guard-blocked-observer" ]; then
     root_ok observer_failure_allowed_executed_blocked_not
   else
@@ -531,23 +671,10 @@ EOF
   else
     root_no observer_failure_missing_observation_unknown
   fi
-  local capture="$fixture/diag-root-observer/BRIDGE-DIAG-003/guard-capture.jsonl"
-  if [ -f "$capture" ] && python3 - "$capture" <<'PY'
-import json, sys
-blocks = 0
-for line in open(sys.argv[1], encoding="utf-8"):
-    line = line.strip()
-    if not line:
-        continue
-    rec = json.loads(line)
-    verdict = rec.get("verdict")
-    if isinstance(verdict, str):
-        verdict = json.loads(verdict)
-    if isinstance(verdict, dict) and verdict.get("decision") == "BLOCK":
-        blocks += 1
-raise SystemExit(0 if blocks >= 1 else 1)
-PY
-  then
+  local capture_obs="$fixture/diag-root-observer/BRIDGE-DIAG-003/guard-capture.jsonl"
+  if python3 "$PKG/bin/assert_guard_capture.py" --capture "$capture_obs" \
+       --call-id obs-block2 --target-basename guard-blocked-observer \
+       --task BRIDGE-DIAG-003 >/dev/null; then
     root_ok observer_failure_guard_still_blocks
   else
     root_no observer_failure_guard_still_blocks
@@ -574,8 +701,9 @@ PY
   fi
 
   if [ -e "$fixture/repo/.git" ] && [ -d "$fixture/task/project" ]; then
-    git -C "$fixture/repo" worktree remove "$fixture/task/project" \
-      || { echo "OBS_CHECK=FAIL phase=cleanup_worktree"; echo "SCENE_KEPT=$fixture"; exit 1; }
+    clean_worktree_product "$fixture/repo" "$fixture/task/project" \
+      "$fixture/task/project/observer-alive" aegl-ai \
+      || { echo "OBS_CHECK=FAIL phase=cleanup_worktree_product"; echo "SCENE_KEPT=$fixture"; exit 1; }
   fi
   local p
   while IFS= read -r p; do

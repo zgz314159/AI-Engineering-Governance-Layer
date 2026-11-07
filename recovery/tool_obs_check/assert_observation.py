@@ -111,6 +111,25 @@ def main(argv) -> int:
     if [r.get("seq") for r in post_rows] != expected:
         errors.append("post_order_mismatch")
 
+    request_pos = {}
+    pre_pos = {}
+    post_pos = {}
+    for index, row in enumerate(rows):
+        seq = row.get("seq")
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            continue
+        if row.get("phase") == "model_tool_request":
+            request_pos.setdefault(seq, index)
+        elif row.get("phase") == "tool_pre_observe":
+            pre_pos.setdefault(seq, index)
+        elif row.get("phase") == "tool_post_observe":
+            post_pos.setdefault(seq, index)
+    for seq in expected:
+        if seq not in request_pos or seq not in pre_pos or seq not in post_pos \
+                or not (request_pos[seq] < pre_pos[seq] < post_pos[seq]):
+            errors.append("causal_order_mismatch")
+            break
+
     expect_post = [("OK", "0"), ("ERROR", "7"), ("BLOCKED", "UNKNOWN")]
     for index, seq in enumerate(expected):
         pre = pre_by_seq.get(seq)
