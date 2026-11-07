@@ -167,9 +167,75 @@ REQUEST_INDEX: dict = {}
 # a monotonic counter per request kind lets the reader locate the LAST incomplete request.
 _MODEL_REQ_SEQ = itertools.count(1)
 _GUARD_REQ_SEQ = itertools.count(1)
+# Controller-side numeric ids for structural observations. The full tool_call_id is kept in
+# memory for correlation only; the diagnostic sink stores these numbers.
+_MODEL_RESP_SEQ = itertools.count(1)
+_CALL_SEQ = itertools.count(1)
+TOOL_EVENT_SEEN: set = set()
+
+_FINISH_MAP = {
+    "stop": "STOP",
+    "length": "LENGTH",
+    "tool_calls": "TOOL_CALLS",
+    "function_call": "FUNCTION_CALL",
+    "content_filter": "CONTENT_FILTER",
+}
+_TOOL_CLASS_MAP = {
+    "terminal": "terminal",
+    "read_file": "read_file",
+    "write_file": "write_file",
+    "patch": "patch",
+}
+_STATUS_MAP = {"ok": "OK", "error": "ERROR", "blocked": "BLOCKED"}
+_ERROR_CLASSES = {
+    "tool_error", "TimeoutError", "FileNotFoundError", "PermissionError",
+    "ValueError", "RuntimeError", "CalledProcessError", "OSError",
+}
 
 
-def _record_request(call_id, name, arguments) -> None:
+def _finish_class(value) -> str:
+    return _FINISH_MAP.get(str(value or ""), "OTHER")
+
+
+def _tool_class(name) -> str:
+    return _TOOL_CLASS_MAP.get(str(name or "").strip(), "other")
+
+
+def _status_class(value) -> str:
+    if value is None or str(value) == "":
+        return "UNKNOWN"
+    return _STATUS_MAP.get(str(value), "OTHER")
+
+
+def _error_class(value) -> str:
+    if value is None or str(value) == "":
+        return "UNKNOWN"
+    name = str(value)
+    return name if name in _ERROR_CLASSES else "OTHER"
+
+
+def _content_present(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_content_present(item) for item in value)
+    if isinstance(value, dict):
+        return bool(value)
+    return value is not None
+
+
+def _new_summary() -> dict:
+    return {"flags": set(), "calls": [], "finish": "OTHER"}
+
+
+def _summary_arg(summary: dict) -> str:
+    flags = ",".join(sorted(summary["flags"])) or "-"
+    seqs = ",".join(str(call["seq"]) for call in summary["calls"]) or "-"
+    return "flags=%s calls=%d callseq=%s finish=%s" % (
+        flags, len(summary["calls"]), seqs, summary["finish"])
+
+
+def _record_request(call_id, name, arguments) -> int:
     """Store one assembled tool call; arguments are parsed only after full assembly."""
     parsed = None
     if arguments:
@@ -177,59 +243,119 @@ def _record_request(call_id, name, arguments) -> None:
             parsed = json.loads(arguments)
         except ValueError:
             parsed = None
+    seq = REQUEST_INDEX.get(call_id, {}).get("seq")
+    if not isinstance(seq, int):
+        seq = next(_CALL_SEQ)
     REQUEST_INDEX[call_id] = {"name": name or "", "args": parsed if isinstance(parsed, dict) else None,
-                              "assembled": bool(arguments)}
+                              "assembled": bool(arguments), "seq": seq}
+    return seq
 
 
-def _index_requests(payload: bytes) -> None:
-    """Store the tool requests the UPSTREAM MODEL really returned.
+def _finish_summary(summary: dict) -> dict:
+    if not summary["flags"]:
+        summary["flags"].add("empty")
+    if "reasoning" in summary["flags"] and not ({"text", "tool_call"} & summary["flags"]):
+        summary["flags"].add("reasoning_only")
+    return summary
 
-    A normal response is parsed as structured JSON. An SSE response is accumulated per
-    (choice index, tool_call index) — id, function name and argument fragments are joined in
-    order and the arguments are parsed only once assembled; no cross-fragment regex guessing.
+
+def _index_requests(payload: bytes) -> dict:
+    """Store the tool requests the UPSTREAM MODEL really returned AND return a structural
+    summary produced by the SAME parse (plain JSON or SSE deltas).
+
+    The summary carries presence flags only — never content, arguments or reasoning text:
+    tool_call, text, reasoning, reasoning_only, empty, parse_error, other.
     """
     text = payload.decode("utf-8", "replace")
     stripped = text.lstrip()
+    summary = _new_summary()
     if stripped.startswith("{"):
         try:
             data = json.loads(text)
         except ValueError:
-            return
-        for choice in data.get("choices") or []:
-            message = choice.get("message") or {}
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                if call.get("id"):
-                    _record_request(call["id"], function.get("name"), function.get("arguments"))
-        return
+            summary["flags"].add("parse_error")
+            return summary
+        if not isinstance(data, dict):
+            summary["flags"].add("parse_error")
+            return summary
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            summary["flags"].add("other")
+            return summary
+        for choice in choices:
+            if not isinstance(choice, dict):
+                summary["flags"].add("other")
+                continue
+            message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+            if _content_present(message.get("content")):
+                summary["flags"].add("text")
+            if _content_present(message.get("reasoning_content")) or _content_present(message.get("reasoning")):
+                summary["flags"].add("reasoning")
+            calls = message.get("tool_calls")
+            if isinstance(calls, list) and calls:
+                summary["flags"].add("tool_call")
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    if call.get("id"):
+                        seq = _record_request(call["id"], function.get("name"), function.get("arguments"))
+                        summary["calls"].append({"seq": seq, "name": function.get("name")})
+            summary["finish"] = _finish_class(choice.get("finish_reason"))
+        return _finish_summary(summary)
 
     # SSE: accumulate deltas by (choice index, tool index)
     acc = {}
+    saw_data = False
     for line in text.splitlines():
         line = line.strip()
         if not line.startswith("data:"):
             continue
         chunk = line[5:].strip()
-        if not chunk or chunk == "[DONE]":
+        if not chunk:
+            continue
+        if chunk == "[DONE]":
+            saw_data = True
             continue
         try:
             data = json.loads(chunk)
         except ValueError:
+            summary["flags"].add("parse_error")
             continue
+        if not isinstance(data, dict):
+            summary["flags"].add("parse_error")
+            continue
+        saw_data = True
         for choice in data.get("choices") or []:
-            for delta in (choice.get("delta") or {}).get("tool_calls") or []:
-                key = (choice.get("index", 0), delta.get("index", 0))
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            if _content_present(delta.get("content")):
+                summary["flags"].add("text")
+            if _content_present(delta.get("reasoning_content")) or _content_present(delta.get("reasoning")):
+                summary["flags"].add("reasoning")
+            for tool_delta in delta.get("tool_calls") or []:
+                if not isinstance(tool_delta, dict):
+                    continue
+                summary["flags"].add("tool_call")
+                key = (choice.get("index", 0), tool_delta.get("index", 0))
                 slot = acc.setdefault(key, {"id": "", "name": "", "args": ""})
-                if delta.get("id"):
-                    slot["id"] = delta["id"]
-                function = delta.get("function") or {}
+                if tool_delta.get("id"):
+                    slot["id"] = tool_delta["id"]
+                function = tool_delta.get("function") or {}
                 if function.get("name"):
                     slot["name"] += function["name"]
                 if function.get("arguments"):
                     slot["args"] += function["arguments"]
+            if isinstance(choice.get("finish_reason"), str):
+                summary["finish"] = _finish_class(choice.get("finish_reason"))
     for slot in acc.values():
         if slot["id"]:
-            _record_request(slot["id"], slot["name"], slot["args"])
+            seq = _record_request(slot["id"], slot["name"], slot["args"])
+            summary["calls"].append({"seq": seq, "name": slot["name"]})
+    if not saw_data and not summary["flags"]:
+        summary["flags"].add("parse_error")
+    return _finish_summary(summary)
 
 
 def _handle_guard(conn: socket.socket, body: bytes) -> None:
@@ -308,6 +434,60 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
         error=result.get("error"))
     out = json.dumps(result, ensure_ascii=False).encode("utf-8")
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
+
+
+def _handle_tool_event(conn: socket.socket, body: bytes) -> None:
+    """Diagnostic tool observer (pre/post), fed by the task-scoped hook client.
+
+    It never authorizes, modifies or blocks anything. The full tool_call_id is used only
+    in memory to correlate against REQUEST_INDEX; the sink stores controller numeric ids
+    and fixed whitelists (tool class, status, error class). Unknown values are OTHER /
+    UNKNOWN. A hook rc or guard rc is never treated as a command exit code.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except ValueError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    event = str(payload.get("hook_event_name") or "")
+    if event not in ("pre_tool_call", "post_tool_call"):
+        out = b'{"error":"unknown_event"}'
+        conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+                     % len(out) + out)
+        return
+
+    call_id = str(payload.get("tool_call_id") or "")
+    name = str(payload.get("tool_name") or "")
+    request = REQUEST_INDEX.get(call_id) if call_id else None
+    seq = request.get("seq") if isinstance(request, dict) else None
+    corr = bool(request) and (not request.get("name") or not name or request.get("name") == name)
+    when = "pre" if event == "pre_tool_call" else "post"
+    key = (event, call_id or name or "-")
+    if key in TOOL_EVENT_SEEN:
+        _ev("tool_event_duplicate", seq=seq if isinstance(seq, int) else None,
+            arg="event=%s" % when)
+    else:
+        TOOL_EVENT_SEEN.add(key)
+        parts = [
+            "src=hook", "trust=diagnostic", "when=%s" % when,
+            "corr=%d" % int(corr), "tool=%s" % _tool_class(name),
+            "status=%s" % _status_class(payload.get("status")),
+            "err=%s" % _error_class(payload.get("error_type")),
+        ]
+        if when == "post":
+            duration = payload.get("duration_ms")
+            exit_code = payload.get("exit_code")
+            parts.append("duration_ms=%s" % (
+                duration if isinstance(duration, int) and not isinstance(duration, bool) else "UNKNOWN"))
+            parts.append("exit=%s" % (
+                exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else "UNKNOWN"))
+        _ev("tool_pre_observe" if when == "pre" else "tool_post_observe",
+            seq=seq if isinstance(seq, int) else None,
+            arg=" ".join(parts))
+    out = b'{"observed":"diagnostic"}'
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+                 % len(out) + out)
 
 
 def _answer_local_probe(conn: socket.socket, method: str, path_only: str) -> None:
@@ -532,6 +712,10 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
     if path.split("?")[0] == "/guard":
         _handle_guard(conn, body)
         return
+    # diagnostic-only tool observer; never authorizes or modifies
+    if path.split("?")[0] == "/tool-event":
+        _handle_tool_event(conn, body)
+        return
 
     # native model-server probes are answered locally and NEVER reach the upstream
     probe_path = path.split("?", 1)[0]
@@ -591,7 +775,16 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         if resp.status < 200 or resp.status >= 300:
             _ev("upstream_http_error", seq=req_seq, status=resp.status,
                 arg=_error_category(resp.status, payload))
-        _index_requests(payload)
+        try:
+            summary = _index_requests(payload)
+        except Exception:  # noqa: BLE001 - diagnostics must never break forwarding
+            summary = {"flags": {"other"}, "calls": [], "finish": "OTHER"}
+        resp_seq = next(_MODEL_RESP_SEQ)
+        _ev("model_response", seq=resp_seq, status=resp.status, bytes_=len(payload),
+            arg=_summary_arg(summary))
+        for call in summary["calls"]:
+            _ev("model_tool_request", seq=call["seq"],
+                arg="resp=%d tool=%s" % (resp_seq, _tool_class(call["name"])))
         out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
         for k, v in resp.getheaders():
             if k.lower() in ("transfer-encoding", "connection", "content-length"):
