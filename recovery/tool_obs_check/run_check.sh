@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AEGL-TOOL-OBS-CHECK-r2 entry.
+# AEGL-TOOL-OBS-CHECK-r4 entry.
 #
 #   --self-test   ordinary-user checks only (hashes, Hermes version, manifest, fixture
 #                 templates, trusted-view copy, HTTPS synthetic upstream, exact observer
@@ -35,11 +35,18 @@ declare -A WANT=(
   [bin/tool_observer_config.py]=424369561202ca48f122b8116fc6b2ebca8cbb1d108dbeb04674608b807591c3
 )
 
+# Packaged runtime dependencies that are not candidate-hash pins. Source recorded in
+# DEPENDENCIES.md; the copy is unmodified and must never be resolved from the source
+# repo, an installed tree or PYTHONPATH.
+declare -A DEPS=(
+  [bin/guard_capture.py]=4422f725fc2fb88ecff4de6baba81a519e4f450be5ad644948b29745d877be1a
+)
+
 VIEW_FILES=(
-  aegl-hermes-sandbox aegl-model-broker model_broker.py tool_event_client.py
-  tool_observer_config.py guard_hook_client.py diag_events.py loopback_shim.py
-  exec_spec.py sandbox_spec.py prepare_targets.py drop_verify.py model_config.py
-  git_meta_mounts.sh guard/contract_guard.py
+  aegl-hermes-sandbox aegl-model-broker model_broker.py guard_capture.py
+  tool_event_client.py tool_observer_config.py guard_hook_client.py diag_events.py
+  loopback_shim.py exec_spec.py sandbox_spec.py prepare_targets.py drop_verify.py
+  model_config.py git_meta_mounts.sh guard/contract_guard.py
 )
 
 check_candidates() {
@@ -48,6 +55,32 @@ check_candidates() {
     got="$(sha256sum "$PKG/$rel" 2>/dev/null | awk '{print $1}')"
     [ "$got" = "${WANT[$rel]}" ] && ok "candidate_hash $rel" || no "candidate_hash $rel (${got:-missing})"
   done
+}
+
+check_dependencies() {
+  local rel got
+  for rel in "${!DEPS[@]}"; do
+    got="$(sha256sum "$PKG/$rel" 2>/dev/null | awk '{print $1}')"
+    [ "$got" = "${DEPS[$rel]}" ] && ok "dependency_hash $rel" \
+      || no "dependency_hash $rel (${got:-missing})"
+  done
+  # No implicit fallback: only model_broker + diag_events in an isolated cwd. The
+  # guarded import must fail because guard_capture.py is deliberately absent.
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-dep.XXXXXX)" \
+    || { no "dependency_no_fallback"; return; }
+  if cp "$PKG/bin/model_broker.py" "$PKG/bin/diag_events.py" "$tmp/"; then
+    if ( cd "$tmp" && PYTHONPATH= python3 -I -c \
+         'import sys; sys.dont_write_bytecode=True; sys.path.insert(0, "."); import model_broker; model_broker._handle_guard(None, b"{}")' ) \
+         >/dev/null 2>&1; then
+      no "dependency_no_fallback"
+    else
+      ok "dependency_no_fallback"
+    fi
+  else
+    no "dependency_no_fallback"
+  fi
+  rm -f "$tmp"/* "$tmp"/__pycache__/* 2>/dev/null || true
+  rmdir "$tmp/__pycache__" "$tmp" 2>/dev/null || true
 }
 
 check_hermes() {
@@ -70,7 +103,7 @@ check_syntax() {
 import sys
 base = sys.argv[1]
 for name in ("fake_upstream.py", "assert_observation.py", "observer_dead_client.py",
-             "assert_guard_capture.py"):
+             "assert_guard_capture.py", "guard_capture.py", "broker_guard_capture_test.py"):
     compile(open(base + "/bin/" + name, encoding="utf-8").read(), name, "exec")
 PY
 }
@@ -203,10 +236,12 @@ clean_worktree_product() { # <repo> <worktree> <alive> <expected-owner>
   [ "$(cat "$alive")" = "alive" ] || return 1
   [ "$(stat -c '%U' "$alive")" = "$owner" ] || return 1
   rm -f -- "$alive" || return 1
-  st="$(git -C "$wt" status --porcelain 2>&1)" || rc=$?
+  # Root queries an aegl-ai-owned worktree: trust exactly this path at command level,
+  # never a global/wildcard safe.directory.
+  st="$(git -c safe.directory="$wt" -C "$wt" status --porcelain 2>&1)" || rc=$?
   [ "$rc" -eq 0 ] || return 1
   [ -z "$st" ] || return 1
-  git -C "$repo" worktree remove "$wt"
+  git -c safe.directory="$wt" -C "$repo" worktree remove "$wt"
 }
 
 check_trusted_view() {
@@ -247,37 +282,83 @@ check_dead_view() {
 
 check_guard_capture() {
   local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-gc.XXXXXX)" || { no guard_capture; return; }
-  python3 - "$tmp" <<'PY'
+  if ! install -d "$tmp/ev-block" "$tmp/ev-allow" "$tmp/ev-mismatch" \
+       "$tmp/work" "$tmp/diag"; then
+    no guard_capture; rmdir "$tmp" 2>/dev/null || true; return
+  fi
+  cat > "$tmp/guard_block.py" <<'PY'
 import json, sys
-d = sys.argv[1]
-base = {"rc": 2, "stdout": "{}", "verdict": {"action": "block", "message": "x"},
-        "error": None, "task": "BRIDGE-DIAG-003", "tool_call_id": "call-block",
-        "operation": "terminal", "target": "/x/guard-blocked",
-        "request_matched": True, "request_name": "terminal",
-        "request_args": {"command": "x"}, "request_args_match": True,
-        "evidence": "appended", "_recorded": True}
-def write(name, **changes):
-    rec = dict(base)
-    rec.update(changes)
-    with open(d + "/" + name, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec) + "\n")
-write("valid")
-write("allow", rc=0, verdict={"action": "allow"})
-write("other", tool_call_id="other")
-with open(d + "/empty", "w", encoding="utf-8") as fh:
-    fh.write("")
-write("incomplete", request_args_match=False)
-write("norec", _recorded=False)
+sys.stdout.write(json.dumps({"action": "block", "message": "fixture"}))
+sys.exit(2)
 PY
-  local good=0 bad=0 name
-  python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/valid" --call-id call-block \
-    --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null && good=1
-  for name in allow other empty incomplete norec; do
-    python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/$name" --call-id call-block \
-      --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 && bad=$((bad + 1))
-  done
+  cat > "$tmp/guard_allow.py" <<'PY'
+import json, sys
+sys.stdout.write(json.dumps({"action": "allow", "message": "fixture"}))
+sys.exit(0)
+PY
+  local ai_uid ai_gid
+  ai_uid="$(id -u aegl-ai 2>/dev/null || echo 65534)"
+  ai_gid="$(id -g aegl-ai 2>/dev/null || echo 65534)"
+  local base=(--package-bin "$PKG/bin" --task BRIDGE-DIAG-003 --call-id test-block
+              --target-basename guard-blocked --workdir "$tmp/work" --diag "$tmp/diag"
+              --ai-uid "$ai_uid" --ai-gid "$ai_gid")
+  local good=0 bad=0 rc=0
+  PYTHONPATH= python3 -I "$PKG/bin/broker_guard_capture_test.py" "${base[@]}" \
+    --guard "$tmp/guard_block.py" --evidence "$tmp/ev-block" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ] \
+     && python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/ev-block/guard-capture.jsonl" \
+          --call-id test-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null; then
+    good=1
+  fi
+  # real ALLOW write path: the persisted record must fail the block assertion
+  rc=0; PYTHONPATH= python3 -I "$PKG/bin/broker_guard_capture_test.py" "${base[@]}" \
+    --guard "$tmp/guard_allow.py" --evidence "$tmp/ev-allow" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/ev-allow/guard-capture.jsonl" \
+      --call-id test-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 \
+      && bad=$((bad + 1))
+  else
+    bad=$((bad + 1))
+  fi
+  # real argument-mismatch write path: incomplete correlation must fail
+  rc=0; PYTHONPATH= python3 -I "$PKG/bin/broker_guard_capture_test.py" "${base[@]}" \
+    --guard "$tmp/guard_block.py" --evidence "$tmp/ev-mismatch" --mismatch >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/ev-mismatch/guard-capture.jsonl" \
+      --call-id test-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 \
+      && bad=$((bad + 1))
+  else
+    bad=$((bad + 1))
+  fi
+  # unrelated request id against the real block record
+  python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/ev-block/guard-capture.jsonl" \
+    --call-id other --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 \
+    && bad=$((bad + 1))
+  # missing record
+  : > "$tmp/empty"
+  python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/empty" \
+    --call-id test-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 \
+    && bad=$((bad + 1))
+  # incomplete: remove the persisted terminal marker from a copy of the real record
+  cp "$tmp/ev-block/guard-capture.jsonl" "$tmp/norec"
+  python3 - "$tmp/norec" <<'PY'
+import json, sys
+path = sys.argv[1]
+rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
+for row in rows:
+    row.pop("_recorded", None)
+with open(path, "w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
+PY
+  python3 "$PKG/bin/assert_guard_capture.py" --capture "$tmp/norec" \
+    --call-id test-block --target-basename guard-blocked --task BRIDGE-DIAG-003 >/dev/null 2>&1 \
+    && bad=$((bad + 1))
   [ "$good" -eq 1 ] && [ "$bad" -eq 0 ] && ok guard_capture || no guard_capture
-  rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
+  rm -f "$tmp"/*.py "$tmp"/ev-block/* "$tmp"/ev-allow/* "$tmp"/ev-mismatch/* \
+    "$tmp"/diag/* "$tmp"/norec "$tmp"/empty 2>/dev/null || true
+  rmdir "$tmp/ev-block" "$tmp/ev-allow" "$tmp/ev-mismatch" "$tmp/work" "$tmp/diag" \
+    "$tmp" 2>/dev/null || true
 }
 
 check_worktree_product_cleanup() {
@@ -401,6 +482,7 @@ PY
 self_test() {
   say "SELF_TEST begin pkg=$PKG"
   check_candidates
+  check_dependencies
   check_hermes
   check_manifest
   check_syntax
@@ -458,6 +540,7 @@ root_check() {
   set -Eeuo pipefail
 
   check_candidates
+  check_dependencies
   check_hermes
   check_manifest
   check_syntax
@@ -467,7 +550,7 @@ root_check() {
   [ "$FAIL" -eq 0 ] || { echo "OBS_CHECK=FAIL phase=prechecks"; exit 1; }
 
   local fixture
-  fixture="$(mktemp -d /var/tmp/AEGL-TOOL-OBS-CHECK.r2.XXXXXX)" \
+  fixture="$(mktemp -d /var/tmp/AEGL-TOOL-OBS-CHECK.r4.XXXXXX)" \
     || { echo "OBS_CHECK=FAIL phase=fixture_mktemp"; exit 1; }
   [ -d "$fixture" ] && [ ! -L "$fixture" ] || { echo "OBS_CHECK=FAIL phase=fixture_type"; exit 1; }
   chmod 0755 "$fixture"

@@ -2,10 +2,12 @@
 """Assert one specific guard-capture record from the real broker/guard path.
 
 It correlates the record to the exact tool_call_id AND target basename of the request
-under test, then checks the guard_capture.run_guard structure: verdict.action == block,
-guard rc == 2, _recorded, evidence appended, request correlation fields, operation/name
-terminal, and no error/refusal. Raw ids, target, arguments, stdout and messages are
-never printed.
+under test, then checks the actual persisted guard_capture.run_guard structure:
+verdict.action == block, guard rc == 2, _recorded == True, request correlation fields,
+terminal operation/name, and no error/refusal. The broker sets evidence="appended" only
+on the in-memory result AFTER guard_capture.record() returns, so the file record has no
+evidence field; this assertion does not require one. Raw ids, target, arguments, stdout
+and messages are never printed.
 
 CLI: assert_guard_capture.py --capture PATH --call-id ID --target-basename NAME
                               [--task ID]
@@ -57,8 +59,6 @@ def main(argv) -> int:
         return _fail("guard_rc_not_block")
     if rec.get("_recorded") is not True:
         return _fail("record_incomplete")
-    if rec.get("evidence") != "appended":
-        return _fail("evidence_not_appended")
     if rec.get("request_matched") is not True:
         return _fail("request_not_matched")
     if rec.get("request_args_match") is not True:
