@@ -436,6 +436,30 @@ def _handle_guard(conn: socket.socket, body: bytes) -> None:
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(out) + out)
 
 
+def _tool_event_reject_reason(call_id, request, name, seq) -> str:
+    """Fixed rejection category for an uncorrelated observer event.
+
+    Correlation requires ALL of: a non-empty call id that resolves to a model request, a
+    valid controller call sequence, non-empty request and reported names, and exact name
+    equality. An empty name is never a wildcard. Unknown tool names still correlate when
+    they match exactly; their persisted class stays OTHER.
+    """
+    if not isinstance(call_id, str) or call_id == "":
+        return "no_call_id"
+    if not isinstance(request, dict):
+        return "unknown_request"
+    if not isinstance(seq, int) or isinstance(seq, bool):
+        return "no_controller_seq"
+    request_name = request.get("name")
+    if not isinstance(request_name, str) or request_name == "":
+        return "empty_request_name"
+    if not isinstance(name, str) or name == "":
+        return "empty_reported_name"
+    if request_name != name:
+        return "name_mismatch"
+    return ""
+
+
 def _handle_tool_event(conn: socket.socket, body: bytes) -> None:
     """Diagnostic tool observer (pre/post), fed by the task-scoped hook client.
 
@@ -461,30 +485,36 @@ def _handle_tool_event(conn: socket.socket, body: bytes) -> None:
     name = str(payload.get("tool_name") or "")
     request = REQUEST_INDEX.get(call_id) if call_id else None
     seq = request.get("seq") if isinstance(request, dict) else None
-    corr = bool(request) and (not request.get("name") or not name or request.get("name") == name)
+    reason = _tool_event_reject_reason(call_id, request, name, seq)
     when = "pre" if event == "pre_tool_call" else "post"
-    key = (event, call_id or name or "-")
-    if key in TOOL_EVENT_SEEN:
-        _ev("tool_event_duplicate", seq=seq if isinstance(seq, int) else None,
-            arg="event=%s" % when)
+    if reason:
+        # Diagnostic rejection only: a fixed category, never the raw id/name/arguments,
+        # and it must NOT occupy the normal pre/post dedup state. A later correct event
+        # for the same controller sequence is therefore still recorded normally.
+        _ev("tool_event_rejected", seq=seq if isinstance(seq, int) else None,
+            arg="src=hook trust=diagnostic when=%s reason=%s" % (when, reason))
     else:
-        TOOL_EVENT_SEEN.add(key)
-        parts = [
-            "src=hook", "trust=diagnostic", "when=%s" % when,
-            "corr=%d" % int(corr), "tool=%s" % _tool_class(name),
-            "status=%s" % _status_class(payload.get("status")),
-            "err=%s" % _error_class(payload.get("error_type")),
-        ]
-        if when == "post":
-            duration = payload.get("duration_ms")
-            exit_code = payload.get("exit_code")
-            parts.append("duration_ms=%s" % (
-                duration if isinstance(duration, int) and not isinstance(duration, bool) else "UNKNOWN"))
-            parts.append("exit=%s" % (
-                exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else "UNKNOWN"))
-        _ev("tool_pre_observe" if when == "pre" else "tool_post_observe",
-            seq=seq if isinstance(seq, int) else None,
-            arg=" ".join(parts))
+        # Deduplicate only after correlation, keyed by controller sequence + event type.
+        key = (seq, event)
+        if key in TOOL_EVENT_SEEN:
+            _ev("tool_event_duplicate", seq=seq, arg="event=%s" % when)
+        else:
+            TOOL_EVENT_SEEN.add(key)
+            parts = [
+                "src=hook", "trust=diagnostic", "when=%s" % when,
+                "corr=1", "tool=%s" % _tool_class(name),
+                "status=%s" % _status_class(payload.get("status")),
+                "err=%s" % _error_class(payload.get("error_type")),
+            ]
+            if when == "post":
+                duration = payload.get("duration_ms")
+                exit_code = payload.get("exit_code")
+                parts.append("duration_ms=%s" % (
+                    duration if isinstance(duration, int) and not isinstance(duration, bool) else "UNKNOWN"))
+                parts.append("exit=%s" % (
+                    exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else "UNKNOWN"))
+            _ev("tool_pre_observe" if when == "pre" else "tool_post_observe",
+                seq=seq, arg=" ".join(parts))
     out = b'{"observed":"diagnostic"}'
     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
                  % len(out) + out)

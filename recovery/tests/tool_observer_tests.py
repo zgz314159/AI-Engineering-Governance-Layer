@@ -3,7 +3,10 @@
 No model, no network beyond a local fake upstream, no host mutation.
 The hook-path test drives the REAL pinned Hermes shell-hook registration and invocation
 (agent.shell_hooks.register_from_config + hermes_cli.lifecycle.invoke_hook) in a
-subprocess, then inspects the controller diagnostic sink.
+subprocess, then inspects the controller diagnostic sink. It supplies the post-tool
+result itself: it proves registration, serialization, callback order and transport, not
+a real tool executor or an actual command result. Guard records are trusted pre-call
+authorization records, not proof that a tool executed successfully.
 """
 
 from __future__ import annotations
@@ -144,6 +147,12 @@ class BrokerFixture(unittest.TestCase):
         self.upstream.content_type = content_type
         return _post(self.sock, "/v1/chat/completions", {"model": "m", "stream": False, "messages": []})
 
+    def index_call(self, call_id, name="terminal"):
+        body = json.dumps({"choices": [{"message": {"tool_calls": [
+            {"id": call_id, "function": {"name": name, "arguments": "{}"}}]},
+            "finish_reason": "tool_calls"}]}).encode()
+        self.model_request(body)
+
 
 class SummaryTests(unittest.TestCase):
     def summary(self, obj):
@@ -236,24 +245,102 @@ class BrokerObservationTests(BrokerFixture):
         self.assertNotIn(SECRET_ARGS, (out or "") + (err or ""))
         self.proc = None
 
-    def test_duplicate_missing_post_and_uncorrelated(self):
+    def test_uncorrelated_events_are_rejected_not_recorded(self):
+        payload = {"hook_event_name": "post_tool_call", "tool_call_id": "missing",
+                   "tool_name": "read_file", "status": "weird", "error_type": "Nope"}
+        _post(self.sock, "/tool-event", payload)
+        _post(self.sock, "/tool-event", payload)
+        self.assertEqual(self.phases("tool_post_observe"), [])
+        self.assertEqual(len(self.phases("tool_event_rejected")), 2)
+        self.assertEqual(self.phases("tool_event_duplicate"), [])
+        with open(os.path.join(self.diag, "events.jsonl"), encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("missing", raw)
+
+    def test_empty_or_wrong_name_never_correlates(self):
+        self.index_call("call-name", "terminal")
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-name", "tool_name": "",
+                                        "status": "ok"})
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-name", "tool_name": "WRONG_SECRET_NAME",
+                                        "status": "ok"})
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "", "tool_name": "terminal",
+                                        "status": "ok"})
+        self.assertEqual(self.phases("tool_pre_observe"), [])
+        rejected = self.phases("tool_event_rejected")
+        reasons = sorted(e["arg"].split("reason=")[-1] for e in rejected)
+        self.assertEqual(reasons, ["empty_reported_name", "name_mismatch", "no_call_id"])
+        with open(os.path.join(self.diag, "events.jsonl"), encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("WRONG_SECRET_NAME", raw)
+        self.assertNotIn("call-name", raw)
+
+    def test_wrong_name_first_then_correct_pre_post_records(self):
+        self.index_call("call-order", "terminal")
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-order", "tool_name": "read_file",
+                                        "status": "ok"})
+        self.assertEqual(self.phases("tool_pre_observe"), [])
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-order", "tool_name": "terminal",
+                                        "status": "ok"})
         _post(self.sock, "/tool-event", {"hook_event_name": "post_tool_call",
-                                        "tool_call_id": "missing", "tool_name": "read_file",
-                                        "status": "weird", "error_type": "Nope"})
-        _post(self.sock, "/tool-event", {"hook_event_name": "post_tool_call",
-                                        "tool_call_id": "missing", "tool_name": "read_file",
-                                        "status": "weird", "error_type": "Nope"})
-        pre = [e for e in self.events() if e.get("phase") == "tool_pre_observe"]
-        post = [e for e in self.events() if e.get("phase") == "tool_post_observe"]
-        dup = [e for e in self.events() if e.get("phase") == "tool_event_duplicate"]
-        self.assertEqual(pre, [])
+                                        "tool_call_id": "call-order", "tool_name": "terminal",
+                                        "status": "ok", "duration_ms": 5, "exit_code": 0})
+        pre = self.phases("tool_pre_observe")
+        post = self.phases("tool_post_observe")
+        self.assertEqual(len(pre), 1)
         self.assertEqual(len(post), 1)
-        self.assertEqual(len(dup), 1)
-        self.assertIn("corr=0", post[0]["arg"])
-        self.assertIn("status=OTHER", post[0]["arg"])
+        self.assertIn("corr=1", pre[0]["arg"])
+        self.assertIn("corr=1", post[0]["arg"])
+        self.assertEqual(self.phases("tool_event_duplicate"), [])
+
+    def test_invalid_event_does_not_occupy_dedup(self):
+        head, _ = _post(self.sock, "/tool-event",
+                        {"hook_event_name": "bogus", "tool_call_id": "x", "tool_name": "terminal"})
+        self.assertTrue(head.startswith(b"HTTP/1.1 400"))
+        self.index_call("call-evt", "terminal")
+        payload = {"hook_event_name": "pre_tool_call", "tool_call_id": "call-evt",
+                   "tool_name": "terminal", "status": "ok"}
+        _post(self.sock, "/tool-event", payload)
+        _post(self.sock, "/tool-event", payload)
+        self.assertEqual(len(self.phases("tool_pre_observe")), 1)
+        self.assertEqual(len(self.phases("tool_event_duplicate")), 1)
+
+    def test_unknown_tool_name_exact_match_maps_other(self):
+        self.index_call("call-unknown", "weird_tool")
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-unknown", "tool_name": "weird_tool",
+                                        "status": "ok"})
+        _post(self.sock, "/tool-event", {"hook_event_name": "post_tool_call",
+                                        "tool_call_id": "call-unknown", "tool_name": "weird_tool",
+                                        "status": "error", "error_type": "Nope"})
+        pre = self.phases("tool_pre_observe")
+        post = self.phases("tool_post_observe")
+        self.assertEqual(len(pre), 1)
+        self.assertEqual(len(post), 1)
+        self.assertIn("corr=1", pre[0]["arg"])
+        self.assertIn("tool=other", pre[0]["arg"])
         self.assertIn("err=OTHER", post[0]["arg"])
-        self.assertIn("exit=UNKNOWN", post[0]["arg"])
-        self.assertNotIn("missing", json.dumps(post[0]))
+
+    def test_missing_post_leaves_pre_only(self):
+        self.index_call("call-miss", "read_file")
+        _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
+                                        "tool_call_id": "call-miss", "tool_name": "read_file",
+                                        "status": "ok"})
+        self.assertEqual(len(self.phases("tool_pre_observe")), 1)
+        self.assertEqual(self.phases("tool_post_observe"), [])
+
+    def test_legitimate_duplicate_is_flagged(self):
+        self.index_call("call-dup", "terminal")
+        payload = {"hook_event_name": "post_tool_call", "tool_call_id": "call-dup",
+                   "tool_name": "terminal", "status": "ok", "duration_ms": 3, "exit_code": 0}
+        _post(self.sock, "/tool-event", payload)
+        _post(self.sock, "/tool-event", payload)
+        self.assertEqual(len(self.phases("tool_post_observe")), 1)
+        self.assertEqual(len(self.phases("tool_event_duplicate")), 1)
 
     def test_model_text_reasoning_empty_malformed(self):
         bodies = {
@@ -275,6 +362,7 @@ class BrokerObservationTests(BrokerFixture):
         os.makedirs(run_dir)
         with open(os.path.join(run_dir, "session.db"), "w", encoding="utf-8") as fh:
             fh.write("x")
+        self.index_call("c1", "read_file")
         _post(self.sock, "/tool-event", {"hook_event_name": "pre_tool_call",
                                         "tool_call_id": "c1", "tool_name": "read_file",
                                         "status": "ok"})
@@ -294,6 +382,7 @@ class ClientTests(BrokerFixture):
             input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=5)
 
     def test_exit_code_only_from_result(self):
+        self.index_call("c-x", "terminal")
         result = self._client({
             "hook_event_name": "post_tool_call", "tool_call_id": "c-x", "tool_name": "terminal",
             "status": "ok", "duration_ms": 3,
@@ -308,6 +397,7 @@ class ClientTests(BrokerFixture):
         self.assertNotIn(SECRET_ERR, json.dumps(post))
 
     def test_missing_exit_code_is_unknown(self):
+        self.index_call("c-y", "read_file")
         self._client({"hook_event_name": "post_tool_call", "tool_call_id": "c-y",
                       "tool_name": "read_file", "status": "ok", "duration_ms": 3,
                       "extra": {"result": {"output": "x"}}})
@@ -537,10 +627,7 @@ class HookPathTests(BrokerFixture):
         self.assertEqual(self.phases("tool_pre_observe"), [])
 
     def test_observer_only_without_guard_does_not_block(self):
-        body = json.dumps({"choices": [{"message": {"tool_calls": [
-            {"id": "call-ro", "function": {"name": "read_file", "arguments": "{}"}}]},
-            "finish_reason": "tool_calls"}]}).encode()
-        self.model_request(body)
+        self.index_call("call-ro", "terminal")
         result = self._run_probe(self._config(include_guard=False), call_id="call-ro")
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout.strip().splitlines()[-1])
