@@ -22,10 +22,17 @@ no() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 notrun() { printf 'NOT_RUN %s\n' "$1"; }
 say() { printf '%s\n' "$*"; }
 
-HERMES_RUNTIME="${HERMES_RUNTIME:-/home/zhong/.hermes/hermes-agent}"
-HERMES_HOME="${HERMES_HOME_REAL:-/home/zhong/.hermes}"
+OWNER="zhong"
+OWNER_HOME="/home/zhong"
+OWNER_HERMES_HOME="/home/zhong/.hermes"
+OWNER_PATH="/usr/local/bin:/usr/bin:/bin"
+OWNER_LANG="C.UTF-8"
+HERMES_RUNTIME="$OWNER_HERMES_HOME/hermes-agent"
+HERMES_HOME="$OWNER_HERMES_HOME"
+HERMES_BIN="$HERMES_RUNTIME/.hermes/bin/hermes"
 HERMES_COMMIT="af90026aa09949579bd423d24def3d38f743cde0"
 HERMES_VERSION_MARK="v0.21.5+6977.gaf90026"
+RUNUSER="$(command -v runuser 2>/dev/null || true)"
 
 declare -A WANT=(
   [bin/aegl-hermes-sandbox]=f3e556f079d14c6e4dd7173cd3a571b6e8a32527db12dc91aae44fbf75929479
@@ -83,12 +90,119 @@ check_dependencies() {
   rmdir "$tmp/__pycache__" "$tmp" 2>/dev/null || true
 }
 
+classify_hermes_error() { # <in-memory output> — whitelisted category only
+  case "$1" in
+    *"No such file or directory"*|*"not found"*) echo binary_missing ;;
+    *"Permission denied"*) echo permission ;;
+    *"not a git repository"*) echo not_repo ;;
+    *"dubious ownership"*) echo ownership ;;
+    *"does not exist"*|*"runuser"*) echo runner ;;
+    *"HERMES_HOME"*|*"hermes_home"*|*".hermes"*) echo home ;;
+    *) echo UNKNOWN ;;
+  esac
+}
+
+run_as_hermes_owner() { # minimal explicit context; root drops to the install owner
+  local -a envv=(/usr/bin/env -i "HOME=$OWNER_HOME" "HERMES_HOME=$OWNER_HERMES_HOME"
+                 "PATH=$OWNER_PATH" "LANG=$OWNER_LANG")
+  if [ "$(id -u)" -eq 0 ]; then
+    [ -n "$RUNUSER" ] || return 127
+    "$RUNUSER" -u "$OWNER" -- "${envv[@]}" "$@"
+  else
+    "${envv[@]}" "$@"
+  fi
+}
+
+check_hermes_context() {
+  local out rc=0 owner home hermes_home
+  out="$(run_as_hermes_owner /bin/sh -c \
+        'printf "%s\n%s\n%s\n" "$(id -un)" "$HOME" "$HERMES_HOME"' 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    no "hermes_context category=probe_failed rc=$rc"
+    return
+  fi
+  { IFS= read -r owner; IFS= read -r home; IFS= read -r hermes_home; } <<< "$out"
+  if [ "$owner" != "$OWNER" ] || [ "$home" != "$OWNER_HOME" ] \
+     || [ "$hermes_home" != "$OWNER_HERMES_HOME" ]; then
+    no "hermes_context category=context_mismatch rc=0"
+    return
+  fi
+  ok "hermes_context"
+}
+
+check_hermes_version_at() { # <binary>
+  local binary="$1" out rc=0 cat
+  out="$(run_as_hermes_owner "$binary" --version 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat="$(classify_hermes_error "$out")"
+    no "hermes_version category=$cat rc=$rc"
+    return
+  fi
+  case "$out" in
+    *"$HERMES_VERSION_MARK"*) ok "hermes_version" ;;
+    *) no "hermes_version category=version_mismatch rc=0" ;;
+  esac
+}
+
+check_hermes_commit_at() { # <runtime>
+  local runtime="$1" out rc=0 cat
+  out="$(run_as_hermes_owner git -C "$runtime" rev-parse HEAD 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat="$(classify_hermes_error "$out")"
+    no "hermes_commit category=$cat rc=$rc"
+    return
+  fi
+  case "$out" in
+    "$HERMES_COMMIT") ok "hermes_commit" ;;
+    *) no "hermes_commit category=commit_mismatch rc=0" ;;
+  esac
+}
+
 check_hermes() {
-  local out commit
-  out="$("$HERMES_RUNTIME/.hermes/bin/hermes" --version 2>&1)" || { no "hermes_version"; return; }
-  case "$out" in *"$HERMES_VERSION_MARK"*) ok "hermes_version" ;; *) no "hermes_version ($out)" ;; esac
-  commit="$(git -C "$HERMES_RUNTIME" rev-parse HEAD 2>/dev/null)"
-  [ "$commit" = "$HERMES_COMMIT" ] && ok "hermes_commit" || no "hermes_commit ($commit)"
+  check_hermes_context
+  check_hermes_version_at "$HERMES_BIN"
+  check_hermes_commit_at "$HERMES_RUNTIME"
+}
+
+check_hermes_negatives() {
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-hv.XXXXXX)" || { no hermes_negatives; return; }
+  cat > "$tmp/bad_hermes" <<'SH'
+#!/bin/sh
+echo "No such file or directory" >&2
+exit 7
+SH
+  cat > "$tmp/wrong_hermes" <<'SH'
+#!/bin/sh
+echo "v0.0.0"
+exit 0
+SH
+  chmod 0755 "$tmp/bad_hermes" "$tmp/wrong_hermes"
+  local bad=0 out
+  out="$( ( check_hermes_version_at "$tmp/bad_hermes" ) 2>&1 )"
+  case "$out" in *"FAIL hermes_version category=binary_missing rc=7"*) ;; *) bad=1 ;; esac
+  case "$out" in *"PASS hermes_version"*) bad=1 ;; esac
+  out="$( ( check_hermes_version_at "$tmp/wrong_hermes" ) 2>&1 )"
+  case "$out" in *"FAIL hermes_version category=version_mismatch rc=0"*) ;; *) bad=1 ;; esac
+  case "$out" in *"PASS hermes_version"*) bad=1 ;; esac
+  install -d "$tmp/nonrepo"
+  out="$( ( check_hermes_commit_at "$tmp/nonrepo" ) 2>&1 )"
+  case "$out" in *"FAIL hermes_commit"*"rc="*) ;; *) bad=1 ;; esac
+  case "$out" in *"PASS hermes_commit"*) bad=1 ;; esac
+  if git init -q "$tmp/repo" \
+     && git -C "$tmp/repo" -c user.name=t -c user.email=t@x commit -q --allow-empty -m base; then
+    out="$( ( check_hermes_commit_at "$tmp/repo" ) 2>&1 )"
+    case "$out" in *"FAIL hermes_commit category=commit_mismatch rc=0"*) ;; *) bad=1 ;; esac
+    case "$out" in *"PASS hermes_commit"*) bad=1 ;; esac
+  else
+    bad=1
+  fi
+  [ "$bad" -eq 0 ] && ok hermes_negatives || no hermes_negatives
+  if [ -d "$tmp/repo" ]; then
+    find "$tmp/repo" -type f 2>/dev/null | while IFS= read -r p; do rm -f "$p"; done
+    find "$tmp/repo" -depth -type d 2>/dev/null | while IFS= read -r p; do rmdir "$p" 2>/dev/null || true; done
+  fi
+  rm -f "$tmp/bad_hermes" "$tmp/wrong_hermes"
+  rmdir "$tmp/nonrepo" "$tmp" 2>/dev/null || true
 }
 
 check_manifest() {
@@ -484,6 +598,7 @@ self_test() {
   check_candidates
   check_dependencies
   check_hermes
+  check_hermes_negatives
   check_manifest
   check_syntax
   check_contract_fixture
@@ -499,6 +614,7 @@ self_test() {
   notrun root_bwrap_real_tool_executor
   notrun root_bwrap_guard_block_no_execution
   notrun root_bwrap_observer_failure_independence
+  notrun root_hermes_runuser_context
   notrun host_isolation
   say "SELF_TEST pass=$PASS fail=$FAIL"
   [ "$FAIL" -eq 0 ]
@@ -533,7 +649,7 @@ snapshot_host() { # <out>
 root_check() {
   [ "$(id -u)" -eq 0 ] || { echo "NOT_RUN root_required"; exit 1; }
   local tool
-  for tool in unshare bwrap openssl setpriv git install; do
+  for tool in unshare bwrap openssl setpriv runuser git install; do
     command -v "$tool" >/dev/null || { echo "OBS_CHECK=FAIL phase=missing_tool_$tool"; exit 1; }
   done
   id -u aegl-ai >/dev/null 2>&1 || { echo "OBS_CHECK=FAIL phase=missing_aegl_ai"; exit 1; }
