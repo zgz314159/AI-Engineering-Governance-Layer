@@ -88,11 +88,78 @@ marker_anchor_ok() { # <file> <stage> — current anchor, or the approved old on
   return 1
 }
 done_marker() { local stage="$1" f="$LEDGER/$1.done"; [ -f "$f" ] || return 1; marker_anchor_ok "$f" "$stage" && return 0; say "MARKER_STALE $stage"; return 1; }
-continuation_record() {
-  printf 'predecessor=%s\npackage_anchor=%s\ntask=%s\ntask_root=%s\nworktree=%s\ncontract=%s\ncontract_package=%s\n' \
-    "$CONT_ANCHOR" "$ANCHOR" "$TASK_ID" "$TASK_ROOT" "$EXPECT_BASE" "$EXPECT_MANIFEST_SHA" "$PKG_DEST"
+continuation_record() { # <predecessor> — the exact recorded source of this prep/execute scene
+  printf 'predecessor=%s\npackage_anchor=%s\ntask=%s\ntask_root=%s\nworktree=%s\nscratch=%s\ncommit=%s\ncontract=%s\ncontract_package=%s\n' \
+    "$1" "$ANCHOR" "$TASK_ID" "$TASK_ROOT" "$WORKTREE" "$SCRATCH" \
+    "$EXPECT_BASE" "$EXPECT_MANIFEST_SHA" "$PKG_DEST"
 }
-continuation_record_ok() { [ -f "$CONT_RECORD" ] && [ "$(cat "$CONT_RECORD")" = "$(continuation_record)" ]; }
+# A trusted record: regular file, never a symlink, root:root 0644.
+continuation_record_trust_ok() {
+  [ -f "$CONT_RECORD" ] && [ ! -L "$CONT_RECORD" ] || return 1
+  [ "$(stat -c '%u:%g %a' "$CONT_RECORD" 2>/dev/null)" = "0:0 644" ]
+}
+# The predecessor field is either the approved anchor (a continuation) or `none` (a
+# plain prep). The file is root-owned, so this is a tamper check, not a caller choice.
+continuation_record_content_ok() {
+  [ -f "$CONT_RECORD" ] || return 1
+  local got pred
+  got="$(cat "$CONT_RECORD")"
+  for pred in "$CONT_ANCHOR" none; do
+    [ "$got" = "$(continuation_record "$pred")" ] && return 0
+  done
+  return 1
+}
+continuation_record_ok() { continuation_record_trust_ok && continuation_record_content_ok; }
+continuation_record_write() { # <predecessor> — first creation only; never overwrites foreign content
+  local pred="$1" new="$CONT_RECORD.new"
+  [ ! -e "$new" ] && [ ! -L "$new" ] \
+    || die continuation_record_staging "$new exists (unknown content; refusing to overwrite)"
+  continuation_record "$pred" > "$new" || die continuation_record_write "$new"
+  chown 0:0 "$new" || die continuation_record_owner "$new"
+  chmod 0644 "$new" || die continuation_record_mode "$new"
+  [ "$(stat -c '%u:%g %a' "$new")" = "0:0 644" ] || die continuation_record_stat "$new"
+  mv -f -- "$new" "$CONT_RECORD" || die continuation_record_move "$CONT_RECORD"
+  continuation_record_ok || die continuation_record_verify "$CONT_RECORD"
+}
+# prep is the ONLY place a record may be created, and only after every read-only check.
+continuation_record_ensure_prep() {
+  require_root
+  if [ -e "$CONT_RECORD" ] || [ -L "$CONT_RECORD" ]; then
+    continuation_record_trust_ok \
+      || die continuation_record_owner "$CONT_RECORD is not a root:root 0644 regular file"
+    continuation_record_content_ok \
+      || die continuation_record "$CONT_RECORD is altered (content does not match this package/scene)"
+    if [ "$CONT_ACTIVE" = 1 ]; then
+      [ "$(cat "$CONT_RECORD")" = "$(continuation_record "$CONT_ANCHOR")" ] \
+        || die continuation_record_predecessor "$CONT_RECORD was not prepared from the approved predecessor"
+    fi
+    say "CONTINUATION_RECORD_REUSED $CONT_RECORD"
+  else
+    if [ "$CONT_ACTIVE" = 1 ]; then continuation_record_write "$CONT_ANCHOR"; else continuation_record_write none; fi
+    say "CONTINUATION_RECORD_CREATED $CONT_RECORD"
+  fi
+}
+# execute requires the record left by prep; it is never created or repaired here.
+continuation_record_require() {
+  require_root
+  [ -f "$CONT_RECORD" ] && [ ! -L "$CONT_RECORD" ] || die continuation_record_missing "$CONT_RECORD is missing (never auto-created on execute)"
+  continuation_record_content_ok \
+    || die continuation_record_missing "$CONT_RECORD is altered (content does not match this package/scene)"
+  if [ "$CONT_ACTIVE" = 1 ]; then
+    [ "$(cat "$CONT_RECORD")" = "$(continuation_record "$CONT_ANCHOR")" ] \
+      || die continuation_record_predecessor "$CONT_RECORD was not prepared from the approved predecessor"
+  fi
+  continuation_record_trust_ok \
+    || die continuation_record_owner "$CONT_RECORD is not a root:root 0644 regular file"
+  say "CONTINUATION_SOURCE_OK $CONT_RECORD"
+}
+cont_git() { # <path> <args...> -> exact stdout, rc propagated, stderr kept apart
+  local path="$1"; shift
+  local out rc=0 err="$LEDGER/continuation.git.stderr"
+  out="$(ctl_git "$path" "$@" 2>"$err")" || rc=$?
+  [ "$rc" -eq 0 ] || die continuation_git "$path $* rc=$rc $(tr '\n' ' ' <"$err" 2>/dev/null)"
+  printf '%s\n' "$out"
+}
 
 # --- operator-side execution (never root's HOME, never sudo -E) ------------------- #
 _op_env() { if [ "$(id -u)" -eq 0 ]; then printf 'runuser'; else printf 'direct'; fi; }
@@ -569,18 +636,32 @@ continuation_preflight() {
   [ -d "$TASK_ROOT" ] && [ ! -L "$TASK_ROOT" ] || die continuation_task_root "$TASK_ROOT"
   [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] || die continuation_worktree "$WORKTREE"
   [ -d "$SCRATCH" ] && [ ! -L "$SCRATCH" ] || die continuation_scratch "$SCRATCH"
-  wt_registered || die continuation_worktree_registered "$WORKTREE is not registered"
-  [ "$(ctl_git "$IAP" rev-parse HEAD)" = "$EXPECT_BASE" ] \
-    || die continuation_base "$(ctl_git "$IAP" rev-parse HEAD) != $EXPECT_BASE"
-  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] \
-    || die continuation_head "$(ctl_git "$WORKTREE" rev-parse HEAD) != $EXPECT_BASE"
-  [ -z "$(ctl_git "$WORKTREE" status --porcelain)" ] || die continuation_dirty "$WORKTREE"
+  # every Git query keeps its real rc; an empty stdout is never read as "clean"
+  local wl
+  wl="$(cont_git "$IAP" worktree list --porcelain)" || die continuation_worktree_list "$IAP"
+  printf '%s\n' "$wl" | grep -qxF -- "worktree $WORKTREE" \
+    || die continuation_worktree_registered "$WORKTREE is not registered"
+  [ "$(cont_git "$IAP" rev-parse HEAD)" = "$EXPECT_BASE" ] \
+    || die continuation_base "$(cont_git "$IAP" rev-parse HEAD) != $EXPECT_BASE"
+  [ "$(cont_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] \
+    || die continuation_head "$(cont_git "$WORKTREE" rev-parse HEAD) != $EXPECT_BASE"
+  [ -z "$(cont_git "$WORKTREE" status --porcelain)" ] || die continuation_dirty "$WORKTREE"
   binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
   [ -f "$PKG_DEST/manifest.json" ] || die continuation_contract "$PKG_DEST/manifest.json"
   [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
     || die continuation_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
   [ "$(python3 -c "import json;print(json.load(open('$PKG_DEST/READY.json'))['status'])")" = READY ] \
     || die continuation_contract_ready "$PKG_DEST/READY.json"
+  # full contract member verification, not just the manifest hash
+  /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die continuation_contract_members "$PKG_DEST"
+import hashlib, json, os, sys
+pkg = sys.argv[1]
+m = json.load(open(os.path.join(pkg, "manifest.json"), encoding="utf-8"))
+for e in m.get("entries", []):
+    f = os.path.join(pkg, e["path"])
+    if not os.path.isfile(f) or hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
+        sys.exit("bad %s" % e["path"])
+MEMPYP
   registry_fields_ok "$TASK_ID" || die continuation_registry "$REGISTRY_DIFF"
   [ "$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')" = "$SANDBOX_AFTER_SHA" ] \
     || die continuation_launcher "$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
@@ -588,12 +669,6 @@ continuation_preflight() {
   [ "$(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')" = "$EXPECT_HELPER_SHA" ] \
     || die continuation_helper "$SANDBOX_DIR/git_meta_mounts.sh"
   [ "$(sha256sum "$BROKER_BIN" | awk '{print $1}')" = "$BROKER_SHA" ] || die continuation_broker "$BROKER_BIN"
-  if [ -e "$CONT_RECORD" ]; then
-    continuation_record_ok || die continuation_record "$CONT_RECORD does not match this package/scene"
-  else
-    continuation_record > "$CONT_RECORD.new" || die continuation_record_write "$CONT_RECORD.new"
-    mv -f -- "$CONT_RECORD.new" "$CONT_RECORD" || die continuation_record_move "$CONT_RECORD"
-  fi
   say "CONTINUATION_OK predecessor=$CONT_ANCHOR package=$ANCHOR reused_stages=${CONT_REQUIRED_STAGES# }"
 }
 
@@ -848,10 +923,8 @@ stage_ready() {
 # --- explicit, one-shot operator stages -------------------------------------------- #
 stage_send() {
   require_root
-  # a continuation is only executable from the package/scene recorded at prep time
-  if [ -e "$CONT_RECORD" ]; then
-    continuation_record_ok || die continuation_source "$CONT_RECORD does not match this package/scene"
-  fi
+  # execute requires the source record left by prep; it is never created here
+  continuation_record_require
   done_marker ready || die prerequisite_not_done ready
   verify_live_state           # a reused prep is re-verified before anything is sent
   assert_operator_state_path
@@ -968,6 +1041,8 @@ main() {
   while [ $# -gt 0 ]; do case "$1" in --execute) mode=execute; shift ;; --stage) only="${2:-}"; shift 2 ;; --status) mode=status; shift ;; --continue-006) CONT_ACTIVE=1; CONT_PKG="${2:-}"; [ -n "$CONT_PKG" ] || die usage "--continue-006 requires the approved package path"; shift 2 ;; *) die usage "$1" ;; esac; done
   if [ "$mode" = status ]; then say "anchor=$ANCHOR ledger=$LEDGER"; ls -1 "$LEDGER" 2>/dev/null || say "(no stages)"; cat "$BRIDGE_DIR/state.json" 2>/dev/null; return 0; fi
   if [ "$CONT_ACTIVE" = 1 ]; then continuation_preflight; fi
+  # execute never establishes its own provenance: the prep-time record must already exist
+  if [ "$mode" = execute ]; then continuation_record_require; fi
   local stages=()
   if [ -n "${SMOKE_PREP_STAGES:-}" ]; then IFS=: read -r -a stages <<< "$SMOKE_PREP_STAGES"
   else stages=("${PREP_STAGES[@]}"); fi
@@ -985,6 +1060,9 @@ main() {
     [ "$(cat "$LEDGER/chain.before_prep" 2>/dev/null)" = "$(chain_now)" ] \
       || die chain_changed_during_prep "$(chain_now) != $(cat "$LEDGER/chain.before_prep" 2>/dev/null)"
     [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_created "prep must never create EVIDENCE.txt"
+    # only prep may establish the continuation source record, and only after every
+    # read-only check above passed; execute never creates it
+    continuation_record_ensure_prep
     say "BRIDGE_OK status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT unchanged_during_prep=1"
     say "PREP_COMPLETE (live state verified; no model called, nothing sent, no EVIDENCE.txt)"
   fi
