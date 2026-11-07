@@ -604,6 +604,15 @@ PY
   [ "$any" -eq 0 ] && say "EXISTING_SCENE=none (first prep)" || say "EXISTING_SCENE_VERIFIED"
 }
 
+# A status query must be judged separately from its output: rc != 0 is a failed query,
+# never an empty/clean worktree.
+continuation_require_clean_worktree() {
+  local worktree_status
+  worktree_status="$(cont_git "$WORKTREE" status --porcelain)" \
+    || die continuation_status_query "$WORKTREE status query failed"
+  [ -z "$worktree_status" ] || die continuation_dirty "$WORKTREE"
+}
+
 # --- restricted continuation from the approved predecessor ---------------------------- #
 # Only --continue-006 <approved-package>, only IAP-SMOKE-006, only the hardcoded old
 # anchor and the listed stages. Every check is read-only; nothing is re-created.
@@ -645,7 +654,7 @@ continuation_preflight() {
     || die continuation_base "$(cont_git "$IAP" rev-parse HEAD) != $EXPECT_BASE"
   [ "$(cont_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] \
     || die continuation_head "$(cont_git "$WORKTREE" rev-parse HEAD) != $EXPECT_BASE"
-  [ -z "$(cont_git "$WORKTREE" status --porcelain)" ] || die continuation_dirty "$WORKTREE"
+  continuation_require_clean_worktree
   binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
   [ -f "$PKG_DEST/manifest.json" ] || die continuation_contract "$PKG_DEST/manifest.json"
   [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
