@@ -42,11 +42,13 @@ declare -A WANT=(
   [bin/tool_observer_config.py]=424369561202ca48f122b8116fc6b2ebca8cbb1d108dbeb04674608b807591c3
 )
 
-# Packaged runtime dependencies that are not candidate-hash pins. Source recorded in
-# DEPENDENCIES.md; the copy is unmodified and must never be resolved from the source
-# repo, an installed tree or PYTHONPATH.
+# Packaged runtime dependencies that are not candidate-hash pins. Their build-time
+# sources and hashes are recorded in DEPENDENCIES.md; the copies are unmodified and
+# must never be resolved at runtime from the source repo, an installed tree or
+# PYTHONPATH.
 declare -A DEPS=(
   [bin/guard_capture.py]=4422f725fc2fb88ecff4de6baba81a519e4f450be5ad644948b29745d877be1a
+  [bin/guard/contract_guard.py]=19f6be638c37b28d401820b7a4562f852a459188cbfa793f757668fe9b330455
 )
 
 VIEW_FILES=(
