@@ -743,6 +743,124 @@ check_protocol() {
   rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
 }
 
+check_namespace_prepare() {
+  # Ordinary-user proof through the same run_ns used by the root entry. unshare,
+  # mount, mkdir, chown, chmod and the launcher are stubs here: this proves only the
+  # call order, the private-namespace placement and failure propagation. Real root,
+  # tmpfs and bind execution remain NOT_RUN.
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-ns.XXXXXX)" \
+    || { no namespace_prepare; return; }
+  local flag=0
+  if (
+    install -d "$tmp/stub" "$tmp/diag" "$tmp/run" "$tmp/lib" "$tmp/tls" || exit 1
+    : > "$tmp/registry.json" || exit 1
+    : > "$tmp/tls/cert.pem" || exit 1
+    cat > "$tmp/stub/unshare" <<'SH' || exit 1
+#!/bin/sh
+[ "$1" = "--mount" ] && [ "$2" = "--propagation" ] && [ "$3" = "private" ] && [ "$4" = "--" ] \
+  || { printf 'bad_unshare_args\n' >> "$NS_LOG"; exit 91; }
+printf 'unshare\n' >> "$NS_LOG"
+if [ "${FAKE_NS_FAIL_STAGE:-}" = "unshare" ]; then
+  exit "${FAKE_NS_FAIL_RC:-1}"
+fi
+FAKE_NS_ENTERED=1; export FAKE_NS_ENTERED
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$#" -gt 0 ] && shift
+exec "$@"
+SH
+    cat > "$tmp/stub/mount" <<'SH' || exit 1
+#!/bin/sh
+printf 'mount %s\n' "$*" >> "$NS_LOG"
+[ "${FAKE_NS_ENTERED:-}" = "1" ] || { printf 'outside_namespace\n' >> "$NS_LOG"; exit 90; }
+case "$*" in
+  "-t tmpfs -o mode=0755,nosuid,nodev tmpfs /run") stage=private_run_tmpfs ;;
+  "--bind $FAKE_DIAG /var/tmp/aegl-diag") stage=diag_bind ;;
+  "--bind $FAKE_RUN /run/aegl-model") stage=run_bind ;;
+  *) stage=unknown ;;
+esac
+if [ "${FAKE_NS_FAIL_STAGE:-}" = "$stage" ]; then exit "${FAKE_NS_FAIL_RC:-1}"; fi
+exit 0
+SH
+    for cmd in mkdir chown chmod; do
+      cat > "$tmp/stub/$cmd" <<'SH' || exit 1
+#!/bin/sh
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$NS_LOG"
+[ "${FAKE_NS_ENTERED:-}" = "1" ] || { printf 'outside_namespace\n' >> "$NS_LOG"; exit 90; }
+[ "${FAKE_NS_FAIL_STAGE:-}" = "run_target" ] && exit "${FAKE_NS_FAIL_RC:-1}"
+exit 0
+SH
+    done
+    cat > "$tmp/stub/launcher" <<'SH' || exit 1
+#!/bin/sh
+printf 'launcher %s\n' "$*" >> "$NS_LOG"
+exit 0
+SH
+    chmod 0755 "$tmp"/stub/* || exit 1
+    export PATH="$tmp/stub:/usr/bin:/bin"
+    export NS_LOG="$tmp/log" FAKE_DIAG="$tmp/diag" FAKE_RUN="$tmp/run"
+    unset FAKE_NS_FAIL_STAGE FAKE_NS_FAIL_RC FAKE_NS_ENTERED
+    bad=0
+    host_before="$(stat -c '%F %u:%g %a' /run/aegl-model 2>/dev/null || echo ABSENT)"
+
+    : > "$NS_LOG"
+    rc=0
+    run_ns "$tmp/status" "$tmp" "$tmp/diag" "$tmp/run" "$tmp/lib" "$tmp/cfg" \
+      "$tmp/stub/launcher" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || bad=1
+    [ "$(head -n 1 "$tmp/status" 2>/dev/null)" = "ready 0" ] || bad=1
+    [ "$(wc -l < "$NS_LOG")" -eq 8 ] || bad=1
+    order="$(sed -n 's/^\([a-z]*\).*/\1/p' "$NS_LOG" | tr '\n' ' ')"
+    [ "$order" = "unshare mount mkdir chown chmod mount mount launcher " ] || bad=1
+    grep -q '^unshare$' "$NS_LOG" || bad=1
+    grep -q '^mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run$' "$NS_LOG" || bad=1
+    grep -q '^mkdir -p /run/aegl-model$' "$NS_LOG" || bad=1
+    grep -q '^chown root:root /run/aegl-model$' "$NS_LOG" || bad=1
+    grep -q '^chmod 0755 /run/aegl-model$' "$NS_LOG" || bad=1
+    grep -q "^mount --bind $tmp/diag /var/tmp/aegl-diag$" "$NS_LOG" || bad=1
+    grep -q "^mount --bind $tmp/run /run/aegl-model$" "$NS_LOG" || bad=1
+    grep -q '^launcher ' "$NS_LOG" || bad=1
+    grep -q 'noexec' "$NS_LOG" && bad=1
+    grep -q '^outside_namespace$' "$NS_LOG" && bad=1
+    grep -q '^bad_unshare_args$' "$NS_LOG" && bad=1
+
+    check_ns_fail() { # <stage> <rc> <log-lines> <forbidden-regex>
+      local stage="$1" want="$2" lines="$3" forbid="$4" r=0 line got_stage got_rc
+      : > "$NS_LOG"; : > "$tmp/status"
+      export FAKE_NS_FAIL_STAGE="$stage" FAKE_NS_FAIL_RC="$want"
+      run_ns "$tmp/status" "$tmp" "$tmp/diag" "$tmp/run" "$tmp/lib" "$tmp/cfg" \
+        "$tmp/stub/launcher" >/dev/null 2>&1 || r=$?
+      unset FAKE_NS_FAIL_STAGE FAKE_NS_FAIL_RC
+      [ "$r" -ne 0 ] || return 1
+      line="$(ns_stage "$tmp/status" "$r")"
+      got_stage="${line%% *}"; got_rc="${line##* }"
+      [ "$got_stage" = "$stage" ] || return 1
+      [ "$got_rc" = "$want" ] || return 1
+      [ "$(ns_fail_line "$tmp/status" "$r")" = "phase=$stage rc=$want" ] || return 1
+      [ "$(wc -l < "$NS_LOG")" -eq "$lines" ] || return 1
+      if [ -n "$forbid" ] && grep -qE "$forbid" "$NS_LOG"; then return 1; fi
+      grep -q '^outside_namespace$' "$NS_LOG" && return 1
+      grep -q '^bad_unshare_args$' "$NS_LOG" && return 1
+      return 0
+    }
+
+    check_ns_fail unshare 1 1 '^(mount|mkdir|chown|chmod|launcher)' || bad=1
+    check_ns_fail private_run_tmpfs 21 2 '^(mkdir|chown|chmod|launcher)|^mount --bind' || bad=1
+    check_ns_fail run_target 13 3 '^(chown|chmod|launcher)|^mount --bind' || bad=1
+    check_ns_fail diag_bind 17 6 '^launcher|^mount --bind .* /run/aegl-model' || bad=1
+    check_ns_fail run_bind 32 7 '^launcher' || bad=1
+
+    host_after="$(stat -c '%F %u:%g %a' /run/aegl-model 2>/dev/null || echo ABSENT)"
+    [ "$host_before" = "$host_after" ] || bad=1
+    exit "$bad"
+  ); then
+    flag=1
+  fi
+  [ "$flag" -eq 1 ] && ok namespace_prepare || no namespace_prepare
+  rm -f "$tmp"/stub/* "$tmp"/*.json "$tmp"/tls/cert.pem "$tmp"/status "$tmp"/log \
+    "$tmp"/cfg 2>/dev/null || true
+  rmdir "$tmp/stub" "$tmp/diag" "$tmp/run" "$tmp/lib" "$tmp/tls" "$tmp" 2>/dev/null || true
+}
+
 self_test() {
   say "SELF_TEST begin pkg=$PKG"
   check_candidates
@@ -759,8 +877,10 @@ self_test() {
   check_guard_capture
   check_worktree_product_cleanup
   check_assert_negatives
+  check_namespace_prepare
   check_fake_upstream
   check_protocol
+  notrun root_namespace_tmpfs_bind_real
   notrun root_bwrap_check_mode_sink_absence
   notrun root_bwrap_real_tool_executor
   notrun root_bwrap_guard_block_no_execution
@@ -845,8 +965,72 @@ print("captures=%d blocks=%d" % (records, blocks))
 PY
 }
 
+# Namespace preparation shared by the ordinary-user self-test and the root entry.
+# Everything below runs inside the private mount namespace created by unshare:
+#   1. a fresh tmpfs on /run (mode=0755,nosuid,nodev; no noexec);
+#   2. root:root 0755 /run/aegl-model inside that tmpfs;
+#   3. the existing diag bind and the fixture run-root bind.
+# The host /run is never used or created. Only a fixed stage name and the real rc
+# leave the child through the status file; raw output is never printed.
+run_ns() { # <status-file> <fixture> <diag-root> <run-root> <libdir> <config> <cmd...>
+  local status="$1" fixture="$2" diag="$3" run="$4" lib="$5" cfg="$6"; shift 6
+  : > "$status" || return 125
+  unshare --mount --propagation private -- bash -c '
+    set -u
+    status=$1; diag=$2; run=$3
+    fail() { printf "%s %s\n" "$1" "$2" > "$status"; exit "$2"; }
+    printf "entered 0\n" > "$status" || exit 125
+    mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run \
+      || { rc=$?; fail private_run_tmpfs "$rc"; }
+    mkdir -p /run/aegl-model || { rc=$?; fail run_target "$rc"; }
+    chown root:root /run/aegl-model || { rc=$?; fail run_target "$rc"; }
+    chmod 0755 /run/aegl-model || { rc=$?; fail run_target "$rc"; }
+    mount --bind "$diag" /var/tmp/aegl-diag \
+      || { rc=$?; fail diag_bind "$rc"; }
+    mount --bind "$run" /run/aegl-model \
+      || { rc=$?; fail run_bind "$rc"; }
+    printf "ready 0\n" > "$status" || exit 125
+    shift 3
+    exec "$@"
+  ' _ "$status" "$diag" "$run" env AEGL_MODEL_CONFIG="$cfg" \
+      AEGL_MODEL_TASK_REGISTRY="$fixture/registry.json" \
+      AEGL_MODEL_LIBDIR="$lib" SSL_CERT_FILE="$fixture/tls/cert.pem" "$@"
+}
+
+ns_stage() { # <status-file> <outer-rc> — fixed stage and real rc only
+  local status="$1" rc="$2" line stage value
+  line="$(head -n 1 "$status" 2>/dev/null || true)"
+  stage="${line%% *}"
+  value="${line##* }"
+  case "$stage" in
+    ready) printf 'ready %s\n' "$rc" ;;
+    entered) printf 'ns_prepare %s\n' "$rc" ;;
+    "") printf 'unshare %s\n' "$rc" ;;
+    *) if [ "$stage" = "$line" ]; then
+         printf 'ns_prepare %s\n' "$rc"
+       else
+         printf '%s %s\n' "$stage" "$value"
+       fi ;;
+  esac
+}
+
+ns_failure_detail() { # <status-file> <outer-rc> — empty when preparation completed
+  local line stage
+  line="$(ns_stage "$1" "$2")"
+  stage="${line%% *}"
+  [ "$stage" = "ready" ] && return 0
+  printf 'stage=%s rc=%s\n' "$stage" "${line##* }"
+}
+
+ns_fail_line() { # <status-file> <outer-rc> — fixed preflight report
+  local line stage
+  line="$(ns_stage "$1" "$2")"
+  stage="${line%% *}"
+  printf 'phase=%s rc=%s\n' "${stage:-unshare}" "${line##* }"
+}
+
 snapshot_host() { # <out>
-  local out="$1" p
+  local out="$1" p st
   : > "$out"
   for p in /var/lib/aegl-model/registry.json \
            /home/zhong/.local/state/google-android-agent-stack/bridge/state.json; do
@@ -863,6 +1047,17 @@ snapshot_host() { # <out>
       printf 'ABSENT %s\n' "$p" >> "$out"
     fi
   done
+  # Only this explicit host path: existence, type and numeric owner/mode.
+  p=/run/aegl-model
+  if [ -e "$p" ] || [ -L "$p" ]; then
+    if st="$(stat -c '%F uid=%u gid=%g mode=%a' "$p" 2>/dev/null)"; then
+      printf 'RUN_TARGET_PRESENT %s %s\n' "$p" "$st" >> "$out"
+    else
+      printf 'RUN_TARGET_UNREADABLE %s\n' "$p" >> "$out"
+    fi
+  else
+    printf 'RUN_TARGET_ABSENT %s\n' "$p" >> "$out"
+  fi
 }
 
 root_check() {
@@ -1006,29 +1201,24 @@ EOF
   find "$fixture/repo" -type f -path "$fixture/repo/.git/*" | while IFS= read -r p; do record "$p"; done
   find "$fixture/repo" -type d | while IFS= read -r p; do record "$p"; done
 
-  run_ns() { # <diag-root> <run-root> <libdir> <config> <cmd...>
-    local diag="$1" run="$2" lib="$3" cfg="$4"; shift 4
-    unshare --mount --propagation private -- bash -c '
-      set -e
-      mount --bind "$1" /var/tmp/aegl-diag
-      mount --bind "$2" /run/aegl-model
-      shift 2
-      exec "$@"
-    ' _ "$diag" "$run" env AEGL_MODEL_CONFIG="$cfg" \
-      AEGL_MODEL_TASK_REGISTRY="$fixture/registry.json" \
-      AEGL_MODEL_LIBDIR="$lib" SSL_CERT_FILE="$fixture/tls/cert.pem" "$@"
-  }
-
-  if ! run_ns "$fixture/diag-root" "$fixture/run-root" "$fixture/view/bin" \
-       "$fixture/model.config" true >/dev/null 2>&1; then
-    echo "OBS_CHECK=FAIL phase=namespace_mount"; exit 1
+  local ns_rc=0
+  run_ns "$fixture/ns.status" "$fixture" "$fixture/diag-root" "$fixture/run-root" \
+    "$fixture/view/bin" "$fixture/model.config" true >/dev/null 2>&1 || ns_rc=$?
+  if [ "$ns_rc" -ne 0 ]; then
+    echo "OBS_CHECK=FAIL $(ns_fail_line "$fixture/ns.status" "$ns_rc")"
+    exit 1
   fi
 
-  local out rc=0
-  out="$(run_ns "$fixture/diag-root" "$fixture/run-root" "$fixture/view/bin" \
-         "$fixture/model.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 \
+  local out rc=0 detail
+  out="$(run_ns "$fixture/ns-check.status" "$fixture" "$fixture/diag-root" \
+         "$fixture/run-root" "$fixture/view/bin" "$fixture/model.config" \
+         "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 \
          --check "printf probe > $fixture/task/scratch/check-write-probe; printf OBS_CHECK_OK" 2>&1)" || rc=$?
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'SANDBOX_CHECK_RC=0' \
+  detail="$(ns_failure_detail "$fixture/ns-check.status" "$rc")"
+  if [ -n "$detail" ]; then
+    root_no check_mode_guard_only_no_sink "$detail"
+    root_no sandbox_identity_can_write_scratch "$detail"
+  elif [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'SANDBOX_CHECK_RC=0' \
      && printf '%s' "$out" | grep -q 'OBS_CHECK_OK' \
      && printf '%s' "$out" | grep -q 'allowlist=1' \
      && [ -f "$fixture/task/scratch/check-write-probe" ] \
@@ -1045,14 +1235,21 @@ EOF
     || { echo "OBS_CHECK=FAIL phase=probe_cleanup"; exit 1; }
 
   rc=0
-  out="$(run_ns "$fixture/diag-root" "$fixture/run-root" "$fixture/view/bin" \
-         "$fixture/model.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
+  out="$(run_ns "$fixture/ns-main.status" "$fixture" "$fixture/diag-root" \
+         "$fixture/run-root" "$fixture/view/bin" "$fixture/model.config" \
+         "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
          hermes -p android-stack chat --oneshot --query-file "$fixture/prompt.txt" 2>&1)" || rc=$?
+  detail="$(ns_failure_detail "$fixture/ns-main.status" "$rc")"
   local sink_main="$fixture/diag-root/BRIDGE-DIAG-003/events.jsonl"
   local counts_main
   counts_main="$(sink_counts "$sink_main")"
-  [ "$rc" -eq 0 ] && root_ok real_tool_executor_exit \
-    || root_no real_tool_executor_exit "$(run_detail tool_executor "$rc" "$out")"
+  if [ -n "$detail" ]; then
+    root_no real_tool_executor_exit "$detail"
+  elif [ "$rc" -eq 0 ]; then
+    root_ok real_tool_executor_exit
+  else
+    root_no real_tool_executor_exit "$(run_detail tool_executor "$rc" "$out")"
+  fi
   out=""
   printf 'OBS_REAL_COUNTS main %s %s\n' "$counts_main" \
     "$(capture_counts "$fixture/diag-root/BRIDGE-DIAG-003/guard-capture.jsonl")"
@@ -1076,12 +1273,20 @@ EOF
 
   record "$fixture/task/project/observer-alive"
   rc=0
-  out="$(run_ns "$fixture/diag-root-observer" "$fixture/run-root-observer" "$fixture/deadview/bin" \
-         "$fixture/model.observer.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
+  out="$(run_ns "$fixture/ns-observer.status" "$fixture" "$fixture/diag-root-observer" \
+         "$fixture/run-root-observer" "$fixture/deadview/bin" \
+         "$fixture/model.observer.config" "$PKG/bin/aegl-hermes-sandbox" \
+         --task BRIDGE-DIAG-003 -- \
          hermes -p android-stack chat --oneshot --query-file "$fixture/prompt.txt" 2>&1)" || rc=$?
+  detail="$(ns_failure_detail "$fixture/ns-observer.status" "$rc")"
   local sink_obs="$fixture/diag-root-observer/BRIDGE-DIAG-003/events.jsonl"
-  [ "$rc" -eq 0 ] && root_ok observer_failure_run_exit \
-    || root_no observer_failure_run_exit "$(run_detail observer_run "$rc" "$out")"
+  if [ -n "$detail" ]; then
+    root_no observer_failure_run_exit "$detail"
+  elif [ "$rc" -eq 0 ]; then
+    root_ok observer_failure_run_exit
+  else
+    root_no observer_failure_run_exit "$(run_detail observer_run "$rc" "$out")"
+  fi
   out=""
   printf 'OBS_REAL_COUNTS observer %s %s\n' "$(sink_counts "$sink_obs")" \
     "$(capture_counts "$fixture/diag-root-observer/BRIDGE-DIAG-003/guard-capture.jsonl")"
