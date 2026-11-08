@@ -1201,6 +1201,10 @@ EOF
   find "$fixture/repo" -type f -path "$fixture/repo/.git/*" | while IFS= read -r p; do record "$p"; done
   find "$fixture/repo" -type d | while IFS= read -r p; do record "$p"; done
 
+  record "$fixture/ns.status"
+  record "$fixture/ns-check.status"
+  record "$fixture/ns-main.status"
+  record "$fixture/ns-observer.status"
   local ns_rc=0
   run_ns "$fixture/ns.status" "$fixture" "$fixture/diag-root" "$fixture/run-root" \
     "$fixture/view/bin" "$fixture/model.config" true >/dev/null 2>&1 || ns_rc=$?
