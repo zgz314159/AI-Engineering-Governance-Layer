@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AEGL-TOOL-OBS-CHECK-r4 entry.
+# AEGL-TOOL-OBS-CHECK-r7 entry.
 #
 #   --self-test   ordinary-user checks only (hashes, Hermes version, manifest, fixture
 #                 templates, trusted-view copy, HTTPS synthetic upstream, exact observer
@@ -516,7 +516,7 @@ rows = [
  {"phase": "tool_pre_observe", "seq": 1, "arg": "src=hook trust=diagnostic when=pre corr=1 tool=terminal status=OK err=UNKNOWN"},
  {"phase": "tool_post_observe", "seq": 1, "arg": "src=hook trust=diagnostic when=post corr=1 tool=terminal status=OK err=UNKNOWN duration_ms=1 exit=0"},
  {"phase": "tool_pre_observe", "seq": 2, "arg": "src=hook trust=diagnostic when=pre corr=1 tool=terminal status=OK err=UNKNOWN"},
- {"phase": "tool_post_observe", "seq": 2, "arg": "src=hook trust=diagnostic when=post corr=1 tool=terminal status=ERROR err=tool_error duration_ms=2 exit=7"},
+ {"phase": "tool_post_observe", "seq": 2, "arg": "src=hook trust=diagnostic when=post corr=1 tool=terminal status=ERROR err=tool_error duration_ms=2 exit=1"},
  {"phase": "tool_pre_observe", "seq": 3, "arg": "src=hook trust=diagnostic when=pre corr=1 tool=terminal status=OK err=UNKNOWN"},
  {"phase": "tool_post_observe", "seq": 3, "arg": "src=hook trust=diagnostic when=post corr=1 tool=terminal status=BLOCKED err=UNKNOWN duration_ms=UNKNOWN exit=UNKNOWN"},
 ]
@@ -543,20 +543,33 @@ check_assert_negatives() {
   local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-as.XXXXXX)" || { no assert_negatives; return; }
   make_valid_sink "$tmp/valid"
   : > "$tmp/forbidden"
-  local allow_rc=0
-  python3 "$PKG/bin/assert_observation.py" --events "$tmp/valid" --forbidden "$tmp/none" >/dev/null || allow_rc=$?
+  local allow_rc=0 allow_out
+  allow_out="$(python3 "$PKG/bin/assert_observation.py" --events "$tmp/valid" \
+               --forbidden "$tmp/none" 2>&1)" || allow_rc=$?
   local bad=0
   mutate_sink "$tmp/valid" "$tmp/pre_seq1" "rows[:] = [({**r, 'seq': 1}) if r.get('phase') == 'tool_pre_observe' else r for r in rows]"
-  mutate_sink "$tmp/valid" "$tmp/exit70" "rows[:] = [({**r, 'arg': r['arg'].replace('exit=7', 'exit=70')}) if r.get('phase') == 'tool_post_observe' and r.get('seq') == 2 else r for r in rows]"
+  mutate_sink "$tmp/valid" "$tmp/exit10" "rows[:] = [({**r, 'arg': r['arg'].replace('exit=1', 'exit=10')}) if r.get('phase') == 'tool_post_observe' and r.get('seq') == 2 else r for r in rows]"
   mutate_sink "$tmp/valid" "$tmp/missing_post" "rows[:] = [r for i, r in enumerate(rows) if not (r.get('phase') == 'tool_post_observe' and r.get('seq') == 2)]"
   mutate_sink "$tmp/valid" "$tmp/duplicate_post" "rows[:] = rows + [next(r for r in rows if r.get('phase') == 'tool_post_observe' and r.get('seq') == 1)]"
   mutate_sink "$tmp/valid" "$tmp/extra_pre" "rows[:] = rows + [{'phase': 'tool_pre_observe', 'seq': 4, 'arg': 'src=hook trust=diagnostic when=pre corr=1 tool=terminal status=OK err=UNKNOWN'}]"
   mutate_sink "$tmp/valid" "$tmp/post_before_pre" "rows[:] = [r for r in rows if r.get('phase') == 'model_response'] + [r for r in rows if r.get('phase') == 'model_tool_request'] + [r for r in rows if r.get('phase') == 'tool_post_observe'] + [r for r in rows if r.get('phase') == 'tool_pre_observe']"
-  local name
-  for name in pre_seq1 exit70 missing_post duplicate_post extra_pre post_before_pre; do
-    python3 "$PKG/bin/assert_observation.py" --events "$tmp/$name" --forbidden "$tmp/none" >/dev/null 2>&1 \
-      && bad=$((bad + 1))
+  # Structural negatives: a fourth request, a repeated announcement with no new
+  # pre/post, and fewer than three requests must all FAIL without an IndexError.
+  mutate_sink "$tmp/valid" "$tmp/extra_request" "rows[:] = rows + [{'phase': 'model_tool_request', 'seq': 4, 'arg': 'resp=10 tool=terminal'}]"
+  mutate_sink "$tmp/valid" "$tmp/duplicate_announcement" "rows[:] = rows + [next(r for r in rows if r.get('phase') == 'model_tool_request' and r.get('seq') == 1)]"
+  mutate_sink "$tmp/valid" "$tmp/short_requests" "rows[:] = [r for r in rows if not (r.get('phase') == 'model_tool_request' and r.get('seq') == 3)]"
+  local name out rc
+  for name in pre_seq1 exit10 missing_post duplicate_post extra_pre post_before_pre \
+              extra_request duplicate_announcement short_requests; do
+    rc=0
+    out="$(python3 "$PKG/bin/assert_observation.py" --events "$tmp/$name" \
+            --forbidden "$tmp/none" 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] || bad=$((bad + 1))
+    case "$out" in *"OBS_ASSERT=FAIL"*) ;; *) bad=$((bad + 1)) ;; esac
+    case "$out" in *"OBS_ASSERT=PASS"*) bad=$((bad + 1)) ;; esac
+    case "$out" in *Traceback*) bad=$((bad + 1)) ;; esac
   done
+  case "$allow_out" in *"OBS_ASSERT=PASS"*) ;; *) bad=$((bad + 1)) ;; esac
   [ "$allow_rc" -eq 0 ] && [ "$bad" -eq 0 ] && ok assert_negatives || no assert_negatives
   rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
 }
@@ -581,6 +594,8 @@ import http.client, json, sys, ssl
 ctx = ssl.create_default_context()
 conn = http.client.HTTPSConnection("127.0.0.1", int(sys.argv[1]), context=ctx, timeout=5)
 req = [{"role": "user", "content": "go"}]
+TOOLS = [{"type": "function", "function": {
+    "name": "terminal", "parameters": {"type": "object", "properties": {}}}}]
 
 
 def post(body):
@@ -590,7 +605,14 @@ def post(body):
     return resp.getheader("content-type"), resp.read()
 
 
+# Auxiliary request (no tool declaration): fixed text, no scenario step consumed.
 ctype, raw = post({"model": "obs-check", "messages": req})
+assert ctype.startswith("application/json")
+message = json.loads(raw)["choices"][0]["message"]
+assert message["content"] == "done" and not message.get("tool_calls")
+
+# Declared terminal tool: step 0 is still first.
+ctype, raw = post({"model": "obs-check", "messages": req, "tools": TOOLS})
 assert ctype.startswith("application/json")
 call = json.loads(raw)["choices"][0]["message"]["tool_calls"][0]
 assert call["id"] == "obs-ok" and call["function"]["name"] == "terminal"
@@ -600,7 +622,8 @@ resp = conn.getresponse()
 data = json.loads(resp.read())
 assert [m["id"] for m in data["data"]] == ["obs-check"]
 
-ctype, raw = post({"model": "obs-check", "messages": req, "stream": True})
+ctype, raw = post({"model": "obs-check", "messages": req, "tools": TOOLS,
+                   "stream": True})
 assert ctype.startswith("text/event-stream")
 text = raw.decode()
 assert text.startswith("data: ")
@@ -690,51 +713,28 @@ check_protocol() {
   done
   [ "$bad" -eq 0 ] && [ "$runs" -eq 2 ] && ok protocol_json_and_sse || no protocol_json_and_sse
 
-  # Negative: an upstream that ignores `stream` (the r5 defect) completes JSON only.
-  # The real SDK must report a failure and must never print a PASS.
+  # Negative: the synthetic upstream ignores `stream` (always answers JSON). Its catalog
+  # GET and JSON completion stay correct, so the SDK run must fail at the SSE stage, not
+  # earlier. Only a `sse_*` category is accepted; `json_*` or a directory failure is not.
   local neg_port_file="$tmp/port-nostream"
-  python3 - "$neg_port_file" "$tmp/blocked" >/dev/null 2>&1 <<'PY' &
-import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-port_file = sys.argv[1]
-
-
-class H(BaseHTTPRequestHandler):
-    def do_POST(self):
-        length = int(self.headers.get("content-length", 0))
-        self.rfile.read(length)
-        body = json.dumps({"id": "obs-ok", "object": "chat.completion", "created": 0,
-                           "model": "obs-check", "choices": [{"index": 0, "message": {
-                               "role": "assistant", "content": None,
-                               "tool_calls": [{"id": "obs-ok", "type": "function",
-                                               "function": {"name": "terminal",
-                                                            "arguments": "{}"}}]},
-                               "finish_reason": "tool_calls"}]}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *a):
-        pass
-
-
-server = HTTPServer(("127.0.0.1", 0), H)
-open(port_file, "w").write(str(server.server_address[1]))
-server.serve_forever()
-PY
+  python3 "$PKG/bin/fake_upstream.py" --ignore-stream --port-file "$neg_port_file" \
+    --block-path "$tmp/blocked" >/dev/null 2>&1 &
   local negpid=$! i neg_port=""
   for i in $(seq 1 100); do [ -s "$neg_port_file" ] && break; sleep 0.05; done
   neg_port="$(cat "$neg_port_file" 2>/dev/null || true)"
   if [ -n "$neg_port" ]; then
-    local negout negrc=0
+    local negout negrc=0 negcat
     negout="$( cd "$tmp" && "$py" -I "$PKG/bin/openai_protocol_test.py" \
-               --base-url "http://127.0.0.1:$neg_port/v1" --block-path "$tmp/blocked" 2>&1 )" || negrc=$?
-    if [ "$negrc" -ne 0 ] && ! printf '%s' "$negout" | grep -q '^PROTOCOL ok=1$'; then
+               --base-url "http://127.0.0.1:$neg_port/v1" --block-path "$tmp/blocked" 2>&1 )" \
+      || negrc=$?
+    negcat="$(printf '%s' "$negout" \
+              | sed -n 's/^PROTOCOL FAIL category=\([a-z0-9_]*\).*/\1/p' | head -1)"
+    if [ "$negrc" -ne 0 ] \
+       && ! printf '%s' "$negout" | grep -q '^PROTOCOL ok=1$' \
+       && [ "${negcat#sse_}" != "$negcat" ]; then
       ok protocol_ignores_stream_negative
     else
-      no protocol_ignores_stream_negative
+      no "protocol_ignores_stream_negative category=${negcat:-UNKNOWN}"
     fi
   else
     no protocol_ignores_stream_negative

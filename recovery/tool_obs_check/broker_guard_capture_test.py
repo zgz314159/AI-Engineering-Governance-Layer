@@ -50,7 +50,7 @@ def _main(argv) -> int:
             return 1
 
     target = os.path.join(os.path.realpath(args.workdir), args.target_basename)
-    command = "sh -c 'printf blocked > %s'" % target
+    command = "printf blocked > %s" % target
     payload_command = command + " ; true" if args.mismatch else command
     response = {
         "choices": [{

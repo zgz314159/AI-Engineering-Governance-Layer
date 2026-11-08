@@ -11,11 +11,20 @@ It speaks the request protocol the real client uses:
     Completions JSON object; with ``stream`` true it returns a real ``text/event-stream``
     (tool-call deltas with index/id/name and fragmented ``arguments``, a final
     ``finish_reason`` chunk and ``data: [DONE]``).
+  * A chat request that does NOT explicitly declare the ``terminal`` tool is an
+    auxiliary request: it receives fixed text and never advances the scenario.
+  * ``--ignore-stream`` is the negative double: it keeps the catalog and JSON flows
+    correct and only ignores ``stream`` (always answering JSON).
   * Any other method/path returns a fixed JSON error, never the default HTML error page.
 
-The scenario step is derived from the conversation in the request (how many completed
-tool calls it already carries), so repeated identical requests replay the same step
-instead of skipping an unfinished one, and probes never consume a step.
+The scenario step is derived only from the conversation's matched tool results (a tool
+message whose id corresponds to a declared scenario tool call). An assistant announcement
+alone, an unrelated tool message, or a missing result never advances the step, so repeats
+replay the same unfinished step instead of skipping it.
+
+Fixture commands are fixed and harmless: ``printf OBS_OK``, ``/usr/bin/false`` (actual
+exit code 1) and a direct ``printf`` redirection to the guard-blocked path. Allowed and
+blocked writes differ only in their target path; no ``sh -c`` wrapper is used.
 
 Modes:
   main              success command, non-zero-exit command, guard-blocked scratch write
@@ -43,29 +52,60 @@ TOOL_NAME = "terminal"
 def _scenario(mode: str, block_path: str, alive_path: str) -> list[tuple[str, str]]:
     if mode == "observer-failure":
         return [
-            ("obs-alive", "sh -c 'printf alive > %s'" % alive_path),
-            ("obs-block2", "sh -c 'printf blocked > %s'" % block_path),
+            ("obs-alive", "printf alive > %s" % alive_path),
+            ("obs-block2", "printf blocked > %s" % block_path),
         ]
     return [
         ("obs-ok", "printf OBS_OK"),
-        ("obs-fail", "sh -c 'exit 7'"),
-        ("obs-block", "sh -c 'printf blocked > %s'" % block_path),
+        ("obs-fail", "/usr/bin/false"),
+        ("obs-block", "printf blocked > %s" % block_path),
     ]
 
 
+def _declares_terminal(body: dict) -> bool:
+    """True only when the request explicitly declares the scenario ``terminal`` tool."""
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and function.get("name") == TOOL_NAME:
+            return True
+    return False
+
+
 def _step_index(messages: list) -> int:
-    """Completed tool turns carried by the request: repeats replay the same step."""
-    assistant = 0
-    results = 0
+    """Completed scenario steps: matched tool results only, contiguous from the start.
+
+    An assistant tool announcement is not a result, an unrelated tool message does not
+    match a scenario request, and an unfinished step is never skipped.
+    """
+    announced = []
+    results = set()
     for message in messages:
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        if role == "assistant" and message.get("tool_calls"):
-            assistant += 1
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if isinstance(function, dict) and function.get("name") == TOOL_NAME:
+                    announced.append(call.get("id"))
         elif role == "tool":
-            results += 1
-    return max(assistant, results)
+            call_id = message.get("tool_call_id")
+            if call_id is not None:
+                results.add(call_id)
+    completed = 0
+    for call_id in announced:
+        if call_id in results:
+            completed += 1
+        else:
+            break
+    return completed
 
 
 def _tool_call(call_id: str, command: str) -> dict:
@@ -215,16 +255,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(messages, list) or not messages:
             self._send_error_json(400)
             return
+        wants_sse = bool(body.get("stream")) and not self.server.ignore_stream
+        if not _declares_terminal(body):
+            # Auxiliary request (no scenario tool declared): fixed text, no step advance.
+            if wants_sse:
+                self._send_sse(_sse_text())
+            else:
+                self._send_json(200, _text())
+            return
         steps = self.server.steps
         step = _step_index(messages)
         if step < len(steps):
             call_id, command = steps[step]
-            if body.get("stream"):
+            if wants_sse:
                 self._send_sse(_sse_tool(call_id, command))
             else:
                 self._send_json(200, _tool_call(call_id, command))
             return
-        if body.get("stream"):
+        if wants_sse:
             self._send_sse(_sse_text())
         else:
             self._send_json(200, _text())
@@ -256,6 +304,8 @@ def main(argv):
     ap.add_argument("--block-path", required=True)
     ap.add_argument("--mode", choices=("main", "observer-failure"), default="main")
     ap.add_argument("--alive-path", default="")
+    ap.add_argument("--ignore-stream", action="store_true",
+                    help="negative double: answer streaming requests with JSON only")
     args = ap.parse_args(argv)
     if args.mode == "observer-failure" and not args.alive_path:
         raise SystemExit("observer-failure mode needs --alive-path")
@@ -265,6 +315,7 @@ def main(argv):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     server.steps = _scenario(args.mode, args.block_path, args.alive_path)
+    server.ignore_stream = args.ignore_stream
     if args.cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(args.cert, args.key)

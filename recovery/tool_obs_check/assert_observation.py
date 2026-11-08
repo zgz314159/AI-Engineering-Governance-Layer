@@ -2,9 +2,13 @@
 """Exact structural assertion for the isolated observation sink.
 
 Fixed fields are parsed and compared literally per controller call sequence; substring
-matching is not used (exit=70 must never satisfy exit=7). Each expected model tool
+matching is not used (exit=10 must never satisfy exit=1). Each expected model tool
 request must have exactly one pre and one post observation, in order, with no extra,
 duplicate, missing or uncorrelated events.
+
+A request count or structure that differs from the fixed three-step scenario is a fixed
+FAIL with a non-zero exit and never an IndexError: the attempt is not deduplicated,
+truncated or otherwise relaxed to pass.
 
 CLI: assert_observation.py --events PATH --forbidden PATH [--fixture PATH]
 """
@@ -16,7 +20,8 @@ import json
 import os
 import sys
 
-FORBIDDEN_FRAGMENTS = ("OBS_OK", "exit 7", "guard-blocked", "obs-ok", "obs-fail", "obs-block")
+FORBIDDEN_FRAGMENTS = ("OBS_OK", "/usr/bin/false", "guard-blocked", "obs-ok", "obs-fail",
+                       "obs-block")
 
 
 def _arg_fields(arg: str) -> dict:
@@ -130,11 +135,16 @@ def main(argv) -> int:
             errors.append("causal_order_mismatch")
             break
 
-    expect_post = [("OK", "0"), ("ERROR", "7"), ("BLOCKED", "UNKNOWN")]
+    expect_post = [("OK", "0"), ("ERROR", "1"), ("BLOCKED", "UNKNOWN")]
     for index, seq in enumerate(expected):
         pre = pre_by_seq.get(seq)
         post = post_by_seq.get(seq)
         if pre is None or post is None:
+            continue
+        if index >= len(expect_post):
+            # An extra request (e.g. a repeated announcement) is already counted above.
+            # Never index past the fixed three-step expectation.
+            errors.append("request_count != 3")
             continue
         pf = _arg_fields(pre.get("arg"))
         qf = _arg_fields(post.get("arg"))
@@ -174,4 +184,11 @@ def main(argv) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except SystemExit:
+        raise
+    except Exception:
+        # Malformed structures still leave a fixed, non-zero result and no traceback.
+        print("OBS_ASSERT=FAIL reason=assertion_error")
+        raise SystemExit(1)

@@ -6,6 +6,11 @@ wire protocol it actually uses: a complete JSON completion and a ``text/event-st
 completion, with interleaved catalog probes. It never executes a returned command, never
 contacts a real model and never reads a real credential (the API key is a literal dummy).
 
+Every scenario request explicitly declares the ``terminal`` tool, as the real client does.
+Auxiliary requests without that declaration must receive fixed text and must not advance
+the scenario. Within a step, an assistant announcement with no result and an unrelated
+tool result must both replay the same unfinished step.
+
 Output is limited to fixed results, counts and error categories; response bodies,
 commands and arguments are never printed.
 """
@@ -16,6 +21,19 @@ import argparse
 import sys
 
 FAIL_STAGE = "UNKNOWN"
+
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "terminal",
+        "description": "run a fixed local fixture command",
+        "parameters": {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+    },
+}]
 
 
 def _fail(stage: str) -> "sys.NoReturn":
@@ -73,31 +91,54 @@ def _assert_tool(calls: list[dict], call_id: str, command: str) -> None:
         _fail("tool_arguments")
 
 
+def _assert_text(calls: list[dict], content: str | None, finish: str | None,
+                 stage: str) -> None:
+    if calls or content != "done" or finish != "stop":
+        _fail(stage)
+
+
 def _json(text: str) -> str:
     import json
     return json.dumps(text)
 
 
-def _turn(client, messages, stream: bool):
-    response = client.chat.completions.create(
-        model="obs-check", messages=messages, stream=stream, max_tokens=16)
+def _turn(client, messages, stream: bool, tools: bool = True):
+    kwargs = {"model": "obs-check", "messages": messages, "stream": stream,
+              "max_tokens": 16}
+    if tools:
+        kwargs["tools"] = TOOLS
+    response = client.chat.completions.create(**kwargs)
     if stream:
         return _stream_view(response)
     calls, content, finish = _tool_view(response)
     return calls, content, finish, 1, 1
 
 
+def _announcement(call_id: str, arguments: str) -> dict:
+    return {"role": "assistant", "content": None, "tool_calls": [{
+        "id": call_id, "type": "function",
+        "function": {"name": "terminal", "arguments": arguments}}]}
+
+
 def _conversation(client, block_path: str, stream: bool) -> dict:
-    counts = {"probe": 0, "repeat": 0, "steps": 0, "fragments": 0}
+    counts = {"probe": 0, "replay": 0, "announcement": 0, "unrelated": 0,
+              "steps": 0, "fragments": 0, "aux": 0}
     before = client.models.list()
     if [item.id for item in before.data] != ["obs-check"]:
         _fail("models_probe")
     counts["probe"] += 1
 
     messages = [{"role": "user", "content": "go"}]
+
+    # Auxiliary request without a tool declaration: fixed text, scenario not advanced.
+    calls, content, finish, _events, _fragments = _turn(
+        client, messages, stream, tools=False)
+    _assert_text(calls, content, finish, "auxiliary_text")
+    counts["aux"] += 1
+
     expected = [("obs-ok", "printf OBS_OK"),
-                ("obs-fail", "sh -c 'exit 7'"),
-                ("obs-block", "sh -c 'printf blocked > %s'" % block_path)]
+                ("obs-fail", "/usr/bin/false"),
+                ("obs-block", "printf blocked > %s" % block_path)]
     for index, (call_id, command) in enumerate(expected):
         calls, _content, finish, _events, fragments = _turn(client, messages, stream)
         if finish != "tool_calls":
@@ -105,27 +146,43 @@ def _conversation(client, block_path: str, stream: bool) -> dict:
         _assert_tool(calls, call_id, command)
         counts["steps"] += 1
         counts["fragments"] += fragments
+
         # The same conversation must replay the same step, never skip one.
         again, _c, again_finish, _e, _f = _turn(client, messages, stream)
         if again_finish != "tool_calls":
             _fail("repeat_finish")
         _assert_tool(again, call_id, command)
-        counts["repeat"] += 1
+        counts["replay"] += 1
+
+        # An assistant announcement with no result must not advance the step.
+        announcement = _announcement(call_id, calls[0]["arguments"])
+        only, _c, only_finish, _e, _f = _turn(client, messages + [announcement], stream)
+        if only_finish != "tool_calls":
+            _fail("announcement_finish")
+        _assert_tool(only, call_id, command)
+        counts["announcement"] += 1
+
+        # An unrelated tool result must not advance the step either.
+        unrelated = messages + [announcement, {
+            "role": "tool", "tool_call_id": call_id + "-unrelated", "content": "ok"}]
+        other, _c, other_finish, _e, _f = _turn(client, unrelated, stream)
+        if other_finish != "tool_calls":
+            _fail("unrelated_finish")
+        _assert_tool(other, call_id, command)
+        counts["unrelated"] += 1
+
         if index == 0:
             probe = client.models.list()
             if not probe.data:
                 _fail("interleaved_probe")
             counts["probe"] += 1
         messages = messages + [
-            {"role": "assistant", "content": None, "tool_calls": [{
-                "id": call_id, "type": "function",
-                "function": {"name": "terminal", "arguments": calls[0]["arguments"]}}]},
+            _announcement(call_id, calls[0]["arguments"]),
             {"role": "tool", "tool_call_id": call_id, "content": "ok"},
         ]
 
     calls, content, finish, _events, _fragments = _turn(client, messages, stream)
-    if calls or content != "done" or finish != "stop":
-        _fail("final_text")
+    _assert_text(calls, content, finish, "final_text")
     counts["final_text"] = 1
     return counts
 
@@ -175,10 +232,13 @@ def main(argv) -> int:
         print("PROTOCOL FAIL category=arguments_not_fragmented")
         return 1
     print("PROTOCOL json_steps=%d sse_steps=%d fragments=%d probes=%d repeats=%d "
-          "final_text=1" % (json_counts["steps"], sse_counts["steps"],
-                            sse_counts["fragments"],
-                            json_counts["probe"] + sse_counts["probe"],
-                            json_counts["repeat"] + sse_counts["repeat"]))
+          "aux=%d announcement_only=%d unrelated_results=%d final_text=1"
+          % (json_counts["steps"], sse_counts["steps"], sse_counts["fragments"],
+             json_counts["probe"] + sse_counts["probe"],
+             json_counts["replay"] + sse_counts["replay"],
+             json_counts["aux"] + sse_counts["aux"],
+             json_counts["announcement"] + sse_counts["announcement"],
+             json_counts["unrelated"] + sse_counts["unrelated"]))
     print("PROTOCOL ok=1")
     return 0
 
