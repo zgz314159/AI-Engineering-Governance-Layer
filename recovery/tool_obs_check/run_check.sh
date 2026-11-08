@@ -217,7 +217,8 @@ check_syntax() {
 import sys
 base = sys.argv[1]
 for name in ("fake_upstream.py", "assert_observation.py", "observer_dead_client.py",
-             "assert_guard_capture.py", "guard_capture.py", "broker_guard_capture_test.py"):
+             "assert_guard_capture.py", "guard_capture.py", "broker_guard_capture_test.py",
+             "openai_protocol_test.py"):
     compile(open(base + "/bin/" + name, encoding="utf-8").read(), name, "exec")
 PY
 }
@@ -579,17 +580,166 @@ check_fake_upstream() {
 import http.client, json, sys, ssl
 ctx = ssl.create_default_context()
 conn = http.client.HTTPSConnection("127.0.0.1", int(sys.argv[1]), context=ctx, timeout=5)
-conn.request("POST", "/v1/chat/completions", body=b'{"model":"obs-check"}',
-             headers={"Content-Type": "application/json"})
+req = [{"role": "user", "content": "go"}]
+
+
+def post(body):
+    conn.request("POST", "/v1/chat/completions", body=json.dumps(body).encode(),
+                 headers={"Content-Type": "application/json"})
+    resp = conn.getresponse()
+    return resp.getheader("content-type"), resp.read()
+
+
+ctype, raw = post({"model": "obs-check", "messages": req})
+assert ctype.startswith("application/json")
+call = json.loads(raw)["choices"][0]["message"]["tool_calls"][0]
+assert call["id"] == "obs-ok" and call["function"]["name"] == "terminal"
+
+conn.request("GET", "/v1/models")
 resp = conn.getresponse()
 data = json.loads(resp.read())
+assert [m["id"] for m in data["data"]] == ["obs-check"]
+
+ctype, raw = post({"model": "obs-check", "messages": req, "stream": True})
+assert ctype.startswith("text/event-stream")
+text = raw.decode()
+assert text.startswith("data: ")
+assert text.rstrip().endswith("data: [DONE]")
+assert '"finish_reason": "tool_calls"' in text
+
+conn.request("POST", "/v1/responses", body=b"{}",
+             headers={"Content-Type": "application/json"})
+resp = conn.getresponse()
+assert resp.status == 404 and resp.getheader("content-type").startswith("application/json")
+assert "error" in json.loads(resp.read())
+
+conn.request("GET", "/nope")
+resp = conn.getresponse()
+assert resp.status == 404 and resp.getheader("content-type").startswith("application/json")
 conn.close()
-call = data["choices"][0]["message"]["tool_calls"][0]
-assert call["id"] == "obs-ok" and call["function"]["name"] == "terminal"
 PY
     then ok fake_upstream_https; else no fake_upstream_https; fi
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
   fi
+  rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
+}
+
+hermes_venv_python() { # declared Hermes dependency environment (facts.json), not a guess
+  python3 - "$HERMES_HOME/installs" <<'PY'
+import glob, json, os, sys
+for facts in sorted(glob.glob(os.path.join(sys.argv[1], "*", "facts.json"))):
+    try:
+        data = json.load(open(facts, encoding="utf-8"))
+        env = data["packages"]["venv"]["environment"]
+    except Exception:
+        continue
+    python = os.path.join(env, "bin", "python")
+    if os.path.isdir(env) and os.access(python, os.X_OK):
+        print(python)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+check_protocol() {
+  local py; py="$(hermes_venv_python 2>/dev/null || true)"
+  if [ -z "$py" ]; then
+    no "protocol_sdk_environment"
+    return
+  fi
+  local tmp; tmp="$(mktemp -d /var/tmp/aegl-obs-pr.XXXXXX)" || { no protocol_sdk_environment; return; }
+  if ! openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/key.pem" -out "$tmp/cert.pem" \
+       -days 1 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" \
+       -addext "basicConstraints=critical,CA:TRUE" >/dev/null 2>&1; then
+    no protocol_tls; rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true; return
+  fi
+  local sdk=0 sdk_ver
+  sdk_ver="$( cd "$tmp" && "$py" -I -c 'import openai; print(openai.__version__)' 2>/dev/null )" || sdk=1
+  if [ "$sdk" -eq 0 ] && [ -n "$sdk_ver" ]; then ok protocol_sdk_present; else no protocol_sdk_present; fi
+
+  local scheme port_file port args
+  local bad=0 runs=0
+  for scheme in http https; do
+    port_file="$tmp/port-$scheme"
+    if [ "$scheme" = https ]; then
+      python3 "$PKG/bin/fake_upstream.py" --cert "$tmp/cert.pem" --key "$tmp/key.pem" \
+        --port-file "$port_file" --block-path "$tmp/blocked" >/dev/null 2>&1 &
+    else
+      python3 "$PKG/bin/fake_upstream.py" \
+        --port-file "$port_file" --block-path "$tmp/blocked" >/dev/null 2>&1 &
+    fi
+    local upid=$!
+    local i
+    for i in $(seq 1 100); do [ -s "$port_file" ] && break; sleep 0.05; done
+    port="$(cat "$port_file" 2>/dev/null || true)"
+    [ -n "$port" ] || { bad=1; kill "$upid" 2>/dev/null; continue; }
+    args=(--base-url "$scheme://127.0.0.1:$port/v1" --block-path "$tmp/blocked")
+    [ "$scheme" = https ] && args+=(--ca "$tmp/cert.pem")
+    local out rc=0
+    out="$( cd "$tmp" && "$py" -I "$PKG/bin/openai_protocol_test.py" "${args[@]}" 2>&1 )" || rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '^PROTOCOL json_steps=3 sse_steps=3 ' \
+       && printf '%s' "$out" | grep -q '^PROTOCOL ok=1$'; then
+      runs=$((runs + 1))
+    else
+      bad=1
+      local cat
+      cat="$(printf '%s' "$out" | sed -n 's/^PROTOCOL FAIL category=\([a-z0-9_]*\).*/\1/p' | head -1)"
+      no "protocol_${scheme} rc=$rc category=${cat:-UNKNOWN}"
+    fi
+    kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null || true
+  done
+  [ "$bad" -eq 0 ] && [ "$runs" -eq 2 ] && ok protocol_json_and_sse || no protocol_json_and_sse
+
+  # Negative: an upstream that ignores `stream` (the r5 defect) completes JSON only.
+  # The real SDK must report a failure and must never print a PASS.
+  local neg_port_file="$tmp/port-nostream"
+  python3 - "$neg_port_file" "$tmp/blocked" >/dev/null 2>&1 <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port_file = sys.argv[1]
+
+
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("content-length", 0))
+        self.rfile.read(length)
+        body = json.dumps({"id": "obs-ok", "object": "chat.completion", "created": 0,
+                           "model": "obs-check", "choices": [{"index": 0, "message": {
+                               "role": "assistant", "content": None,
+                               "tool_calls": [{"id": "obs-ok", "type": "function",
+                                               "function": {"name": "terminal",
+                                                            "arguments": "{}"}}]},
+                               "finish_reason": "tool_calls"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+server = HTTPServer(("127.0.0.1", 0), H)
+open(port_file, "w").write(str(server.server_address[1]))
+server.serve_forever()
+PY
+  local negpid=$! i neg_port=""
+  for i in $(seq 1 100); do [ -s "$neg_port_file" ] && break; sleep 0.05; done
+  neg_port="$(cat "$neg_port_file" 2>/dev/null || true)"
+  if [ -n "$neg_port" ]; then
+    local negout negrc=0
+    negout="$( cd "$tmp" && "$py" -I "$PKG/bin/openai_protocol_test.py" \
+               --base-url "http://127.0.0.1:$neg_port/v1" --block-path "$tmp/blocked" 2>&1 )" || negrc=$?
+    if [ "$negrc" -ne 0 ] && ! printf '%s' "$negout" | grep -q '^PROTOCOL ok=1$'; then
+      ok protocol_ignores_stream_negative
+    else
+      no protocol_ignores_stream_negative
+    fi
+  else
+    no protocol_ignores_stream_negative
+  fi
+  kill "$negpid" 2>/dev/null; wait "$negpid" 2>/dev/null || true
   rm -f "$tmp"/*; rmdir "$tmp" 2>/dev/null || true
 }
 
@@ -610,6 +760,7 @@ self_test() {
   check_worktree_product_cleanup
   check_assert_negatives
   check_fake_upstream
+  check_protocol
   notrun root_bwrap_check_mode_sink_absence
   notrun root_bwrap_real_tool_executor
   notrun root_bwrap_guard_block_no_execution
@@ -625,6 +776,74 @@ ROOT_FAIL=0
 root_no() { ROOT_FAIL=$((ROOT_FAIL + 1)); printf 'FAIL %s %s\n' "$1" "${2:-}"; }
 root_ok() { printf 'PASS %s\n' "$1"; }
 UP_PIDS=()
+
+# Captured child output is classified in memory only; it is never printed, truncated
+# into the log or persisted. Only a fixed category leaves this function.
+classify_run_capture() { # <rc> <in-memory output>
+  local rc="$1" out="$2" routes bad
+  routes="$(printf '%s\n' "$out" | grep -c '^AEGL_MODEL_ROUTE ' 2>/dev/null || true)"
+  bad="$(printf '%s\n' "$out" | sed -n 's/^AEGL_MODEL_ROUTE .*status=\([0-9][0-9]*\).*/\1/p' \
+         | grep -vc '^200$' 2>/dev/null || true)"
+  if printf '%s' "$out" | grep -qi 'timed out\|timeout'; then
+    echo timeout
+  elif [ "${bad:-0}" -gt 0 ]; then
+    echo upstream_status_error
+  elif [ "${routes:-0}" -eq 0 ]; then
+    [ "$rc" -eq 0 ] && echo no_route_record || echo exec_failed
+  else
+    [ "$rc" -eq 0 ] && echo UNKNOWN || echo exec_failed
+  fi
+}
+
+run_detail() { # <stage> <rc> <in-memory output> — fixed fields only
+  printf 'stage=%s rc=%s category=%s' "$1" "$2" "$(classify_run_capture "$2" "$3")"
+}
+
+# Evidence counts only (never the captured child output).
+sink_counts() { # <events.jsonl>
+  python3 - "$1" <<'PY' 2>/dev/null || echo "model_responses=UNKNOWN model_tool_requests=UNKNOWN tool_pre=UNKNOWN tool_post=UNKNOWN"
+import json, sys
+counts = {"model_responses": 0, "model_tool_requests": 0,
+          "tool_pre": 0, "tool_post": 0}
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            phase = json.loads(line).get("phase")
+            if phase == "model_response":
+                counts["model_responses"] += 1
+            elif phase == "model_tool_request":
+                counts["model_tool_requests"] += 1
+            elif phase == "tool_pre_observe":
+                counts["tool_pre"] += 1
+            elif phase == "tool_post_observe":
+                counts["tool_post"] += 1
+except Exception:
+    raise SystemExit(1)
+print(" ".join("%s=%d" % item for item in counts.items()))
+PY
+}
+
+capture_counts() { # <guard-capture.jsonl>
+  python3 - "$1" <<'PY' 2>/dev/null || echo "captures=UNKNOWN blocks=UNKNOWN"
+import json, sys
+records = blocks = 0
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            records += 1
+            if (json.loads(line).get("verdict") or {}).get("action") == "block":
+                blocks += 1
+except Exception:
+    raise SystemExit(1)
+print("captures=%d blocks=%d" % (records, blocks))
+PY
+}
 
 snapshot_host() { # <out>
   local out="$1" p
@@ -818,9 +1037,10 @@ EOF
     root_ok check_mode_guard_only_no_sink
     root_ok sandbox_identity_can_write_scratch
   else
-    root_no check_mode_guard_only_no_sink "rc=$rc"
-    root_no sandbox_identity_can_write_scratch
+    root_no check_mode_guard_only_no_sink "$(run_detail check_mode "$rc" "$out")"
+    root_no sandbox_identity_can_write_scratch "rc=$rc"
   fi
+  out=""
   rm -f "$fixture/task/scratch/check-write-probe" \
     || { echo "OBS_CHECK=FAIL phase=probe_cleanup"; exit 1; }
 
@@ -828,8 +1048,14 @@ EOF
   out="$(run_ns "$fixture/diag-root" "$fixture/run-root" "$fixture/view/bin" \
          "$fixture/model.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
          hermes -p android-stack chat --oneshot --query-file "$fixture/prompt.txt" 2>&1)" || rc=$?
-  [ "$rc" -eq 0 ] && root_ok real_tool_executor_exit || root_no real_tool_executor_exit "rc=$rc"
   local sink_main="$fixture/diag-root/BRIDGE-DIAG-003/events.jsonl"
+  local counts_main
+  counts_main="$(sink_counts "$sink_main")"
+  [ "$rc" -eq 0 ] && root_ok real_tool_executor_exit \
+    || root_no real_tool_executor_exit "$(run_detail tool_executor "$rc" "$out")"
+  out=""
+  printf 'OBS_REAL_COUNTS main %s %s\n' "$counts_main" \
+    "$(capture_counts "$fixture/diag-root/BRIDGE-DIAG-003/guard-capture.jsonl")"
   if [ -f "$sink_main" ] \
      && python3 "$PKG/bin/assert_observation.py" --events "$sink_main" \
           --forbidden "$fixture/task/scratch/guard-blocked" --fixture "$fixture" >/dev/null; then
@@ -853,7 +1079,12 @@ EOF
   out="$(run_ns "$fixture/diag-root-observer" "$fixture/run-root-observer" "$fixture/deadview/bin" \
          "$fixture/model.observer.config" "$PKG/bin/aegl-hermes-sandbox" --task BRIDGE-DIAG-003 -- \
          hermes -p android-stack chat --oneshot --query-file "$fixture/prompt.txt" 2>&1)" || rc=$?
-  [ "$rc" -eq 0 ] && root_ok observer_failure_run_exit || root_no observer_failure_run_exit "rc=$rc"
+  local sink_obs="$fixture/diag-root-observer/BRIDGE-DIAG-003/events.jsonl"
+  [ "$rc" -eq 0 ] && root_ok observer_failure_run_exit \
+    || root_no observer_failure_run_exit "$(run_detail observer_run "$rc" "$out")"
+  out=""
+  printf 'OBS_REAL_COUNTS observer %s %s\n' "$(sink_counts "$sink_obs")" \
+    "$(capture_counts "$fixture/diag-root-observer/BRIDGE-DIAG-003/guard-capture.jsonl")"
   if [ -f "$fixture/task/project/observer-alive" ] \
      && [ "$(cat "$fixture/task/project/observer-alive")" = "alive" ] \
      && [ "$(stat -c '%U' "$fixture/task/project/observer-alive")" = aegl-ai ] \
@@ -862,7 +1093,6 @@ EOF
   else
     root_no observer_failure_allowed_executed_blocked_not
   fi
-  local sink_obs="$fixture/diag-root-observer/BRIDGE-DIAG-003/events.jsonl"
   if [ -f "$sink_obs" ] \
      && ! grep -q '"phase": "tool_pre_observe"' "$sink_obs" \
      && ! grep -q '"phase": "tool_post_observe"' "$sink_obs"; then
