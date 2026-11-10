@@ -1,0 +1,36 @@
+{
+  "project": "ImageAnalysisFactory",
+  "project_type": "greenfield",
+  "source_root": "/var/tmp/IAP-SMOKE-007",
+  "read_first": [
+    {
+      "path": "project/Command_Code_DeepSeek_大规模图片智能分析工厂_建设方案_v1.0.md",
+      "why": "the frozen product plan this business project implements, without a broad repo scan"
+    }
+  ],
+  "allowed_paths": [
+    "project"
+  ],
+  "forbidden_paths": [],
+  "path_classes": {
+    "EVIDENCE_OUTPUT": [
+      "project/EVIDENCE.txt"
+    ],
+    "PRODUCTION_IMMUTABLE": [
+      "project/Command_Code_DeepSeek_大规模图片智能分析工厂_建设方案_v1.0.md"
+    ]
+  },
+  "boundary_notes": {
+    "source_root": "/var/tmp/IAP-SMOKE-007",
+    "unlisted_is_blocked": "No formal ImageAnalysisFactory or host path is authorized.",
+    "no_broad_access": "Only the disposable project/ subtree is allowed."
+  },
+  "contract_notes": {
+    "package_role": "EXECUTION_AUTHORIZATION_CONTRACT",
+    "package_access": "READ_ONLY_INPUT",
+    "generated_by": "specification/compiler (hash_manifest.py -> build_contract.py -> validate_package.py)",
+    "execution_sessions": 1,
+    "verification_passes": 1,
+    "business_write": "NONE"
+  }
+}

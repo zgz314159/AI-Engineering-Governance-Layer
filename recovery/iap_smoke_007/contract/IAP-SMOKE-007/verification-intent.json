@@ -1,0 +1,50 @@
+{
+  "feature_id": "IAP-BRIDGE-ONBOARD",
+  "journey_id": "IAP-M1-RUN",
+  "engine": "cli",
+  "acceptance_ids": [
+    "AC-IAP-001"
+  ],
+  "required_selectors": [],
+  "cli_checks": [
+    {
+      "step": "identity",
+      "command": "id -un",
+      "expected": "aegl-ai",
+      "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt"
+    },
+    {
+      "step": "worktree",
+      "command": "pwd",
+      "expected": "/var/tmp/IAP-SMOKE-007/project",
+      "on_failure": "stop; report the actual value in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt"
+    },
+    {
+      "step": "revision",
+      "command": "git rev-parse HEAD",
+      "expected": "the frozen task commit recorded in the root-owned trusted PREP-BINDING.json at the task root (outside the read-only contract package); the contract must not embed its own commit SHA",
+      "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt"
+    },
+    {
+      "step": "runtime",
+      "command": "python3 --version",
+      "expected": "the actual Python runtime string (e.g. Python 3.11.x)",
+      "on_failure": "stop; report the actual value in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt"
+    },
+    {
+      "step": "evidence",
+      "command": "test -s EVIDENCE.txt && cat EVIDENCE.txt",
+      "expected": "exactly four labeled lines in this order, with no extra lines: `id -un: aegl-ai`, `pwd: /var/tmp/IAP-SMOKE-007/project`, `git rev-parse HEAD: <PREP-BINDING.json commit>`, `python3 --version: <actual>`; nothing else is written to the file",
+      "on_failure": "stop; report the failure in the FINAL ASSISTANT RESPONSE; do not add lines to, synthesize or repair EVIDENCE.txt"
+    }
+  ],
+  "persistence_checks": [
+    "EVIDENCE.txt persists in the task worktree (contract path project/EVIDENCE.txt) with exactly four labeled lines and no other line"
+  ],
+  "rotation_checks": [],
+  "search_checks": [
+    "EVIDENCE.txt contains the exact values aegl-ai, /var/tmp/IAP-SMOKE-007/project, the PREP-BINDING.json commit and the actual python3 --version string, and nothing else; expected values and failure notes are not written to the file"
+  ],
+  "fixture_intent": "The disposable task root /var/tmp/IAP-SMOKE-007 with worktree project/; the root-owned trusted PREP-BINDING.json at the task root binds the expected task commit after the commit exists.",
+  "oracle_intent": "Deterministic CLI evidence: actual command outputs in exactly four labeled EVIDENCE.txt lines and nothing else, checked against the trusted PREP-BINDING.json at the task root; expected values and failure notes are reported only in the final assistant response; no synthesized value, no formal write, no promotion."
+}
