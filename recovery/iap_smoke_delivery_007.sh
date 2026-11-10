@@ -311,15 +311,27 @@ inst_pin() { # <path> <sha> <owner:group> <mode>
     && [ "$(sha256sum "$1" | awk '{print $1}')" = "$2" ] \
     && [ "$(stat -c '%U:%G %a' "$1")" = "$3 $4" ]
 }
+launcher_pin_ok() { # <path> — regular, non-symlink, exactly one of the two approved hashes
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  local h; h="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+  [ "$h" = "$SANDBOX_BEFORE_SHA" ] || [ "$h" = "$SANDBOX_AFTER_SHA" ]
+}
+launcher_live_ok() { # <path> — regular, non-symlink, exactly the 007 candidate hash
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(sha256sum "$1" 2>/dev/null | awk '{print $1}')" = "$SANDBOX_AFTER_SHA" ]
+}
+inst_pin_launcher() { # <path>
+  launcher_pin_ok "$1" && [ "$(stat -c '%U:%G %a' "$1")" = "root:root 755" ]
+}
 installed_pins_ok() {
-  inst_pin "$SANDBOX_BIN" "$SANDBOX_BEFORE_SHA" root:root 755 \
+  inst_pin_launcher "$SANDBOX_BIN" \
     && inst_pin "$BROKER_BIN" "$BROKER_SHA" root:root 644 \
     && inst_pin "$SANDBOX_DIR/tool_event_client.py" "$TOOL_EVENT_SHA" root:root 644 \
     && inst_pin "$SANDBOX_DIR/tool_observer_config.py" "$TOOL_OBSERVER_SHA" root:root 644 \
     && inst_pin "$SANDBOX_DIR/guard/contract_guard.py" "$GUARD_SHA" root:root 444 \
     && inst_pin "$SANDBOX_DIR/git_meta_mounts.sh" "$EXPECT_HELPER_SHA" root:root 755 \
     || die installed_pin "one of the six required installed pins changed"
-  say "INSTALLED_PINS_OK launcher=$SANDBOX_BEFORE_SHA broker=$BROKER_SHA observers=2 guard=$GUARD_SHA helper=$EXPECT_HELPER_SHA"
+  say "INSTALLED_PINS_OK launcher=predecessor_or_007_candidate broker=$BROKER_SHA observers=2 guard=$GUARD_SHA helper=$EXPECT_HELPER_SHA"
 }
 
 stage_preflight() {
@@ -635,7 +647,11 @@ MEMPYP
   registry_fields_ok "$TASK_ID" || rf="$REGISTRY_DIFF"
   [ "$rf" = "ok" ] || die live_registry "$rf"
   [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die live_evidence "$WORKTREE/EVIDENCE.txt exists (prep must not create it)"
-  say "LIVE_STATE_OK registry=4/4 contract=binding=$EXPECT_MANIFEST_SHA evidence=absent"
+  # After prep and before send, the installed launcher MUST be the 007 candidate, never
+  # the predecessor. This is the execute-time half of the two-hash admission.
+  launcher_live_ok "$SANDBOX_BIN" \
+    || die live_launcher "$SANDBOX_BIN is not the 007 candidate hash $SANDBOX_AFTER_SHA"
+  say "LIVE_STATE_OK registry=4/4 contract=binding=$EXPECT_MANIFEST_SHA launcher=007_candidate evidence=absent"
 }
 
 bridge_ok() { # 0 only for the expected live Bridge state — parsed independently
@@ -1023,8 +1039,8 @@ for n in ("iap_round_verdict.py","iap_diag_summary.py"):
 PY
   then ok syntax_python; else no syntax_python; fi
 
-  local C="$T/contract" R="$T/root"
-  local compiler="/home/zhong/Projects/Google-Android-Agent-Development-Stack/specification/compiler"
+  local C="$T/IAP-SMOKE-007" R="$T/root"
+  local compiler="/var/tmp/IAP-CONTROL-DEV/stack/specification/compiler"
   install -d "$C" "$R/project" || true
   cp -a "$CONTRACT_SRC"/. "$C"/ || true
   cp "$IAP/$PLAN_FILE" "$R/project/" || true
@@ -1035,6 +1051,21 @@ PY
      && [ "$(sha256sum "$C/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ]; then
     ok contract_validator
   else no contract_validator; fi
+  if [ -r "$compiler/build_contract.py" ] \
+     && [ "$(sha256sum "$compiler/build_contract.py" | awk '{print $1}')" = "8de6d8384549195d51b5a13fe0175a743a41c5d5143219e6b9ce54a3099a770c" ] \
+     && python3 "$compiler/hash_manifest.py" "$C" >/dev/null 2>&1 \
+     && python3 "$compiler/build_contract.py" "$C" >/dev/null 2>&1 \
+     && python3 "$compiler/validate_package.py" "$C" --project-root "$R" >/dev/null 2>&1 \
+     && cmp -s "$C/manifest.json" "$CONTRACT_SRC/manifest.json" \
+     && cmp -s "$C/implementation-contract.json" "$CONTRACT_SRC/implementation-contract.json" \
+     && cmp -s "$C/EXECUTOR-PROMPT.md" "$CONTRACT_SRC/EXECUTOR-PROMPT.md"; then
+    ok contract_regeneration
+  else no contract_regeneration; fi
+  if grep -q '/var/tmp/IAP-CONTROL-DEV/stack' "$PKG/README.md" \
+     && grep -q 'f45b1ae5a34f4ee9b0c6496ff141c127e2601d1f' "$PKG/README.md" \
+     && grep -q '8de6d8384549195d51b5a13fe0175a743a41c5d5143219e6b9ce54a3099a770c' "$PKG/README.md"; then
+    ok generator_provenance
+  else no generator_provenance; fi
   if [ "$(sha256sum "$CONTRACT_SRC/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
      && python3 - "$CONTRACT_SRC" <<'PY'
 import json,sys
@@ -1048,6 +1079,13 @@ assert pc["source_root"]=="/var/tmp/IAP-SMOKE-007"
 ev=[x for x in vi["cli_checks"] if x["step"]=="evidence"][0]["expected"]
 assert "exactly four labeled lines" in ev and "/var/tmp/IAP-SMOKE-007/project" in ev
 assert any(str(x.get("path", "")).startswith("project/") for x in pc["read_first"])
+prompt = open(p + "/EXECUTOR-PROMPT.md", encoding="utf-8").read()
+assert "Record the actual command, actual output, expected result and failure condition in `EVIDENCE.txt`." not in prompt
+assert "If any check fails: STOP, record the failure" not in prompt
+assert "Record evidence only in the files and format required by the frozen contract." in prompt
+assert "Put expected results, failure conditions, and supplemental reporting in the FINAL ASSISTANT RESPONSE" in prompt
+assert "exactly four labeled lines" in prompt
+assert "nothing else is written to the file" in prompt
 PY
   then ok contract_consistency; else no contract_consistency; fi
   record_tree "$C"
@@ -1057,7 +1095,7 @@ PY
      && grep -qxF -- "$SANDBOX_ALLOWLIST" "$PKG/payload/aegl-hermes-sandbox"; then
     ok launcher_payload
   else no launcher_payload; fi
-  if inst_pin "$SANDBOX_BIN" "$SANDBOX_BEFORE_SHA" root:root 755 \
+  if inst_pin_launcher "$SANDBOX_BIN" \
      && inst_pin "$BROKER_BIN" "$BROKER_SHA" root:root 644 \
      && inst_pin "$SANDBOX_DIR/tool_event_client.py" "$TOOL_EVENT_SHA" root:root 644 \
      && inst_pin "$SANDBOX_DIR/tool_observer_config.py" "$TOOL_OBSERVER_SHA" root:root 644 \
@@ -1066,6 +1104,37 @@ PY
     ok installed_pins
   else no installed_pins; fi
   if ( stack_hashes_ok ) >/dev/null 2>&1; then ok stack_pins; else no stack_pins; fi
+
+  local pred="$T/pred-launcher" cand="$T/cand-launcher" unk="$T/unknown-launcher" link="$T/cand-link"
+  cp "$SANDBOX_BIN" "$pred"; record_file "$pred"
+  cp "$PKG/payload/aegl-hermes-sandbox" "$cand"; record_file "$cand"
+  printf 'unknown\n' > "$unk"; record_file "$unk"
+  ln -s "$cand" "$link"; record_file "$link"
+  if launcher_pin_ok "$pred" && launcher_pin_ok "$cand" \
+     && ! launcher_pin_ok "$unk" && ! launcher_pin_ok "$link"; then
+    ok launcher_prepare_admission
+  else no launcher_prepare_admission; fi
+  if ! launcher_live_ok "$pred" && launcher_live_ok "$cand" \
+     && ! launcher_live_ok "$unk" && ! launcher_live_ok "$link"; then
+    ok launcher_execute_gate
+  else no launcher_execute_gate; fi
+  mkdir -p "$T/stub"; record_dir "$T/stub"
+  cat > "$T/stub/stat" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FAKE_STAT_PIN:-root:root 755}"
+SH
+  record_file "$T/stub/stat"; chmod 0755 "$T/stub/stat"
+  if ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 755'; inst_pin_launcher "$cand" ) \
+     && ! ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 644'; inst_pin_launcher "$cand" ) \
+     && ! ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 755'; inst_pin_launcher "$unk" ); then
+    ok launcher_owner_mode_gate
+  else no launcher_owner_mode_gate; fi
+  if sed -n '/^verify_live_state()/,/^}/p' "$PKG/bin/run_smoke.sh" | grep -q 'launcher_live_ok'; then
+    ok live_state_candidate_pin
+  else no live_state_candidate_pin; fi
+  if sed -n '/^stage_send()/,/^}/p' "$PKG/bin/run_smoke.sh" | grep -q 'verify_live_state'; then
+    ok send_precheck
+  else no send_precheck; fi
 
   if bridge_ok; then ok bridge_state; else no bridge_state; fi
   local ds; ds="$(diag_sink_state)"; say "DIAG_SINK=$ds"

@@ -12,15 +12,22 @@ integration observation.
 
 - AEGL source: `/var/tmp/IAP-CONTROL-DEV/aegl`, branch `fix/iap-delivery`
 - production candidate (unchanged): `926c34fbecf1157c2ae88e57e85ef67f6f82de33`
-- check source predecessor: `9aef5378dabeb17a8a0152404f32bd8434d3a4b2`
+- check source predecessor: `1425044631af09aa5a7ac8d0df6162ea09d5e6e3`
 - frozen 006 S0 contract it derives from: manifest
   `e47d44349b6f401814afb7381aba1df41eb4921ea7de0a91c52087c56c54d640`
   (already consumed; **not** modified by this package)
 - derivation: only the task/contract IDs and the 006 → 007 task-root/worktree paths were
-  changed; the package was rebuilt with the **unchanged** specification compiler
-  (`specification/compiler/hash_manifest.py` → `build_contract.py` →
-  `validate_package.py`)
+  changed; the package was rebuilt with the **unchanged, corrected** generator at
+  `/var/tmp/IAP-CONTROL-DEV/stack`, commit
+  `f45b1ae5a34f4ee9b0c6496ff141c127e2601d1f`,
+  `specification/compiler/build_contract.py` SHA-256
+  `8de6d8384549195d51b5a13fe0175a743a41c5d5143219e6b9ce54a3099a770c`
+  (`hash_manifest.py` → `build_contract.py` → `validate_package.py`)
+- regenerated 007 `EXECUTOR-PROMPT.md` SHA-256:
+  `4c6061758c53ff1a6f67dcef31c985137044ebe4a24a6232f36561220a665033`
 - 007 contract manifest: `b84391b570bdc3512f675f3741b9d62151268612302d20fe8ec38200ea867b71`
+  (unchanged because the authored inputs are unchanged; the generated prompt and the
+  package manifest were updated)
 - 007 contract gates: `schema=PASS traceability=PASS boundaries=PASS acceptance=PASS
   hashes=PASS`; `READY.json status=READY`
 - baseline (unchanged): `177680708739a72a0d70bc6a9664245b00a2ef08`
@@ -57,6 +64,24 @@ The only deployed change is the launcher diagnostic allowlist: one line, appendi
 The broker, both observer modules, the guard and the helper are neither modified nor
 reinstalled.
 
+## Launcher pin continuity (prep → execute)
+
+- Preflight (`installed_pins_ok`) accepts exactly two approved launcher hashes, only as a
+  regular non-symlink `root:root 0755` file:
+  - predecessor `f3e556f079d14c6e4dd7173cd3a571b6e8a32527db12dc91aae44fbf75929479`
+    (initial prep);
+  - 007 candidate `dc954c59ed4cadf6c7567679045c1d35cd529f3b19237228b1bb08dc6048d4f5`
+    (after prep; `--execute` re-runs preflight).
+  Any other hash, wrong owner/mode or a symlink stops.
+- Final `verify_live_state` and every pre-send path require the **007 candidate** hash
+  only; the predecessor is not accepted there.
+- The other five component pins (broker, both observer modules, guard, helper) remain
+  strict and unchanged.
+- Targeted ordinary-user checks cover predecessor admission, the candidate execute gate,
+  an unknown hash, a symlink, and the owner/mode rejection. The owner/mode case uses a
+  `stat` stub, so it proves the admission gate only; real root ownership is verified on
+  the installed files and in the root path, which remains `NOT_RUN`.
+
 ## Contract and stage order
 
 - contract source: `contract/IAP-SMOKE-007`
@@ -81,15 +106,20 @@ reinstalled.
 ## Verification performed
 
 ```sh
-/var/tmp/IAP-SMOKE-007-prep-r1/bin/run_smoke.sh --self-test
+/var/tmp/IAP-SMOKE-007-prep-r2/bin/run_smoke.sh --self-test
 ```
 
-Result: `SELFTEST pass=23 fail=0`. Coverage: package integrity; shell/Python syntax;
-contract validator on a temporary copy; contract consistency (007 IDs/paths and the
-four-line evidence rule); launcher payload/allowlist; the six installed pins; Stack
-pins; Bridge state; `DIAG_SINK=UNKNOWN` and permission handling; task-root/ledger/
-registry/supervisor/contract states; absence of 006 continuation code; PREP stage order;
-and sink-first preflight ordering. `--status` was also run as an ordinary user.
+Result: `SELFTEST pass=30 fail=0`. Coverage: package integrity; shell/Python syntax;
+contract validator on a temporary copy; contract regeneration with the corrected
+generator and byte-identical manifest/contract/prompt; prompt regression checks (old
+generic `EVIDENCE.txt` instructions absent, generic step subordinate to the frozen
+contract, four-line evidence and final-response reporting retained); generator
+provenance; launcher payload/allowlist; the six installed pins; launcher predecessor and
+candidate admission; execute-gate candidate-only hash; launcher owner/mode stub; live
+state and pre-send candidate pin; Stack pins; Bridge state; `DIAG_SINK=UNKNOWN` and
+permission handling; task-root/ledger/registry/supervisor/contract states; absence of 006
+continuation code; PREP stage order; and sink-first preflight ordering. `--status` was
+also run as an ordinary user.
 
 The self-test records explicit files and directories at creation. On success it removes
 them with non-forced `rm` and reverse `rmdir`; on an assertion or cleanup failure it
