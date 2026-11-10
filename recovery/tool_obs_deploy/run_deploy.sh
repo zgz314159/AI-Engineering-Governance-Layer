@@ -36,6 +36,27 @@ FAIL_STAGE=""
 DEPLOY_COMPLETED=()
 INSTALLED_ORDER=()
 TEMP_PATHS=()
+CLEAN_FILES=()
+CLEAN_DIRS=()
+
+note_file() { CLEAN_FILES+=("$1"); }
+note_dir() { CLEAN_DIRS+=("$1"); }
+
+clean_all() { # explicit recorded paths only; non-forced rm, reverse rmdir
+  local p rc=0 i
+  for p in "${CLEAN_FILES[@]}"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      rm -- "$p" || rc=1
+    fi
+  done
+  for ((i = ${#CLEAN_DIRS[@]} - 1; i >= 0; i--)); do
+    p="${CLEAN_DIRS[i]}"
+    if [ -d "$p" ] && [ ! -L "$p" ]; then
+      rmdir -- "$p" || rc=1
+    fi
+  done
+  return "$rc"
+}
 
 sha() { sha256sum -- "$1" | awk '{print $1}'; }
 owner_of() { stat -c '%U:%G' -- "$1"; }
@@ -205,12 +226,11 @@ post_verify() { # <target>
 }
 
 cleanup_temps() {
+  # A successful rename already removed every registered temp path. Never delete here:
+  # any surviving path (including a dangling link) is unexpected state and must stop.
   local t
   for t in "${TEMP_PATHS[@]}"; do
-    rm -f -- "$t" || { FAIL_STAGE=cleanup; return 70; }
-  done
-  for t in "${TEMP_PATHS[@]}"; do
-    is_absent "$t" || { FAIL_STAGE=cleanup_verify; return 71; }
+    is_absent "$t" || { FAIL_STAGE=cleanup_temp_exists; return 70; }
   done
   return 0
 }
@@ -263,18 +283,22 @@ deploy_main() {
 }
 
 # --- ordinary-user checks (simulated install; no host write) ------------------- #
-sim_prepare() { # <dir> — fixture target and matching in-memory pins
+sim_prepare() { # <dir> — new fixture target and matching in-memory pins
   local t="$1" name
-  rm -rf -- "$t" || return 1
+  { [ ! -e "$t" ] && [ ! -L "$t" ]; } || return 1
   install -d -m 0755 "$t" "$t/guard" || return 1
+  note_dir "$t"; note_dir "$t/guard"
   for name in "${DEP_ORDER[@]}"; do
     printf 'dep:%s\n' "$name" > "$t/$name" || return 1
     chmod "${DEP_MODE[$name]}" "$t/$name" || return 1
+    note_file "$t/$name"
   done
   printf 'prev:launcher\n' > "$t/aegl-hermes-sandbox" || return 1
   chmod 755 "$t/aegl-hermes-sandbox" || return 1
+  note_file "$t/aegl-hermes-sandbox"
   printf 'prev:broker\n' > "$t/model_broker.py" || return 1
   chmod 644 "$t/model_broker.py" || return 1
+  note_file "$t/model_broker.py"
   chmod 755 "$t" || return 1
   DEPLOY_TARGET="$t"
   TARGET_OWNER="$(id -un):$(id -gn)"
@@ -337,12 +361,14 @@ st_pins() {
 st_active_run() {
   local tmp; tmp="$(mktemp -d /var/tmp/aegl-deploy-ar.XXXXXX)" \
     || { no deploy_active_run; return; }
-  local flag=0
-  if (
+  local rc=0
+  (
     . "$PINS"
+    CLEAN_FILES=(); CLEAN_DIRS=()
+    note_dir "$tmp"
     bad=0 rc=0 oldpath=""
-    mkdir -p "$tmp/stub"
-    cat > "$tmp/stub/pgrep" <<'SH'
+    mkdir -p "$tmp/stub" || bad=1; note_dir "$tmp/stub"
+    cat > "$tmp/stub/pgrep" <<'SH' || bad=1
 #!/bin/sh
 case "${FAKE_PGREP_MODE:-none}" in
   hit) printf '123 aegl-hermes-sandbox --task X\n'; exit 0 ;;
@@ -350,19 +376,22 @@ case "${FAKE_PGREP_MODE:-none}" in
   *) exit 1 ;;
 esac
 SH
-    chmod 0755 "$tmp/stub/pgrep"
+    note_file "$tmp/stub/pgrep"
+    chmod 0755 "$tmp/stub/pgrep" || bad=1
     oldpath="$PATH"; PATH="$tmp/stub:/usr/bin:/bin"
     export FAKE_PGREP_MODE=none
     rc=0; active_run_check "$tmp/absent" || rc=$?; [ "$rc" -eq 0 ] || bad=1
-    mkdir -p "$tmp/empty"
+    mkdir -p "$tmp/empty" || bad=1; note_dir "$tmp/empty"
     rc=0; active_run_check "$tmp/empty" || rc=$?; [ "$rc" -eq 0 ] || bad=1
-    mkdir -p "$tmp/busy/task1"; : > "$tmp/busy/task1/marker"
+    mkdir -p "$tmp/busy/task1" || bad=1
+    note_dir "$tmp/busy"; note_dir "$tmp/busy/task1"
+    : > "$tmp/busy/task1/marker" || bad=1; note_file "$tmp/busy/task1/marker"
     rc=0; active_run_check "$tmp/busy" || rc=$?; [ "$rc" -eq 1 ] || bad=1
-    ln -s "$tmp/empty" "$tmp/link"
+    ln -s "$tmp/empty" "$tmp/link" || bad=1; note_file "$tmp/link"
     rc=0; active_run_check "$tmp/link" || rc=$?; [ "$rc" -eq 2 ] || bad=1
-    : > "$tmp/notdir"
+    : > "$tmp/notdir" || bad=1; note_file "$tmp/notdir"
     rc=0; active_run_check "$tmp/notdir" || rc=$?; [ "$rc" -eq 2 ] || bad=1
-    mkdir -p "$tmp/emptyrun"
+    mkdir -p "$tmp/emptyrun" || bad=1; note_dir "$tmp/emptyrun"
     export FAKE_PGREP_MODE=hit
     rc=0; active_run_check "$tmp/emptyrun" || rc=$?; [ "$rc" -eq 1 ] || bad=1
     export FAKE_PGREP_MODE=error
@@ -370,20 +399,45 @@ SH
     export FAKE_PGREP_MODE=none
     rc=0; active_run_check "$tmp/emptyrun" || rc=$?; [ "$rc" -eq 0 ] || bad=1
     PATH="$oldpath"
-    exit "$bad"
-  ); then flag=1; fi
-  [ "$flag" -eq 1 ] && ok deploy_active_run || no deploy_active_run
-  rm -rf -- "$tmp"
+    [ "$bad" -eq 0 ] || exit 1
+    clean_all || exit 2
+    exit 0
+  ) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok deploy_active_run
+    return 0
+  fi
+  no "deploy_active_run scene=$tmp rc=$rc"
+  return 1
 }
 
 st_install_logic() {
   local tmp; tmp="$(mktemp -d /var/tmp/aegl-deploy-sim.XXXXXX)" \
     || { no deploy_install_logic; return; }
-  local flag=0
-  if (
+  local rc=0
+  (
     . "$PINS"
-    bad=0 rc=0 t="" name="" oldpath=""
+    CLEAN_FILES=(); CLEAN_DIRS=()
+    note_dir "$tmp"
+    bad=0 rc=0 t="" name="" p="" q="" oldpath="" ct="" leftover="" before=""
     export PATH="/usr/bin:/bin:$PATH"
+
+    # existing fixture target refused, content unchanged
+    t="$tmp/existing"
+    install -d "$t" || bad=1; note_dir "$t"
+    printf 'keep\n' > "$t/keep" || bad=1; note_file "$t/keep"
+    before="$(sha "$t/keep")"
+    rc=0; sim_prepare "$t" || rc=$?
+    [ "$rc" -ne 0 ] || bad=1
+    [ "$(sha "$t/keep")" = "$before" ] || bad=1
+    { [ ! -e "$t/guard" ] && [ ! -L "$t/guard" ]; } || bad=1
+
+    # existing fixture target that is a symlink is refused
+    t="$tmp/existinglink"
+    install -d "$t" || bad=1; note_dir "$t"
+    ln -s "$t" "$tmp/existinglink.lnk" || bad=1; note_file "$tmp/existinglink.lnk"
+    rc=0; sim_prepare "$tmp/existinglink.lnk" || rc=$?
+    [ "$rc" -ne 0 ] || bad=1
 
     # success: preflight, register, install order, verify, cleanup
     t="$tmp/ok"; sim_prepare "$t" || exit 1
@@ -391,10 +445,13 @@ st_install_logic() {
     register_temps "$t" || bad=1
     [ "${#TEMP_PATHS[@]}" -eq 4 ] || bad=1
     for p in "${TEMP_PATHS[@]}"; do is_absent "$p" || bad=1; done
-    install_all "$t" || bad=1
+    rc=0; install_all "$t" || rc=$?
+    [ "$rc" -eq 0 ] || bad=1
+    note_file "$t/tool_event_client.py"; note_file "$t/tool_observer_config.py"
     [ "${INSTALLED_ORDER[*]}" = "tool_event_client.py tool_observer_config.py model_broker.py aegl-hermes-sandbox" ] || bad=1
     post_verify "$t" || bad=1
-    cleanup_temps || bad=1
+    rc=0; cleanup_temps || rc=$?
+    [ "$rc" -eq 0 ] || bad=1
     if find "$t" -maxdepth 1 -name '.aegl-deploy.*' -print -quit | grep -q .; then bad=1; fi
     for name in "${PAYLOAD_ORDER[@]}"; do
       [ "$(sha "$t/$name")" = "${PAYLOAD_SHA[$name]}" ] || bad=1
@@ -404,68 +461,101 @@ st_install_logic() {
 
     # new target already present
     t="$tmp/new-exists"; sim_prepare "$t" || exit 1
-    printf 'x\n' > "$t/tool_observer_config.py"
+    printf 'x\n' > "$t/tool_observer_config.py" || bad=1
+    note_file "$t/tool_observer_config.py"
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = new_target_exists ] || bad=1
 
     # predecessor hash
     t="$tmp/pred"; sim_prepare "$t" || exit 1
-    printf 'changed\n' > "$t/aegl-hermes-sandbox"
+    printf 'changed\n' > "$t/aegl-hermes-sandbox" || bad=1
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = predecessor_hash ] || bad=1
 
     # dependency hash (guard specifically)
     t="$tmp/dep"; sim_prepare "$t" || exit 1
-    rm -f -- "$t/guard/contract_guard.py"
-    printf 'changed\n' > "$t/guard/contract_guard.py"
-    chmod 0444 "$t/guard/contract_guard.py"
+    rm -f -- "$t/guard/contract_guard.py" || bad=1
+    printf 'changed\n' > "$t/guard/contract_guard.py" || bad=1
+    chmod 0444 "$t/guard/contract_guard.py" || bad=1
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = dependency_hash ] || bad=1
 
     # dependency mode
     t="$tmp/depmode"; sim_prepare "$t" || exit 1
-    chmod 0644 "$t/guard/contract_guard.py"
+    chmod 0644 "$t/guard/contract_guard.py" || bad=1
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = dependency_mode ] || bad=1
 
     # missing dependency
     t="$tmp/depmissing"; sim_prepare "$t" || exit 1
-    rm -f -- "$t/diag_events.py"
+    rm -f -- "$t/diag_events.py" || bad=1
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = dependency_state ] || bad=1
 
     # predecessor symlink
     t="$tmp/predlink"; sim_prepare "$t" || exit 1
-    rm -f -- "$t/model_broker.py"
-    ln -s "$t/aegl-hermes-sandbox" "$t/model_broker.py"
+    rm -f -- "$t/model_broker.py" || bad=1
+    ln -s "$t/aegl-hermes-sandbox" "$t/model_broker.py" || bad=1
     rc=0; preflight "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = predecessor_state ] || bad=1
 
     # target directory is a symlink
     t="$tmp/targetlink"; sim_prepare "$t" || exit 1
-    ln -s "$t" "$tmp/targetlink.link"
+    ln -s "$t" "$tmp/targetlink.link" || bad=1; note_file "$tmp/targetlink.link"
     rc=0; preflight "$tmp/targetlink.link" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = target_state ] || bad=1
 
     # stale temp conflict
     t="$tmp/tempconflict"; sim_prepare "$t" || exit 1
-    : > "$t/.aegl-deploy.stale"
+    : > "$t/.aegl-deploy.stale" || bad=1; note_file "$t/.aegl-deploy.stale"
     rc=0; register_temps "$t" || rc=$?
     [ "$rc" -ne 0 ] && [ "$FAIL_STAGE" = temp_conflict ] || bad=1
+
+    # cleanup_temps refuses an unexpected regular temp and a dangling link
+    t="$tmp/cleanup-refuse"; sim_prepare "$t" || exit 1
+    preflight "$t" || exit 1
+    register_temps "$t" || exit 1
+    p="${TEMP_PATHS[0]}"
+    printf 'unexpected\n' > "$p" || bad=1; note_file "$p"
+    rc=0; cleanup_temps || rc=$?
+    [ "$rc" -ne 0 ] || bad=1
+    [ -e "$p" ] || bad=1
+    rm -- "$p" || bad=1
+    q="${TEMP_PATHS[1]}"
+    ln -s "$tmp/does-not-exist" "$q" || bad=1; note_file "$q"
+    rc=0; cleanup_temps || rc=$?
+    [ "$rc" -ne 0 ] || bad=1
+    [ -L "$q" ] || bad=1
+    rm -- "$q" || bad=1
+
+    # clean_all must fail (and keep the scene) on an unrecorded leftover
+    ct="$tmp/cleanup-scene"
+    (
+      CLEAN_FILES=(); CLEAN_DIRS=()
+      install -d "$ct" || exit 1
+      CLEAN_DIRS+=("$ct")
+      : > "$ct/unrecorded" || exit 1
+      crc=0; clean_all 2>/dev/null || crc=$?
+      [ "$crc" -ne 0 ] || exit 1
+      [ -d "$ct" ] && [ -e "$ct/unrecorded" ] || exit 1
+      rm -- "$ct/unrecorded" && rmdir -- "$ct" || exit 1
+      exit 0
+    ) || bad=1
 
     # mid-install failure: second rename fails; later files are not installed
     t="$tmp/mid"; sim_prepare "$t" || exit 1
     preflight "$t" || exit 1
     register_temps "$t" || exit 1
-    mkdir -p "$tmp/stub"
-    cat > "$tmp/stub/mv" <<'SH'
+    mkdir -p "$tmp/stub" || bad=1; note_dir "$tmp/stub"
+    cat > "$tmp/stub/mv" <<'SH' || bad=1
 #!/bin/sh
 case "$*" in
   *"/tool_observer_config.py") exit 9 ;;
 esac
 exec /bin/mv "$@"
 SH
-    chmod 0755 "$tmp/stub/mv"
+    note_file "$tmp/stub/mv"
+    chmod 0755 "$tmp/stub/mv" || bad=1
     oldpath="$PATH"; PATH="$tmp/stub:/usr/bin:/bin"
     rc=0; install_all "$t" || rc=$?
     PATH="$oldpath"
@@ -473,15 +563,24 @@ SH
     [ "$FAIL_STAGE" = "rename_tool_observer_config.py" ] || bad=1
     [ "${INSTALLED_ORDER[*]}" = "tool_event_client.py" ] || bad=1
     [ "$(sha "$t/tool_event_client.py")" = "${PAYLOAD_SHA[tool_event_client.py]}" ] || bad=1
+    note_file "$t/tool_event_client.py"
     is_absent "$t/tool_observer_config.py" || bad=1
-    if ! find "$t" -maxdepth 1 -name '*.tool_observer_config.py' -print -quit | grep -q .; then bad=1; fi
+    leftover="$t/.aegl-deploy.$$.tool_observer_config.py"
+    { [ -e "$leftover" ] || [ -L "$leftover" ]; } || bad=1
+    note_file "$leftover"
     [ "$(sha "$t/model_broker.py")" = "${PAYLOAD_PREDECESSOR[model_broker.py]}" ] || bad=1
     [ "$(sha "$t/aegl-hermes-sandbox")" = "${PAYLOAD_PREDECESSOR[aegl-hermes-sandbox]}" ] || bad=1
 
-    exit "$bad"
-  ); then flag=1; fi
-  [ "$flag" -eq 1 ] && ok deploy_install_logic || no deploy_install_logic
-  rm -rf -- "$tmp"
+    [ "$bad" -eq 0 ] || exit 1
+    clean_all || exit 2
+    exit 0
+  ) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    ok deploy_install_logic
+    return 0
+  fi
+  no "deploy_install_logic scene=$tmp rc=$rc"
+  return 1
 }
 
 self_test() {
