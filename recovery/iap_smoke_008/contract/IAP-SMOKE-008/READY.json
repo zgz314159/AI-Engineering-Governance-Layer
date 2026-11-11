@@ -1,0 +1,14 @@
+{
+  "contract_id": "IAP-SMOKE-008",
+  "contract_version": "0.1.0",
+  "experiment_id": "IAP-SMOKE",
+  "status": "READY",
+  "unresolved_questions": [],
+  "validation": {
+    "acceptance": "PASS",
+    "boundaries": "PASS",
+    "hashes": "PASS",
+    "schema": "PASS",
+    "traceability": "PASS"
+  }
+}

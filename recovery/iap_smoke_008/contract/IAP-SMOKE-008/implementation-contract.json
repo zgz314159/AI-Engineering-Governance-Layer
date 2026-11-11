@@ -1,0 +1,231 @@
+{
+  "acceptance_ids": [
+    "AC-IAP-001"
+  ],
+  "allowed_paths": [
+    "project"
+  ],
+  "artifact_hashes": {
+    "DESIGN.md": "45d26787bc630acb1278ac2673600cb9af7e3d6136b90227251e853b5854c848",
+    "PRODUCT.md": "e6e89cc7bdd0b864e768fdeb09ce6eaf5ac99908c40a04e2d2655e3aec7e4787",
+    "acceptance.md": "36f80892d9a6b6a12c149bb558bbe5e0302637ac549cd3ea02cec42f08658348",
+    "design.md": "3cd5fe35783732c5ef3c9e751a49bf649d367a603767ebca9f692bded79b9785",
+    "project-context.json": "2c2205b48efff46f25fc8723891879635a203e92c984c4ed25a72033808a2ec5",
+    "requirements.md": "1d2c76bea113cdd96bef92faaf43d0f30e94055735302007229498d8f64dd6f0",
+    "tasks.md": "8d2f790557d8e263385cdf263cdaae24b9c27a875bb0cdb9e590f6efbb7e63c1",
+    "verification-intent.json": "3d2e62310d075589d9455bb3592df3fafae7df4d89fe15a68db16b3861549c4a"
+  },
+  "artifact_refs": [
+    {
+      "path": "PRODUCT.md",
+      "required": true,
+      "role": "product",
+      "source": "authored"
+    },
+    {
+      "path": "requirements.md",
+      "required": true,
+      "role": "requirements",
+      "source": "authored"
+    },
+    {
+      "path": "design.md",
+      "required": true,
+      "role": "design",
+      "source": "authored"
+    },
+    {
+      "path": "tasks.md",
+      "required": true,
+      "role": "tasks",
+      "source": "authored"
+    },
+    {
+      "path": "DESIGN.md",
+      "required": true,
+      "role": "ui_design",
+      "source": "authored"
+    },
+    {
+      "path": "acceptance.md",
+      "required": true,
+      "role": "acceptance",
+      "source": "authored"
+    },
+    {
+      "path": "project-context.json",
+      "required": true,
+      "role": "project_context",
+      "source": "authored"
+    },
+    {
+      "path": "verification-intent.json",
+      "required": true,
+      "role": "verification_intent",
+      "source": "authored"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "ASM-001",
+      "statement": "The formal ImageAnalysisFactory tree is a git repository with a baseline commit before onboarding."
+    }
+  ],
+  "contract_id": "IAP-SMOKE-008",
+  "contract_version": "0.1.0",
+  "data_change": {
+    "migration_required": false,
+    "notes": "No persisted schema.",
+    "schema_version_current": 0,
+    "schema_version_target": 0
+  },
+  "decisions": [
+    {
+      "id": "DEC-001",
+      "rationale": "Keeps the worktree, registration, Guard and validator aligned on one source_root-relative path.",
+      "statement": "The disposable task root is the contract source_root; allowed_paths is exactly 'project'."
+    },
+    {
+      "id": "DEC-002",
+      "rationale": "Avoids a self-referential commit hash while keeping the acceptance expected value trusted, and keeps the binding out of the read-only contract package.",
+      "statement": "The expected task commit is bound after the commit by a root-owned PREP-BINDING.json at the task root, outside the read-only contract package; the contract does not embed its own commit SHA."
+    },
+    {
+      "id": "DEC-003",
+      "rationale": "Keeps the evidence file a deterministic four-line artifact while preserving full failure reporting for the operator.",
+      "statement": "EVIDENCE.txt contains exactly the four labeled real command-output lines and nothing else; expected values, failure notes and any other reporting go only in the final assistant response."
+    }
+  ],
+  "experiment_id": "IAP-SMOKE",
+  "experiment_type": "SPEC_FIRST_GREENFIELD",
+  "feature": {
+    "feature_id": "IAP-BRIDGE-ONBOARD",
+    "summary": "Authorize one disposable worktree and EVIDENCE.txt for a deterministic, read-only proof that an ImageAnalysisFactory task traverses the trusted ChatGPT->Supervisor->Bridge->Hermes chain.",
+    "title": "ImageAnalysisFactory chain onboarding (read-only acceptance)"
+  },
+  "forbidden_paths": [],
+  "matched_control_available": false,
+  "mode": "greenfield",
+  "non_goals": [
+    "Image analysis or any model call",
+    "Formal source or host change",
+    "Promotion or push",
+    "Business write"
+  ],
+  "project": "ImageAnalysisFactory",
+  "read_first": [
+    {
+      "path": "project/Command_Code_DeepSeek_大规模图片智能分析工厂_建设方案_v1.0.md",
+      "why": "the frozen product plan this business project implements, without a broad repo scan"
+    }
+  ],
+  "readiness": {
+    "gates": {
+      "acceptance": "PASS",
+      "boundaries": "PASS",
+      "hashes": "PASS",
+      "schema": "PASS",
+      "traceability": "PASS"
+    },
+    "status": "READY"
+  },
+  "requirements": [
+    {
+      "acceptance_ids": [
+        "AC-IAP-001"
+      ],
+      "id": "REQ-IAP-001",
+      "statement": "The task must run only read-only identity, path, revision and runtime commands in the disposable ImageAnalysisFactory worktree and write their raw output to `EVIDENCE.txt`.",
+      "task_ids": [
+        "TASK-01"
+      ]
+    }
+  ],
+  "scope": [
+    "Read-only commands inside the disposable task worktree",
+    "Write exactly EVIDENCE.txt inside that worktree, four labeled lines and nothing else",
+    "Return the real sandbox execution outcome"
+  ],
+  "selector_contract": [],
+  "stop_conditions": [
+    "A required file is missing.",
+    "A frozen decision is contradicted.",
+    "The worktree is not a git worktree of the declared formal source root."
+  ],
+  "tasks": [
+    {
+      "acceptance_ids": [
+        "AC-IAP-001"
+      ],
+      "allowed_paths": [
+        "project"
+      ],
+      "boundary": "Read-only inspection and one evidence file only. No formal source or host change.",
+      "depends": [],
+      "done_when": "EVIDENCE.txt is present in the worktree with exactly the four labeled actual values and no other line, and the bridge reports its real process outcome; process exit does not by itself prove task acceptance.",
+      "goal": "Execution order: first complete the existing required reads, manifest verification and PREP-BINDING read as one ordered information-gathering pass (do not request one file at a time; do not skip any existing integrity or safety gate). Only when that material is complete, run the four real commands once and write the four labeled lines to `EVIDENCE.txt`; do not explore further, re-read gathered material or re-plan. After the existing evidence check, stop immediately. If any required step exits non-zero, stop and report it; do not enter an autonomous repair loop. Run `id -un`, `pwd`, `git rev-parse HEAD` and `python3 --version` in `/var/tmp/IAP-SMOKE-008/project`; write exactly four labeled lines to `EVIDENCE.txt` in this order: `id -un: <actual>`, `pwd: <actual>`, `git rev-parse HEAD: <actual>`, `python3 --version: <actual>`; no other lines or files. The file contains nothing else: expected values, failure notes and any other reporting belong in the final assistant response, never in `EVIDENCE.txt`.",
+      "id": "TASK-01",
+      "verification": [
+        "EVIDENCE.txt` in the worktree contains exactly four labeled lines whose values are `aegl-ai",
+        "/var/tmp/IAP-SMOKE-008/project",
+        "the commit in the root-owned trusted `PREP-BINDING.json` at the task root",
+        "and the actual `python3 --version` string; compare with the actual command results; no other line in the file and no other file changed."
+      ]
+    }
+  ],
+  "ui_change": {
+    "selectors_added": [],
+    "surfaces": []
+  },
+  "unresolved_questions": [],
+  "verification_intent": {
+    "acceptance_ids": [
+      "AC-IAP-001"
+    ],
+    "cli_checks": [
+      {
+        "command": "id -un",
+        "expected": "aegl-ai",
+        "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt",
+        "step": "identity"
+      },
+      {
+        "command": "pwd",
+        "expected": "/var/tmp/IAP-SMOKE-008/project",
+        "on_failure": "stop; report the actual value in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt",
+        "step": "worktree"
+      },
+      {
+        "command": "git rev-parse HEAD",
+        "expected": "the frozen task commit recorded in the root-owned trusted PREP-BINDING.json at the task root (outside the read-only contract package); the contract must not embed its own commit SHA",
+        "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt",
+        "step": "revision"
+      },
+      {
+        "command": "python3 --version",
+        "expected": "the actual Python runtime string (e.g. Python 3.11.x)",
+        "on_failure": "stop; report the actual value in the FINAL ASSISTANT RESPONSE; do not add lines to EVIDENCE.txt",
+        "step": "runtime"
+      },
+      {
+        "command": "test -s EVIDENCE.txt && cat EVIDENCE.txt",
+        "expected": "exactly four labeled lines in this order, with no extra lines: `id -un: aegl-ai`, `pwd: /var/tmp/IAP-SMOKE-008/project`, `git rev-parse HEAD: <PREP-BINDING.json commit>`, `python3 --version: <actual>`; nothing else is written to the file",
+        "on_failure": "stop; report the failure in the FINAL ASSISTANT RESPONSE; do not add lines to, synthesize or repair EVIDENCE.txt",
+        "step": "evidence"
+      }
+    ],
+    "engine": "cli",
+    "feature_id": "IAP-BRIDGE-ONBOARD",
+    "fixture_intent": "The disposable task root /var/tmp/IAP-SMOKE-008 with worktree project/; the root-owned trusted PREP-BINDING.json at the task root binds the expected task commit after the commit exists.",
+    "journey_id": "IAP-M1-RUN",
+    "oracle_intent": "Deterministic CLI evidence: actual command outputs in exactly four labeled EVIDENCE.txt lines and nothing else, checked against the trusted PREP-BINDING.json at the task root; expected values and failure notes are reported only in the final assistant response; no synthesized value, no formal write, no promotion.",
+    "persistence_checks": [
+      "EVIDENCE.txt persists in the task worktree (contract path project/EVIDENCE.txt) with exactly four labeled lines and no other line"
+    ],
+    "required_selectors": [],
+    "rotation_checks": [],
+    "search_checks": [
+      "EVIDENCE.txt contains the exact values aegl-ai, /var/tmp/IAP-SMOKE-008/project, the PREP-BINDING.json commit and the actual python3 --version string, and nothing else; expected values and failure notes are not written to the file"
+    ]
+  }
+}

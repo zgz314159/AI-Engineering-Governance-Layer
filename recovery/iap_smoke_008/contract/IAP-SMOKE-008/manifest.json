@@ -1,0 +1,71 @@
+{
+  "algorithm": "sha256",
+  "entries": [
+    {
+      "path": "PRODUCT.md",
+      "required": true,
+      "role": "product",
+      "sha256": "e6e89cc7bdd0b864e768fdeb09ce6eaf5ac99908c40a04e2d2655e3aec7e4787",
+      "size": 2366,
+      "source": "authored"
+    },
+    {
+      "path": "requirements.md",
+      "required": true,
+      "role": "requirements",
+      "sha256": "1d2c76bea113cdd96bef92faaf43d0f30e94055735302007229498d8f64dd6f0",
+      "size": 902,
+      "source": "authored"
+    },
+    {
+      "path": "design.md",
+      "required": true,
+      "role": "design",
+      "sha256": "3cd5fe35783732c5ef3c9e751a49bf649d367a603767ebca9f692bded79b9785",
+      "size": 4080,
+      "source": "authored"
+    },
+    {
+      "path": "tasks.md",
+      "required": true,
+      "role": "tasks",
+      "sha256": "8d2f790557d8e263385cdf263cdaae24b9c27a875bb0cdb9e590f6efbb7e63c1",
+      "size": 1901,
+      "source": "authored"
+    },
+    {
+      "path": "DESIGN.md",
+      "required": true,
+      "role": "ui_design",
+      "sha256": "45d26787bc630acb1278ac2673600cb9af7e3d6136b90227251e853b5854c848",
+      "size": 813,
+      "source": "authored"
+    },
+    {
+      "path": "acceptance.md",
+      "required": true,
+      "role": "acceptance",
+      "sha256": "36f80892d9a6b6a12c149bb558bbe5e0302637ac549cd3ea02cec42f08658348",
+      "size": 970,
+      "source": "authored"
+    },
+    {
+      "path": "project-context.json",
+      "required": true,
+      "role": "project_context",
+      "sha256": "2c2205b48efff46f25fc8723891879635a203e92c984c4ed25a72033808a2ec5",
+      "size": 1187,
+      "source": "authored"
+    },
+    {
+      "path": "verification-intent.json",
+      "required": true,
+      "role": "verification_intent",
+      "sha256": "3d2e62310d075589d9455bb3592df3fafae7df4d89fe15a68db16b3861549c4a",
+      "size": 2839,
+      "source": "authored"
+    }
+  ],
+  "generated_by": "specification/compiler/hash_manifest.py",
+  "package": "IAP-SMOKE-008"
+}

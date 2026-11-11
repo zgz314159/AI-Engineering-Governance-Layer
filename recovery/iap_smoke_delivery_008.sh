@@ -1,0 +1,1230 @@
+#!/usr/bin/env bash
+# iap_smoke_delivery_008.sh — staged package for the IAP S0 re-verification (IAP-SMOKE-008).
+#
+# S0 is NOT the business milestone: the business M1 is 建设方案 §8 P0 (real vision
+# smoke), which stays a separate, unexecuted item. S0 only proves the trusted chain
+# carries an ImageAnalysisFactory task and yields verifiable read-only evidence.
+#
+# Identity split:
+#   * root  — baseline control, worktree creation, permissions, contract install, registration.
+#   * zhong — campaign, browser adapter and session I/O (the operator's own environment).
+# The bridge state path is FIXED; a root-HOME resolution is a hard stop.
+#
+#   run_smoke.sh                  # prep stages, stop at PREP_COMPLETE (no model, no send)
+#   run_smoke.sh --stage <s>      # one stage
+#   run_smoke.sh --execute        # prep + send + wait + round + accept
+#   run_smoke.sh --status
+set -uo pipefail
+
+PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTRACT_SRC="$PKG/contract/IAP-SMOKE-008"
+IAP="${IAP:-/home/zhong/AndroidStudioProjects/ImageAnalysisFactory}"
+STACK="${STACK:-/home/zhong/Projects/Google-Android-Agent-Development-Stack}"
+TASK_ID="IAP-SMOKE-008"
+TASK_ROOT="${TASK_ROOT:-/var/tmp/IAP-SMOKE-008}"
+WORKTREE="${WORKTREE:-$TASK_ROOT/project}"
+SCRATCH="${SCRATCH:-$TASK_ROOT/scratch}"
+PKG_DEST="/var/lib/aegl-model/trusted/ImageAnalysisFactory/reports/contracts/IAP-SMOKE-008"
+BRIDGE_DIR="/home/zhong/.local/state/google-android-agent-stack/bridge"
+STACK_BRIDGE="$STACK/orchestration/hermes/bridge"
+PLAN_FILE="Command_Code_DeepSeek_大规模图片智能分析工厂_建设方案_v1.0.md"
+EXPECT_MANIFEST_SHA="12931e961343ed2f9b8975ceb703f169427f61bbdc8c13bb9d804d94216527f1"
+EXPECT_BASE="${EXPECT_BASE:-177680708739a72a0d70bc6a9664245b00a2ef08}"
+OPERATOR="zhong"; OPERATOR_HOME="/home/zhong"; OP_PATH="/usr/local/bin:/usr/bin:/bin:/home/zhong/.local/bin"
+CDP_URL="http://127.0.0.1:9333"
+LEDGER="${LEDGER:-/var/lib/aegl-smoke/$TASK_ID}"
+CAMPAIGN_ID="IAP-SMOKE-008"
+SUPERVISOR_ROOT="/home/zhong/.local/state/google-android-agent-stack/supervisor"
+HELPER="$PKG/bin/iap_round_verdict.py"
+SANDBOX_DIR="/usr/local/lib/aegl-model"
+SANDBOX_BIN="$SANDBOX_DIR/aegl-hermes-sandbox"
+SANDBOX_PAYLOAD="$PKG/payload/aegl-hermes-sandbox"
+SANDBOX_BEFORE_SHA="dc954c59ed4cadf6c7567679045c1d35cd529f3b19237228b1bb08dc6048d4f5"
+SANDBOX_AFTER_SHA="0bcb76d1bc4366691d9eb8cd38333bdb4a9d963c28213de21d63accf4d8c733a"
+SANDBOX_ALLOWLIST='DIAG_ENABLED_TASKS=" BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 IAP-SMOKE-005 IAP-SMOKE-006 IAP-SMOKE-007 IAP-SMOKE-008 "'
+# The broker is NOT touched by this package: it must already be the reviewed candidate.
+BROKER_BIN="$SANDBOX_DIR/model_broker.py"
+BROKER_SHA="7aa88b1831ca18fdbe9b14273321a90b352bb6026299b9bb9c26d4ca9b8ee59a"
+TOOL_EVENT_SHA="f70630cacfdcb1afd5eff08ad20ada9737c91b097a42741a122a0fa651df83bf"
+TOOL_OBSERVER_SHA="424369561202ca48f122b8116fc6b2ebca8cbb1d108dbeb04674608b807591c3"
+GUARD_SHA="19f6be638c37b28d401820b7a4562f852a459188cbfa793f757668fe9b330455"
+EXPECT_COMMON="/home/zhong/AndroidStudioProjects/ImageAnalysisFactory/.git"
+EXPECT_HELPER_SHA="f93bbfdd286e6a554c10edcdda6dd40a20d32d1ffbcb17dc56091bbeac8ac50a"
+EXPECT_BRIDGE_SEQ="12"
+REGISTRY="${REGISTRY:-/var/lib/aegl-model/registry.json}"
+# whitelisted diagnostic summary (metadata only; the raw arg is never printed)
+DIAG_SINK_DIR="/var/tmp/aegl-diag/$TASK_ID"
+DIAG_HELPER="$PKG/bin/iap_diag_summary.py"
+CURRENT_STAGE=""; FAIL_REPORTED=0
+
+say() { printf '%s\n' "$*"; }
+# Emit ONLY the structured CAMPAIGN_ROUND_DIAG lines already captured (never the raw
+# stdout/stderr of the campaign).
+emit_round_diag() { # <round.out>
+  local f="${1:-}"
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  grep -E '^CAMPAIGN_ROUND_DIAG ' -- "$f" || :
+}
+die() { FAIL_REPORTED=1; if [ -n "${FAIL_MARK:-}" ] && [ ! -e "$FAIL_MARK" ]; then : > "$FAIL_MARK" 2>/dev/null; fi; printf 'SMOKE_FAILED stage=%s reason=%s: %s\n' "${CURRENT_STAGE:-none}" "$1" "${2:-}" >&2; exit 1; }
+require_root() { if [ "${SMOKE_ALLOW_NONROOT:-0}" != 1 ] && [ "$(id -u)" -ne 0 ]; then die not_root "${CURRENT_STAGE}"; fi; }
+
+ANCHOR="$(sha256sum "$PKG/MANIFEST.sha256" 2>/dev/null | awk '{print $1}')"; ANCHOR="${ANCHOR:-NOMANIFEST}"
+mark() { mkdir -p "$LEDGER" || die ledger_dir "$LEDGER"; printf 'anchor=%s stage=%s\n' "$ANCHOR" "$1" > "$LEDGER/$1.done" || die ledger_write "$1"; }
+done_marker() { local stage="$1" f="$LEDGER/$1.done"; [ -f "$f" ] || return 1; [ "$(cat "$f")" = "anchor=$ANCHOR stage=$stage" ] && return 0; say "MARKER_STALE $stage"; return 1; }
+
+# --- operator-side execution (never root's HOME, never sudo -E) ------------------- #
+_op_env() { if [ "$(id -u)" -eq 0 ]; then printf 'runuser'; else printf 'direct'; fi; }
+as_op() { if [ "$(id -u)" -eq 0 ]; then runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" BU_CDP_URL="$CDP_URL" LANG=C.UTF-8 "$@"; else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 "$@"; fi; }
+op_py() { local snippet="$1"; shift; as_op /usr/bin/python3 -c "$snippet" "$@"; }
+# op_py_env <snippet> [VAR=VAL...] -- [args...]
+op_py_env() {
+  local snippet="$1"; shift
+  local -a envs=()
+  while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+  if [ "${1:-}" = "--" ]; then shift; fi
+  as_op env "${envs[@]}" /usr/bin/python3 -c "$snippet" "$@"
+}
+
+# --- sandbox-identity access probes (PAM-free drop + ACL-aware access(2)) ---------- #
+# The probe must answer the SAME question the kernel answers for the aegl-ai sandbox
+# identity. Two host hazards are removed:
+#   * runuser/PAM is not used to drop: a service account with a nologin shell and no
+#     home is fine because setpriv execs the command directly (never a login shell);
+#   * the host `test` binary is not trusted: some hosts ship a Rust/uutils coreutils
+#     `test` that reads mode bits only and IGNORES POSIX ACLs, which false-negatively
+#     rejects the aegl-ai traversal ACL on the task root. access(2) honors ACLs, so we
+#     evaluate with os.access as the dropped identity instead.
+AI_USER="aegl-ai"
+AI_HOME="/home/aegl-ai"
+AI_GROUP="$(id -gn "$AI_USER" 2>/dev/null)" || die ai_group "cannot resolve group of $AI_USER"
+[ -n "$AI_GROUP" ] || die ai_group "empty group for $AI_USER"
+AI_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ai_uid() { id -u "$AI_USER"; }
+ai_gid() { id -g "$AI_USER"; }
+# Drop to the sandbox identity with a CONTROLLED environment: never the caller's HOME
+# (root's), never any inherited Git plumbing/env, never global/system Git config. This
+# keeps the probe from reading /root/.gitconfig or ~/.config/git and from being steered
+# by GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_* leaking in from the parent shell.
+as_ai() {
+  setpriv --reuid="$(ai_uid)" --regid="$(ai_gid)" --clear-groups --no-new-privs -- \
+    env -i PATH="$AI_PATH" LANG=C.UTF-8 HOME="$AI_HOME" \
+        XDG_CONFIG_HOME="$AI_HOME/.config" XDG_CACHE_HOME="$AI_HOME/.cache" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        "$@"
+}
+AI_ACCESS_ERR=""
+_ACCESS_PY='import os,sys
+sys.exit(0 if os.access(sys.argv[2], {"r":os.R_OK,"w":os.W_OK,"x":os.X_OK}[sys.argv[1]]) else 1)'
+ai_access() { # <r|w|x> <path> -> rc 0 when $AI_USER may access <path> (parent traversal included)
+  local mode="$1" path="$2" out
+  out="$(as_ai /usr/bin/python3 -I -c "$_ACCESS_PY" "$mode" "$path" 2>&1)" || { AI_ACCESS_ERR="$out"; return 1; }
+  return 0
+}
+# The gate operator also evaluates the worktree with real git (the Bridge contract check
+# runs as the campaign/operator identity), so it too needs traverse on the task root.
+# Same ACL-aware access(2) as $AI_USER — never the ACL-blind host `test` — via the
+# operator's own environment (as_op, the operator's HOME, not root's).
+op_access() { # <r|w|x> <path> -> rc 0 when $OPERATOR may access <path>
+  local mode="$1" path="$2"
+  as_op /usr/bin/python3 -I -c "$_ACCESS_PY" "$mode" "$path" >/dev/null 2>&1
+}
+
+# Read-only: first ancestor directory (root downward) the sandbox identity cannot
+# traverse, or nothing when the whole chain is walkable.
+chain_blocker() { # <path> -> prints the first blocking dir, or nothing
+  local target="$1" p cur part; local -a parts=()
+  p="$(realpath -e "$target" 2>/dev/null)" || { printf '%s' "$target"; return; }
+  IFS=/ read -r -a parts <<< "${p#/}"
+  cur=""
+  for part in "${parts[@]}"; do
+    [ -n "$part" ] || continue
+    cur="$cur/$part"
+    ai_access x "$cur" || { printf '%s' "$cur"; return; }
+  done
+}
+
+# every other entry. Refuses on any surprise (missing/odd mask, conflicting entry,
+# non-directory or symlink) instead of expanding access, and proves afterwards that the
+# ONLY difference is the added aegl-ai x entry.
+# Read-only walk of a required target's full ancestor chain. The ONLY directory that may
+
+operator_state_path() {
+  op_py 'import sys;sys.path.insert(0,sys.argv[1]);import bridge_state;print(bridge_state.state_dir())' "$STACK_BRIDGE"
+}
+assert_operator_state_path() {
+  local got; got="$(operator_state_path 2>&1)" || die operator_state_failed "$got"
+  [ "$got" = "$BRIDGE_DIR" ] || die operator_state_path "$got != $BRIDGE_DIR (root HOME must not be used)"
+  [ -f "$BRIDGE_DIR/state.json" ] || die bridge_missing "$BRIDGE_DIR/state.json"
+  [ ! -e "$BRIDGE_DIR/pending_result.json" ] || die bridge_pending "pending_result.json present"
+  return 0
+}
+
+chain_now() {
+  op_py 'import json,sys;d=json.load(open(sys.argv[1]));print("seq=%s nonce=%s in_reply_to=%s"%(d["expected_sequence"],d["expected_nonce"],d["expected_in_reply_to"]))' "$BRIDGE_DIR/state.json"
+}
+
+stack_hashes_ok() {
+  # Runtime file pins generated from the promoted Stack commit
+  # (f32d18a4f1479854d3c28bcf21b1e31391041243); campaign_supervisor.py is included
+  # because this run actually invokes it. The check is strict — never relaxed.
+  local f i=1 got want
+  for f in orchestration/hermes/bridge/projects.py orchestration/hermes/bridge/protocol.py \
+           orchestration/hermes/bridge/contract_executor.py orchestration/hermes/bridge/bridge_cli.py \
+           orchestration/hermes/supervisor/campaign_supervisor.py; do
+    case "$i" in 1) want=b09dd5e1a435d83383fbcc30ca440e96192e87f7a074b3972a4cc269c188b080 ;;
+              2) want=d2e5c8d87ed42f37507266b308f92674182d1770af07aa50edcecbac59076f99 ;;
+              3) want=ee68e51db72f068ee5a52328dd01ac1844082b1ee26cd2eb5516f6163af6c0a7 ;;
+              4) want=16ab151de72bb99f9c7e5eaea51bedd2d456e35d0560c0a8f3fd7d70c518c3aa ;;
+              5) want=d4f736cd70624621027070bf386c88821b79cef051c3a06b65921f4d916901c2 ;; esac
+    got="$(sha256sum "$STACK/$f" 2>/dev/null | awk '{print $1}')"
+    [ "$got" = "$want" ] || die stack_hash "$f=${got:-unreadable}"
+    i=$((i+1))
+  done
+}
+
+broker_has_ok() {
+  # This package never installs the broker: it must already be the reviewed candidate.
+  local got
+  got="$(sha256sum "$BROKER_BIN" 2>/dev/null | awk '{print $1}')"
+  [ "$got" = "$BROKER_SHA" ] \
+    || die broker_hash "installed model_broker.py ${got:-unreadable} != $BROKER_SHA"
+  say "BROKER_OK sha=$got"
+}
+
+# --- whitelisted diagnostic summary: metadata only, the raw arg is never printed ------ #
+diag_summary() { # <events.jsonl>
+  say "CONNECT_DIAG_BEGIN"
+  if [ ! -f "$1" ]; then
+    say "CONNECT_DIAG=ABSENT"
+  elif [ ! -f "$DIAG_HELPER" ]; then
+    say "CONNECT_DIAG=NO_HELPER"
+  else
+    /usr/bin/python3 "$DIAG_HELPER" "$1" 2>&1 || say "CONNECT_DIAG=SUMMARY_FAILED"
+  fi
+  say "CONNECT_DIAG_END"
+}
+
+# --------------------------------------------------------------------------- #
+# --- the ONLY deployed change: add this task to the sandbox diagnostic allowlist ------- #
+deployed_hashes(){ # hashes of the OTHER installed aegl-model files (must not change)
+  local f
+  for f in aegl-model-broker aegl-model-config model_broker.py git_meta_mounts.sh \
+           capture_evidence.py diag_events.py bind_fd_exec.py sandbox_spec.py prepare_targets.py \
+           exec_spec.py drop_verify.py loopback_shim.py model_config.py guard_hook_client.py tool_event_client.py \
+           tool_observer_config.py guard/contract_guard.py; do
+    [ -f "$SANDBOX_DIR/$f" ] || die deployed_missing "$SANDBOX_DIR/$f"
+    sha256sum "$SANDBOX_DIR/$f"
+  done
+}
+
+stage_sandbox_diag() {
+  require_root
+  [ -f "$SANDBOX_PAYLOAD" ] || die sandbox_payload "missing payload: $SANDBOX_PAYLOAD"
+  [ -f "$SANDBOX_BIN" ] || die sandbox_bin "missing installed sandbox: $SANDBOX_BIN"
+  # BEFORE any replacement: the candidate must be the approved payload AND carry EXACTLY the
+  # expected allowlist (all existing entries kept, only IAP-SMOKE-008 added).
+  local ph
+  ph="$(sha256sum "$SANDBOX_PAYLOAD" | awk '{print $1}')"
+  [ "$ph" = "$SANDBOX_AFTER_SHA" ] || die sandbox_payload_hash "$ph != $SANDBOX_AFTER_SHA"
+  grep -qxF -- "$SANDBOX_ALLOWLIST" "$SANDBOX_PAYLOAD" \
+    || die sandbox_payload_allowlist "candidate does not carry exactly: $SANDBOX_ALLOWLIST"
+  # the Git-metadata helper must already be deployed, exactly, and not a symlink
+  [ -f "$SANDBOX_DIR/git_meta_mounts.sh" ] || die helper_missing "$SANDBOX_DIR/git_meta_mounts.sh"
+  [ ! -L "$SANDBOX_DIR/git_meta_mounts.sh" ] || die helper_symlink "$SANDBOX_DIR/git_meta_mounts.sh"
+  [ "$(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')" = "$EXPECT_HELPER_SHA" ] \
+    || die helper_hash "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh") $(sha256sum "$SANDBOX_DIR/git_meta_mounts.sh" | awk '{print $1}')"
+  [ "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")" = "root:root 755" ] \
+    || die helper_mode "$(stat -c '%U:%G %a' "$SANDBOX_DIR/git_meta_mounts.sh")"
+  [ "$(sha256sum "$BROKER_BIN" | awk '{print $1}')" = "$BROKER_SHA" ] || die broker_unknown "$BROKER_BIN"
+  [ ! -e "$SANDBOX_BIN.new" ] \
+    || die sandbox_staging "$SANDBOX_BIN.new exists (unknown staged content; refusing to overwrite)"
+  [ ! -e "$SANDBOX_DIR/git_meta_mounts.sh.new" ] \
+    || die helper_staging "$SANDBOX_DIR/git_meta_mounts.sh.new exists (unknown staged content)"
+  local before after snap_before snap_after
+  before="$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
+  say "SANDBOX_BEFORE=$before"
+  if [ "$before" = "$SANDBOX_AFTER_SHA" ]; then
+    say "SANDBOX_ALREADY_WIRED (installed hash is already the new one)"
+  else
+    [ "$before" = "$SANDBOX_BEFORE_SHA" ] \
+      || die sandbox_baseline "installed sandbox hash $before != expected baseline $SANDBOX_BEFORE_SHA"
+    snap_before="$(deployed_hashes)"
+    install -o root -g root -m 0755 -- "$SANDBOX_PAYLOAD" "$SANDBOX_BIN.new" || die sandbox_stage "$SANDBOX_BIN.new"
+    mv -f -- "$SANDBOX_BIN.new" "$SANDBOX_BIN" || die sandbox_swap "$SANDBOX_BIN"
+    after="$(sha256sum "$SANDBOX_BIN" | awk '{print $1}')"
+    [ "$after" = "$SANDBOX_AFTER_SHA" ] || die sandbox_after "installed hash $after != $SANDBOX_AFTER_SHA"
+    snap_after="$(deployed_hashes)"
+    [ "$snap_before" = "$snap_after" ] \
+      || die sandbox_side_effect "a deployed sibling changed (broker/model/credentials/guard must stay untouched)"
+  fi
+  grep -qxF -- "$SANDBOX_ALLOWLIST" "$SANDBOX_BIN" \
+    || die sandbox_allowlist "allowlist line is not exactly the expected one"
+  say "SANDBOX_OK hash=$SANDBOX_AFTER_SHA allowlist=IAP-SMOKE-008 (only addition)"
+}
+
+
+# --- read-only 008 state helpers (permission errors are UNKNOWN, never absent) --------- #
+path_state() { # <path> — ABSENT|PRESENT|UNKNOWN
+  local p="$1" parent
+  parent="$(dirname "$p")"
+  [ -L "$p" ] && { printf 'UNKNOWN'; return 0; }
+  [ ! -e "$parent" ] && { printf 'ABSENT'; return 0; }
+  { [ -d "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ]; } || { printf 'UNKNOWN'; return 0; }
+  [ -e "$p" ] && printf 'PRESENT' || printf 'ABSENT'
+}
+diag_sink_state() { # [parent] [sink] — ABSENT|PRESENT|UNKNOWN
+  local parent="${1:-/var/tmp/aegl-diag}" sink="${2:-$DIAG_SINK_DIR}"
+  if [ -L "$parent" ] || { [ -e "$parent" ] && [ ! -d "$parent" ]; }; then printf 'UNKNOWN'; return 0; fi
+  if [ ! -e "$parent" ]; then printf 'ABSENT'; return 0; fi
+  { [ -r "$parent" ] && [ -x "$parent" ]; } || { printf 'UNKNOWN'; return 0; }
+  [ -L "$sink" ] && { printf 'UNKNOWN'; return 0; }
+  [ -e "$sink" ] && printf 'PRESENT' || printf 'ABSENT'
+}
+supervisor_state() {
+  local root="$SUPERVISOR_ROOT" camp="$SUPERVISOR_ROOT/$CAMPAIGN_ID"
+  if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then printf 'UNKNOWN'; return 0; fi
+  if [ ! -e "$root" ]; then printf 'ABSENT'; return 0; fi
+  { [ -r "$root" ] && [ -x "$root" ]; } || { printf 'UNKNOWN'; return 0; }
+  [ -L "$camp" ] && { printf 'UNKNOWN'; return 0; }
+  [ -e "$camp" ] && printf 'PRESENT' || printf 'CLEAN'
+}
+contract_parent_state() {
+  local p; p="$(dirname "$PKG_DEST")"
+  [ -L "$p" ] && { printf 'UNKNOWN'; return 0; }
+  [ ! -e "$p" ] && { printf 'ABSENT'; return 0; }
+  [ ! -d "$p" ] && { printf 'UNKNOWN'; return 0; }
+  [ "$(stat -c '%U:%G %a' "$p" 2>/dev/null)" = "root:root 755" ] && printf 'PRESENT' || printf 'UNKNOWN'
+}
+registry_state() {
+  if [ ! -e "$REGISTRY" ] || [ ! -r "$REGISTRY" ]; then printf 'UNREADABLE'; return 0; fi
+  python3 - "$REGISTRY" "$TASK_ID" <<'REGPY'
+import json, sys
+try:
+    reg = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("UNREADABLE"); raise SystemExit(0)
+print("READABLE_WITH_008" if sys.argv[2] in reg else "READABLE_NO_008")
+REGPY
+}
+inst_pin() { # <path> <sha> <owner:group> <mode>
+  [ -f "$1" ] && [ ! -L "$1" ] \
+    && [ "$(sha256sum "$1" | awk '{print $1}')" = "$2" ] \
+    && [ "$(stat -c '%U:%G %a' "$1")" = "$3 $4" ]
+}
+launcher_pin_ok() { # <path> — regular, non-symlink, exactly one of the two approved hashes
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  local h; h="$(sha256sum "$1" 2>/dev/null | awk '{print $1}')"
+  [ "$h" = "$SANDBOX_BEFORE_SHA" ] || [ "$h" = "$SANDBOX_AFTER_SHA" ]
+}
+launcher_live_ok() { # <path> — regular, non-symlink, exactly the 008 candidate hash
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(sha256sum "$1" 2>/dev/null | awk '{print $1}')" = "$SANDBOX_AFTER_SHA" ]
+}
+inst_pin_launcher() { # <path>
+  launcher_pin_ok "$1" && [ "$(stat -c '%U:%G %a' "$1")" = "root:root 755" ]
+}
+installed_pins_ok() {
+  inst_pin_launcher "$SANDBOX_BIN" \
+    && inst_pin "$BROKER_BIN" "$BROKER_SHA" root:root 644 \
+    && inst_pin "$SANDBOX_DIR/tool_event_client.py" "$TOOL_EVENT_SHA" root:root 644 \
+    && inst_pin "$SANDBOX_DIR/tool_observer_config.py" "$TOOL_OBSERVER_SHA" root:root 644 \
+    && inst_pin "$SANDBOX_DIR/guard/contract_guard.py" "$GUARD_SHA" root:root 444 \
+    && inst_pin "$SANDBOX_DIR/git_meta_mounts.sh" "$EXPECT_HELPER_SHA" root:root 755 \
+    || die installed_pin "one of the six required installed pins changed"
+  say "INSTALLED_PINS_OK launcher=predecessor_or_008_candidate broker=$BROKER_SHA observers=2 guard=$GUARD_SHA helper=$EXPECT_HELPER_SHA"
+}
+
+stage_preflight() {
+  say "[preflight] 008 sink / baseline state / evidence / stack / pins / state path"
+  local sink
+  # FIRST, before any write: an existing 008 sink is a hard stop. A permission or type
+  # error is UNKNOWN, never "absent".
+  sink="$(diag_sink_state)"
+  say "DIAG_SINK=$sink path=$DIAG_SINK_DIR"
+  case "$sink" in
+    ABSENT) ;;
+    PRESENT) die diag_sink_exists "$DIAG_SINK_DIR exists (unknown scene; refusing to append)" ;;
+    *) die diag_sink_unknown "cannot confirm $DIAG_SINK_DIR is absent (permission/type)" ;;
+  esac
+  # no write of any kind may happen before the live Bridge is the expected one
+  bridge_ok || die bridge_before_writes "$(chain_now)"
+  # read-only verification of every pre-existing 008 artifact — nothing is created,
+  # owned, re-permissioned or rewritten before this passes.
+  verify_existing_scene
+  # ONLY THEN: the real chain snapshot is taken BEFORE any install or task write; an existing
+  # one must already match and is never overwritten (a later snapshot proves nothing).
+  if [ -e "$LEDGER/chain.before_prep" ]; then
+    [ -s "$LEDGER/chain.before_prep" ] || die snapshot_empty "$LEDGER/chain.before_prep"
+    [ "$(cat "$LEDGER/chain.before_prep")" = "$(chain_now)" ] \
+      || die chain_snapshot_mismatch "$(cat "$LEDGER/chain.before_prep") != $(chain_now)"
+    say "CHAIN_SNAPSHOT_REUSED $LEDGER/chain.before_prep"
+  else
+    mkdir -p "$LEDGER" || die ledger_dir
+    chain_now > "$LEDGER/chain.before_prep" || die snapshot_write
+    say "CHAIN_SNAPSHOT_SAVED $(cat "$LEDGER/chain.before_prep")"
+  fi
+  local st files dirty head
+  st="$(baseline_state)"
+  say "PREFLIGHT_BASELINE_STATE=$st"
+  case "$st" in
+    ABSENT|ZHONG_EMPTY_INIT)
+      say "PREFLIGHT_BASELINE=resumable ($st)" ;;
+    ROOT_EMPTY_INIT)
+      die git_meta_root_owned "run --stage repair-git-owner first (.git is a root-owned empty init)" ;;
+    HAS_COMMIT)
+      files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+      dirty="$(op_git status --porcelain)"
+      [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
+      [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
+      head="$(op_git rev-parse HEAD)"
+      [ "$head" = "$EXPECT_BASE" ] || die baseline_head "$head != $EXPECT_BASE"
+      say "PREFLIGHT_BASELINE=approved commit=$head" ;;
+    *)
+      die baseline_unknown "unrecognised .git state; refusing to proceed" ;;
+  esac
+  [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_exists "$WORKTREE/EVIDENCE.txt"
+  stack_hashes_ok
+  installed_pins_ok
+  broker_has_ok
+  assert_operator_state_path
+  say "PREFLIGHT_OK evidence=absent stack=f32d18a broker=$BROKER_SHA pins=6 state=$(operator_state_path)"
+}
+
+# --- baseline identity: ALWAYS the operator (zhong), never root -------------------- #
+iap_real() { realpath -e "$IAP" 2>/dev/null || die iap_unresolved "$IAP"; }
+op_git() { local real; real="$(iap_real)"; if [ "$(id -u)" -eq 0 ]; then
+    runuser -u "$OPERATOR" -- env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"
+  else env -i HOME="$OPERATOR_HOME" PATH="$OP_PATH" LANG=C.UTF-8 git -c "safe.directory=$real" -C "$IAP" "$@"; fi; }
+# controller (root) git: exact command-scoped trust, errors propagate, no global config
+ctl_git() { local path="$1"; shift; local real; real="$(realpath -e "$path" 2>/dev/null)" || die git_path_unresolved "$path"
+  if [ "$(id -u)" -eq 0 ]; then
+    git -c "safe.directory=$real" -C "$path" "$@"
+  else
+    git -c "safe.directory=$real" -C "$path" "$@"
+  fi
+}
+ctl_git_argv() { local path="$1"; shift; printf 'git -c safe.directory=%s -C %s %s' "$(realpath -e "$path")" "$path" "$*"; }
+wt_registered() { ctl_git "$IAP" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' | grep -Fxq -- "$WORKTREE"; }
+
+op_git_id() { # explicit identity for this run only; never writes global config
+  printf '%s\n%s\n' "${IAP_GIT_NAME:-zgz314159}" "${IAP_GIT_EMAIL:-zgz314159@gmail.com}"
+}
+
+baseline_state() { # ABSENT | ZHONG_EMPTY_INIT | ROOT_EMPTY_INIT | HAS_COMMIT | UNKNOWN
+  local gitd="$IAP/.git" owner objects idx=0 refs logs=0
+  if [ ! -e "$gitd" ]; then printf 'ABSENT'; return 0; fi
+  if [ ! -d "$gitd" ] || [ -L "$gitd" ]; then printf 'UNKNOWN'; return 0; fi
+  owner="$(stat -c '%U' "$gitd")"
+  objects="$(find "$gitd/objects" -type f 2>/dev/null | wc -l)"
+  if [ -e "$gitd/index" ]; then idx=1; fi
+  if [ -e "$gitd/logs" ]; then logs=1; fi
+  refs="$(ls -A "$gitd/refs/heads" 2>/dev/null | wc -l)"
+  if op_git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then printf 'HAS_COMMIT'; return 0; fi
+  if [ "$objects" -eq 0 ] && [ "$idx" -eq 0 ] && [ "$refs" -eq 0 ] && [ "$logs" -eq 0 ]; then
+    case "$owner" in
+      "$OPERATOR") printf 'ZHONG_EMPTY_INIT' ;;
+      root) printf 'ROOT_EMPTY_INIT' ;;
+      *) printf 'UNKNOWN' ;;
+    esac
+    return 0
+  fi
+  printf 'UNKNOWN'
+}
+
+stage_baseline() {
+  require_root
+  # VERIFY ONLY. This entry never initialises, adds, commits or repairs anything: an
+  # unexpected state stops the run so the operator can look at it.
+  local st files dirty head
+  st="$(baseline_state)"
+  say "BASELINE_STATE=$st"
+  [ "$st" = HAS_COMMIT ] || die baseline_unexpected "$st (this entry never creates or repairs a baseline)"
+  files="$(op_git -c core.quotePath=false ls-files | sort | paste -sd, -)"
+  [ "$files" = "$PLAN_FILE" ] || die baseline_foreign "tracked=$files (expected only the plan)"
+  dirty="$(op_git status --porcelain)"
+  [ -z "$dirty" ] || die baseline_dirty "uncommitted changes present"
+  head="$(op_git rev-parse HEAD)"
+  [ "$head" = "$EXPECT_BASE" ] || die baseline_head "$head != $EXPECT_BASE"
+  say "BASELINE_VERIFIED commit=$head tracked=1 clean=1"
+}
+
+stage_worktree() {
+  require_root
+  local base; base="$(ctl_git "$IAP" rev-parse HEAD)" || die base_query
+  install -d -m 0750 "$TASK_ROOT" || die task_root "$TASK_ROOT"
+  if [ "$(id -u)" -eq 0 ]; then chown root:root "$TASK_ROOT" || die task_root_chown; fi
+  if [ -e "$WORKTREE" ]; then
+    wt_registered || die worktree_unknown "$WORKTREE exists but is not a registered worktree (preserved)"
+    [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$base" ] || die worktree_head_mismatch
+    [ -z "$(ctl_git "$WORKTREE" status --porcelain)" ] || die worktree_dirty "$WORKTREE (preserved)"
+    say "WORKTREE_EXISTS_OK (verified, reusing)"
+  else
+    if wt_registered; then die worktree_registered_missing "$WORKTREE is registered but absent (preserved; no prune)"; fi
+    ctl_git "$IAP" worktree add --detach "$WORKTREE" "$base" || die worktree_add "$WORKTREE"
+  fi
+  if [ "$(id -u)" -eq 0 ]; then chown -R aegl-ai:aegl-ai "$WORKTREE" || die worktree_chown; fi
+  chmod -R u=rwX,go=rX "$WORKTREE" || die worktree_chmod
+  local got; got="$(ctl_git "$WORKTREE" rev-parse HEAD)"
+  [ "$got" = "$base" ] || die worktree_head "$got != $base"
+  say "WORKTREE_OK $WORKTREE detached=$base"
+}
+
+stage_permissions() {
+  require_root
+  done_marker baseline || die prerequisite_not_done baseline
+  local gitdir commondir
+  gitdir="$(ctl_git "$WORKTREE" rev-parse --absolute-git-dir)" || die gitdir_resolve
+  commondir="$(ctl_git "$WORKTREE" rev-parse --git-common-dir)" || die commondir_resolve
+  case "$commondir" in /*) : ;; *) commondir="$WORKTREE/$commondir" ;; esac
+  commondir="$(realpath -e "$commondir")" || die commondir_realpath
+  say "GITDIR=$gitdir COMMONDIR=$commondir"
+  # CHECK FIRST, GRANT LAST — and only on the TASK's OWN directories. The formal repository's
+  # Git metadata is never widened: the helper copies only this task's worktree admin into a
+  # per-task view and root mounts the shared metadata read-only, so neither the sandbox
+  # identity nor the gate needs a new right on the formal .git.
+  install -d -o "$AI_USER" -g "$AI_GROUP" -m 0750 "$SCRATCH" || die scratch
+  if ! ai_access x "$TASK_ROOT"; then setfacl -m u:"$AI_USER":x "$TASK_ROOT" || die acl_task_root; fi
+  if ! op_access x "$TASK_ROOT"; then setfacl -n -m u:"$OPERATOR":x "$TASK_ROOT" || die acl_task_root_operator; fi
+  # the formal metadata must NOT be writable by the sandbox identity, and we must not make it so
+  if ai_access w "$commondir"; then die formal_commondir_writable "$commondir writable by $AI_USER"; fi
+  if ai_access w "$gitdir"; then die formal_gitdir_writable "$gitdir writable by $AI_USER"; fi
+  if ai_access w "$commondir/objects" || ai_access w "$commondir/refs" || ai_access w "$commondir/config"; then
+    die formal_metadata_writable "objects/refs/config writable by $AI_USER under $commondir"
+  fi
+  # the rights this task actually needs, checked (not granted) — report precisely and stop
+  ai_access x "$TASK_ROOT" || die need_traverse "$AI_USER needs x on $TASK_ROOT"
+  op_access x "$TASK_ROOT" || die need_traverse "$OPERATOR needs x on $TASK_ROOT"
+  ai_access w "$WORKTREE" || die need_write "$AI_USER needs w on $WORKTREE"
+  ai_access w "$SCRATCH" || die need_write "$AI_USER needs w on $SCRATCH"
+  ai_access r "$WORKTREE/$PLAN_FILE" || die need_read "$AI_USER needs r on $WORKTREE/$PLAN_FILE"
+  op_access r "$WORKTREE" || die need_read "$OPERATOR needs r on $WORKTREE"
+  printf '%s\n%s\n' "$gitdir" "$commondir" > "$LEDGER/paths" || die ledger_paths
+  say "PERMISSIONS_OK existing-access-only task-root-traverse=$AI_USER,$OPERATOR formal-git-metadata=untouched (no ACL added to $commondir)"
+}
+
+# --- live state acceptance: NEVER skipped by a done marker ----------------------------- #
+registry_fields_ok() { # <path> <task> -> 0 only when all FOUR fields match exactly
+  local reg="${REGISTRY:-$REGISTRY_PATH}" task="$1" want wt scr proj con got
+  [ -f "$reg" ] || { REGISTRY_DIFF="registry unreadable: $reg"; return 1; }
+  want="$(python3 - "$reg" "$task" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[1], encoding="utf-8"))
+e = reg.get(sys.argv[2]) or {}
+print("\n".join(str(e.get(k) or "") for k in ("worktree", "scratch", "project", "contract_package")))
+PY
+)" || { REGISTRY_DIFF="registry unreadable/unparsable: $reg"; return 1; }
+  got="$(printf '%s\n%s\n%s\n%s\n' "$TASK_ROOT/project" "$SCRATCH" "$IAP" "$PKG_DEST")"
+  [ "$want" = "$got" ] || { REGISTRY_DIFF="wanted=[$got] registry=[$want]"; return 1; }
+  return 0
+}
+
+verify_existing_scene() { # read-only; every already-present 008 artifact, wherever it lives
+  require_root
+  local any=0 sp cp
+  sp="$(supervisor_state)"; say "SUPERVISOR=$sp"
+  case "$sp" in
+    ABSENT|CLEAN) ;;
+    PRESENT) die existing_supervisor "$SUPERVISOR_ROOT/$CAMPAIGN_ID exists (unknown scene)" ;;
+    *) die existing_supervisor_unknown "supervisor state=$sp" ;;
+  esac
+  cp="$(contract_parent_state)"; say "CONTRACT_PARENT=$cp"
+  case "$cp" in
+    ABSENT|PRESENT) ;;
+    *) die existing_contract_parent "contract parent state=$cp" ;;
+  esac
+  for p in "$TASK_ROOT" "$WORKTREE" "$SCRATCH" "$LEDGER" "$PKG_DEST"; do
+    [ -L "$p" ] && die existing_symlink "$p is a symlink (preserved, not followed)"
+  done
+  if [ -e "$TASK_ROOT" ]; then
+    any=1
+    [ -d "$TASK_ROOT" ] || die existing_unknown "$TASK_ROOT is not a directory"
+    [ "$(stat -c '%U' "$TASK_ROOT")" = root ] \
+      || die existing_owner "$TASK_ROOT owner=$(stat -c '%U' "$TASK_ROOT") (unknown scene; refusing to chown/chmod)"
+    [ -e "$WORKTREE" ] && { [ -d "$WORKTREE" ] || die existing_unknown "$WORKTREE is not a directory"; }
+    [ -e "$SCRATCH" ] && { [ -d "$SCRATCH" ] || die existing_unknown "$SCRATCH is not a directory"; }
+    # the scene must be THIS task's: the registry has to declare exactly these paths
+    registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"
+    if [ -e "$WORKTREE/.git" ]; then
+      ctl_git "$IAP" worktree list --porcelain 2>/dev/null | grep -qxF -- "worktree $WORKTREE" \
+        || die existing_worktree "$WORKTREE is not a registered worktree of $IAP"
+    fi
+  fi
+  if [ -e "$PKG_DEST" ]; then
+    any=1
+    [ -f "$PKG_DEST/manifest.json" ] || die existing_contract "$PKG_DEST"
+    [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+      || die existing_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+    /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die existing_contract_members "$PKG_DEST"
+import hashlib, json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+for e in m.get("entries", []):
+    f = os.path.join(sys.argv[1], e["path"])
+    if not os.path.isfile(f) or hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
+        sys.exit("bad %s" % e["path"])
+MEMPYP
+  fi
+  if [ -e "$REGISTRY" ]; then
+    local has=0
+    if python3 - "$REGISTRY" "$TASK_ID" <<'PY'
+import json, sys
+try:
+    reg = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    sys.stderr.write("%s: %s\n" % (type(exc).__name__, exc)); sys.exit(2)
+sys.exit(0 if sys.argv[2] in reg else 1)
+PY
+    then
+      has=0
+    else
+      has=$?
+    fi
+    if [ "$has" -eq 0 ]; then
+      any=1
+      registry_fields_ok "$TASK_ID" || die existing_registry "$REGISTRY_DIFF"
+    elif [ "$has" -eq 1 ]; then
+      say "REGISTRY_VALID_WITHOUT_008 (first prep allowed)"
+    else
+      die existing_registry_unreadable "$REGISTRY (rc=$has: read/parse failed; NOT treated as 'no 008')"
+    fi
+  fi
+  if [ -e "$TASK_ROOT/PREP-BINDING.json" ]; then
+    any=1
+    binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
+  fi
+  if [ -d "$LEDGER" ]; then
+    any=1
+    # an existing ledger without a prep-start snapshot is an abnormal scene: stop, never
+    # backfill it here and then call the scene verified
+    [ -f "$LEDGER/chain.before_prep" ] || die existing_ledger "$LEDGER exists without chain.before_prep"
+    local m stage
+    for m in "$LEDGER"/*.done; do
+      [ -e "$m" ] || continue
+      stage="$(basename "$m" .done)"
+      done_marker "$stage" || die existing_marker "$m is stale (unknown anchor/stage)"
+    done
+  fi
+  [ "$any" -eq 0 ] && say "EXISTING_SCENE=none (first prep)" || say "EXISTING_SCENE_VERIFIED"
+}
+
+verify_live_state() {
+  require_root
+  # 008's own scene, verified field by field — never trusted from a marker
+  [ -d "$TASK_ROOT" ] && [ ! -L "$TASK_ROOT" ] || die live_task_root "$TASK_ROOT"
+  [ -d "$WORKTREE" ] && [ ! -L "$WORKTREE" ] || die live_worktree "$WORKTREE"
+  [ -d "$SCRATCH" ] && [ ! -L "$SCRATCH" ] || die live_scratch "$SCRATCH"
+  gitdir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '1p')"
+  commondir="$(cat "$LEDGER/paths" 2>/dev/null | sed -n '2p')"
+  [ -n "$gitdir" ] && [ -n "$commondir" ] || die live_paths "no recorded git paths"
+  [ "$(ctl_git "$WORKTREE" rev-parse --absolute-git-dir)" = "$gitdir" ] || die live_gitdir_changed
+  local cq; cq="$(ctl_git "$WORKTREE" rev-parse --git-common-dir)"
+  case "$cq" in /*) : ;; *) cq="$WORKTREE/$cq" ;; esac
+  [ "$(realpath -e "$cq")" = "$commondir" ] || die live_commondir_changed
+  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$EXPECT_BASE" ] || die live_head
+  # the 008 worktree's OWN clean state, keeping Git's real exit code
+  local st sterr="$LEDGER/live.status.err" src=0
+  st="$(ctl_git "$WORKTREE" status --porcelain 2>"$sterr")" || src=$?
+  [ "$src" -eq 0 ] || die live_status_rc "rc=$src $(head -c 400 "$sterr" | tr '\n' ' ')"
+  [ -z "$st" ] || die live_worktree_dirty "008 worktree is dirty: $st"
+  # the formal IAP tree stays a SEPARATE, independent check
+  [ -z "$(op_git status --porcelain)" ] || die live_formal_dirty "formal IAP tree is dirty"
+  /usr/bin/python3 - "$PKG_DEST" <<'MEMPYP' || die live_contract_members "$PKG_DEST"
+import hashlib, json, os, sys
+m = json.load(open(os.path.join(sys.argv[1], "manifest.json"), encoding="utf-8"))
+for e in m.get("entries", []):
+    f = os.path.join(sys.argv[1], e["path"])
+    if not os.path.isfile(f):
+        sys.exit("missing %s" % e["path"])
+    if hashlib.sha256(open(f, "rb").read()).hexdigest() != e["sha256"]:
+        sys.exit("hash %s" % e["path"])
+MEMPYP
+  # the ONE acceptor: content, owner, mode, non-symlink, and all three fields
+  binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
+  [ -f "$PKG_DEST/implementation-contract.json" ] || die live_contract_missing "$PKG_DEST"
+  [ -f "$PKG_DEST/manifest.json" ] || die live_contract_manifest "$PKG_DEST"
+  [ "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+    || die live_contract_hash "$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+  local rf="ok"
+  registry_fields_ok "$TASK_ID" || rf="$REGISTRY_DIFF"
+  [ "$rf" = "ok" ] || die live_registry "$rf"
+  [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die live_evidence "$WORKTREE/EVIDENCE.txt exists (prep must not create it)"
+  # After prep and before send, the installed launcher MUST be the 008 candidate, never
+  # the predecessor. This is the execute-time half of the two-hash admission.
+  launcher_live_ok "$SANDBOX_BIN" \
+    || die live_launcher "$SANDBOX_BIN is not the 008 candidate hash $SANDBOX_AFTER_SHA"
+  say "LIVE_STATE_OK registry=4/4 contract=binding=$EXPECT_MANIFEST_SHA launcher=008_candidate evidence=absent"
+}
+
+bridge_ok() { # 0 only for the expected live Bridge state — parsed independently
+  local pending="${PENDING_PATH:-$BRIDGE_DIR/pending_result.json}"
+  op_py 'import json,os,sys
+p = json.load(open(sys.argv[1], encoding="utf-8"))
+pending = sys.argv[2]
+ok = (p.get("status") == "WAITING_FOR_GPT"
+      and str(p.get("expected_sequence")) == sys.argv[3]
+      and not os.path.exists(pending))
+if not ok:
+    sys.stderr.write("bridge status=%s seq=%s pending=%s\n"
+                     % (p.get("status"), p.get("expected_sequence"), os.path.exists(pending)))
+sys.exit(0 if ok else 1)' "$BRIDGE_DIR/state.json" "$pending" "$EXPECT_BRIDGE_SEQ"
+}
+
+# --- in-sandbox Git metadata + task binding check (no model, no send, no shim) --------- #
+# The host-side probe below cannot see this: the sandbox overlays /home/zhong with a
+# skeleton, so unless the worktree's Git metadata is re-mounted Git cannot resolve HEAD.
+# The binding lives at the task root and is visible through the read-only root mount; it
+# must be readable, content-correct and not writable by the sandbox identity.
+sandbox_check_cmd() {
+  # Git checks verbatim (minus gitmeta.check's own summary/exit), then this task's binding.
+  sed '$d' "$PKG/bin/gitmeta.check" | sed '$d'
+  cat <<CHECK
+BINDING="$TASK_ROOT/PREP-BINDING.json"
+say "BINDING_PATH=\$BINDING"
+if [ -f "\$BINDING" ] && [ ! -L "\$BINDING" ] && [ -r "\$BINDING" ]; then
+  say "BINDING_READ=True"
+else
+  say "BINDING_READ=False"; fail=\$((fail + 1))
+fi
+if [ -w "\$BINDING" ]; then
+  say "BINDING_WRITABLE=True"; fail=\$((fail + 1))
+else
+  say "BINDING_WRITABLE=False"
+fi
+say "BINDING_OWNER=\$(stat -c '%U:%G' "\$BINDING" 2>/dev/null || echo unreadable)"
+say "BINDING_MODE=\$(stat -c '%a' "\$BINDING" 2>/dev/null || echo unreadable)"
+python3 - "\$BINDING" "\$PWD" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST" <<'PY'
+import json, os, sys
+path, cwd, wt, commit, pkg = sys.argv[1:6]
+try:
+    b = json.load(open(path, encoding="utf-8"))
+except Exception as exc:
+    print("BINDING_CONTENT=UNREADABLE:%s" % type(exc).__name__)
+    raise SystemExit(1)
+ok = (os.path.realpath(b.get("worktree", "")) == os.path.realpath(wt) == os.path.realpath(cwd)
+      and b.get("commit") == commit
+      and os.path.realpath(b.get("contract_package", "")) == os.path.realpath(pkg))
+print("BINDING_CONTENT=%s" % ("OK" if ok else "MISMATCH"))
+raise SystemExit(0 if ok else 1)
+PY
+[ \$? -eq 0 ] || fail=\$((fail + 1))
+say "CHECK_FAILURES=\$fail"
+exit "\$fail"
+CHECK
+}
+
+sandbox_git_check() {
+  local cmd_file="$LEDGER/sandbox-git-check.cmd" out rc=0
+  sandbox_check_cmd > "$cmd_file" || die probe_sandbox_cmd "$cmd_file"
+  out="$( "$SANDBOX_BIN" --task "$TASK_ID" --check "$(cat "$cmd_file")" 2>&1 )" || rc=$?
+  printf '%s\n' "$out" > "$LEDGER/sandbox-git-check.out"
+  [ "$rc" -eq 0 ] || die probe_sandbox_exit "launcher --check exited $rc"
+  printf '%s\n' "$out" | grep -qxF "COMMON=$EXPECT_COMMON" \
+    || die probe_sandbox_common "$(printf '%s\n' "$out" | grep '^COMMON=' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -E '^(COMMON=|COMMON_RC=|REV_PARSE_RC=|REV_PARSE_HEAD=|STATUS_RC=|PERM_|BINDING_|CHECK_FAILURES=)' || true
+  printf '%s\n' "$out" | grep -qxF 'REV_PARSE_RC=0' \
+    || die probe_sandbox_rev_parse "rc=$rc $(printf '%s\n' "$out" | grep -E '^(COMMON=|COMMON_RC=|REV_PARSE_(RC|ERR)=)' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF "REV_PARSE_HEAD=$EXPECT_BASE" \
+    || die probe_sandbox_head "$(printf '%s\n' "$out" | grep '^REV_PARSE_HEAD=' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'STATUS_RC=0' || die probe_sandbox_status "rc=$rc"
+  local k
+  for k in core refs objects config; do
+    printf '%s\n' "$out" | grep -qxF "PERM_$k writable=False mount_ro=True" \
+      || die probe_sandbox_perm "$k $(printf '%s\n' "$out" | grep "^PERM_$k " | tr '\n' ' ')"
+  done
+  printf '%s\n' "$out" | grep -qxF 'BINDING_READ=True' || die probe_sandbox_binding_read "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'BINDING_WRITABLE=False' || die probe_sandbox_binding_write "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'BINDING_MODE=644' || die probe_sandbox_binding_mode "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'BINDING_CONTENT=OK' || die probe_sandbox_binding_content "$(printf '%s\n' "$out" | grep '^BINDING_' | tr '\n' ' ')"
+  printf '%s\n' "$out" | grep -qxF 'CHECK_FAILURES=0' || die probe_sandbox_fail "rc=$rc"
+  say "PROBE_SANDBOX_GIT_OK HEAD=$EXPECT_BASE status=0 formal-metadata read-only (os.access + mount ro); binding read-only mode=0644 content=OK (sandbox owner names are diagnostic only)"
+}
+
+stage_probe() {
+  require_root
+  local gitdir commondir base st head
+  gitdir="$(sed -n '1p' "$LEDGER/paths")"; commondir="$(sed -n '2p' "$LEDGER/paths")"
+  base="$(ctl_git "$IAP" rev-parse HEAD)"
+  # Re-check the FULL ancestor chain of every required target with the same dropped
+  # identity (read-only), so a breakpoint names the exact blocking directory.
+  local q blk
+  for q in "$TASK_ROOT" "$commondir" "$gitdir" "$WORKTREE" "$SCRATCH"; do
+    blk="$(chain_blocker "$q")"; [ -z "$blk" ] || die probe_chain "$q blocked_at=$blk"
+  done
+  ai_access x "$TASK_ROOT" || die probe_traverse "$TASK_ROOT ${AI_ACCESS_ERR:-}"
+  ai_access x "$commondir" || die probe_commondir "$commondir ${AI_ACCESS_ERR:-}"
+  ai_access r "$TASK_ROOT/PREP-BINDING.json" || die probe_binding_read "$TASK_ROOT/PREP-BINDING.json ${AI_ACCESS_ERR:-}"
+  if ai_access w "$TASK_ROOT/PREP-BINDING.json"; then die probe_binding_writable "$TASK_ROOT/PREP-BINDING.json"; fi
+  # HOST authority before every probe: regular file, no symlink, numeric 0:0, 0644, content.
+  binding_accept "$TASK_ROOT/PREP-BINDING.json" "$WORKTREE" "$EXPECT_BASE" "$PKG_DEST"
+  ai_access r "$WORKTREE/$PLAN_FILE" || die probe_read "$WORKTREE/$PLAN_FILE ${AI_ACCESS_ERR:-}"
+  ai_access w "$WORKTREE" || die probe_write "$WORKTREE ${AI_ACCESS_ERR:-}"
+  ai_access w "$SCRATCH" || die probe_scratch "$SCRATCH ${AI_ACCESS_ERR:-}"
+  # Git is invoked with return code, stdout and stderr kept apart: rc decides pass/fail,
+  # stdout is the value under test, stderr is diagnostics only (never mixed into it).
+  local gerr="$LEDGER/probe.git.stderr" grc
+  : > "$gerr" || die ledger_stderr "$gerr"
+  head="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>"$gerr")" \
+    || { grc=$?; die probe_git "rc=$grc stderr=$(tr -d '\n' <"$gerr")"; }
+  [ "$head" = "$base" ] || die probe_git_head "$head != $base"
+  st="$(as_ai git -c "safe.directory=$WORKTREE" -C "$WORKTREE" status --porcelain 2>"$gerr")" \
+    || { grc=$?; die probe_status "rc=$grc stderr=$(tr -d '\n' <"$gerr")"; }
+  [ -z "$st" ] || die probe_dirty "$st"
+  if ai_access w "$commondir/refs"; then die probe_refs "$commondir/refs writable"; fi
+  if ai_access w "$commondir/config"; then die probe_config "config writable"; fi
+  if ai_access w "$commondir/objects"; then die probe_objects "object DB writable"; fi
+  if ai_access w "$IAP"; then die probe_formal "$IAP writable"; fi
+  # same identity, same worktree — but inside the REAL sandbox mounts, not on the host
+  sandbox_git_check
+  say "PROBE_OK traverse/read/write(worktree,scratch)/git=HEAD+status; formal refs/config/objects/tree read-only (access(2), ACL-aware); in-sandbox git metadata OK"
+}
+
+stage_contract() {
+  require_root
+  done_marker baseline || die prerequisite_not_done baseline
+  install -d -o root -g root -m 0755 /var/lib/aegl-model/trusted/ImageAnalysisFactory/reports/contracts || die contract_dir
+  if [ ! -e "$PKG_DEST" ]; then
+    cp -a "$CONTRACT_SRC" "$PKG_DEST" || die contract_copy
+    chown -R root:root "$PKG_DEST" || die contract_chown
+    chmod -R go-w "$PKG_DEST" || die contract_chmod
+  fi
+  local got; got="$(sha256sum "$PKG_DEST/manifest.json" | awk '{print $1}')"
+  [ "$got" = "$EXPECT_MANIFEST_SHA" ] || die contract_hash "$got"
+  [ "$(python3 -c "import json;print(json.load(open('$PKG_DEST/READY.json'))['status'])")" = READY ] || die contract_ready
+  say "CONTRACT_OK $PKG_DEST"
+}
+
+binding_write() { # <path> <worktree> <commit> <contract_package>
+  local path="$1"
+  [ ! -e "$path" ] || die binding_exists "$path (refusing to overwrite; verify it instead)"
+  printf '{"worktree":"%s","commit":"%s","contract_package":"%s"}\n' "$2" "$3" "$4" > "$path" || die binding_write
+  chown root:root "$path" || die binding_chown
+  chmod 0644 "$path" || die binding_chmod
+}
+
+binding_accept() { # <path> <worktree> <commit> <contract_package>
+  local path="$1"
+  [ -f "$path" ] || die binding_missing "$path"
+  [ ! -L "$path" ] || die binding_symlink "$path"
+  # HOST authority: numeric UID/GID 0:0 and mode 0644. Sandbox identity names are
+  # namespace-mapped and are never used to prove host ownership.
+  [ "$(stat -c '%u:%g %a' "$path")" = "0:0 644" ] || die binding_mode "$(stat -c '%u:%g %a' "$path")"
+  /usr/bin/python3 - "$path" "$2" "$3" "$4" <<'BINDPY' || die binding_mismatch "$path (refusing to overwrite)"
+import json, os, sys
+b = json.load(open(sys.argv[1], encoding="utf-8"))
+if os.path.realpath(b.get("worktree", "")) != os.path.realpath(sys.argv[2]):
+    sys.exit("worktree")
+if b.get("commit") != sys.argv[3]:
+    sys.exit("commit")
+if os.path.realpath(b.get("contract_package", "")) != os.path.realpath(sys.argv[4]):
+    sys.exit("contract_package")
+BINDPY
+}
+
+stage_binding() {
+  require_root
+  done_marker baseline || die prerequisite_not_done baseline
+  local base path="$TASK_ROOT/PREP-BINDING.json"
+  base="$(ctl_git "$IAP" rev-parse HEAD)"
+  [ "$base" = "$EXPECT_BASE" ] || die binding_baseline "$base != $EXPECT_BASE"
+  [ "$(ctl_git "$WORKTREE" rev-parse HEAD)" = "$base" ] || die binding_worktree_head
+  if [ -e "$path" ]; then
+    binding_accept "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    say "PREP_BINDING_REUSED (verified) commit=$base"
+  else
+    binding_write "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    binding_accept "$path" "$WORKTREE" "$base" "$PKG_DEST"
+    say "PREP_BINDING_OK commit=$base"
+  fi
+}
+
+stage_register() {
+  require_root
+  done_marker baseline || die prerequisite_not_done baseline
+  local reg=/usr/local/lib/aegl-model-task/bin/aegl-model-task
+  [ -x "$reg" ] || die registrar_missing "$reg"
+  if "$reg" show --task-id "$TASK_ID" >/dev/null 2>&1; then say "REGISTER_EXISTS (verify only)"; else
+    "$reg" register --task-id "$TASK_ID" --worktree "$WORKTREE" --scratch "$SCRATCH" \
+      --project "$IAP" --contract-package "$PKG_DEST" || die register
+  fi
+  "$reg" show --task-id "$TASK_ID" || die register_show
+  say "REGISTER_OK $TASK_ID"
+}
+
+stage_ready() {
+  require_root
+  assert_operator_state_path
+  [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_exists "$WORKTREE/EVIDENCE.txt"
+  chain_now > "$LEDGER/chain.at_ready" || die ledger_chain
+  say "READY_OK $(cat "$LEDGER/chain.at_ready")"
+  say "NEXT(prep complete): no model was called and nothing was sent. Run --execute to send once."
+}
+
+# --- explicit, one-shot operator stages -------------------------------------------- #
+stage_send() {
+  require_root
+  # execute requires the source record left by prep; it is never created here
+  done_marker ready || die prerequisite_not_done ready
+  verify_live_state           # a reused prep is re-verified before anything is sent
+  assert_operator_state_path
+  local now; now="$(chain_now)"
+  local want; want="$(cat "$LEDGER/chain.at_ready")"
+  [ "$now" = "$want" ] || die chain_changed "$now != $want"
+  local seq nonce reply token text prev
+  seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"
+  nonce="$(sed -n 's/.*nonce=\([^ ]*\).*/\1/p' <<< "$want")"
+  reply="$(sed -n 's/.*in_reply_to=\([^ ]*\).*/\1/p' <<< "$want")"
+  token="IAP-SMOKE-REQ-${nonce:0:16}"
+  prev="$(op_py 'import sys;sys.path.insert(0,sys.argv[1]);import chatgpt_adapter as a;print(a.read_latest_assistant()["sha256"])' "$STACK_BRIDGE")" || die assistant_read "$prev"
+  printf '%s\n' "$prev" > "$LEDGER/assistant.prev_sha"
+  text=$(cat <<EOF
+请在**你已完成的 assistant 回复**里原样输出下面这一个控制块（不要放进用户消息，不要改动任何字段）。请求标识：$token
+
+<<<HERMES_TASK_V1>>>
+{"protocol":"HERMES_TASK_V1","task_id":"$TASK_ID","sequence":$seq,"nonce":"$nonce","in_reply_to":"$reply","project":"ImageAnalysisFactory","action":"EXECUTE_CONTRACT","contract_package":"$PKG_DEST","contract_manifest_sha256":"$EXPECT_MANIFEST_SHA","risk":"LOW","max_runtime_s":120}
+<<<END_HERMES_TASK_V1>>>
+EOF
+)
+  local out; out="$(op_py_env 'import os,sys;sys.path.insert(0,sys.argv[1]);import chatgpt_adapter as a;print(a.send_once(os.environ["IAP_TEXT"],os.environ["IAP_TOKEN"],exact=False)["status"])' IAP_TEXT="$text" IAP_TOKEN="$token" -- "$STACK_BRIDGE" 2>&1)" || die send_failed "$out"
+  case "$out" in
+    CONFIRMED_SENT) say "SEND_OK status=CONFIRMED_SENT (single attempt, no resend)" ;;
+    ALREADY_PRESENT) say "SEND_OK status=ALREADY_PRESENT (not an automatic-send PASS)" ;;
+    SEND_UNCERTAIN) die send_uncertain "single attempt unconfirmed; no resend, human resolver required" ;;
+    *) die send_status "$out" ;;
+  esac
+}
+
+stage_wait() {
+  require_root
+  done_marker send || die prerequisite_not_done send
+  local prev; prev="$(cat "$LEDGER/assistant.prev_sha" 2>/dev/null)" || die prev_missing
+  local res; res="$(op_py 'import sys;sys.path.insert(0,sys.argv[1]);import chatgpt_adapter as a;r=a.wait_for_new_assistant(sys.argv[2],timeout=180);print(r["status"]);print(r.get("sha256",""))' "$STACK_BRIDGE" "$prev" 2>&1)" || die wait_failed "$res"
+  local st; st="$(sed -n '1p' <<< "$res")"
+  if [ "$st" != "NEW_ASSISTANT" ]; then
+    say "WAITING_FOR_ASSISTANT (no new completed assistant reply within 180s); round will not run"
+    printf 'WAITING\n' > "$LEDGER/assistant.state"
+    return 0
+  fi
+  local block; block="$(op_py 'import sys,json;sys.path.insert(0,sys.argv[1]);import chatgpt_adapter as a,protocol as p
+m=a.read_latest_assistant(); ex=p.extract_control_message(m.get("text"))
+assert ex.get("status")==p.S_ACCEPTED, ex.get("status")
+t=ex["task"]; print(json.dumps({"task_id":t["task_id"],"sequence":t["sequence"],"nonce":t["nonce"],"in_reply_to":t["in_reply_to"],"envelope_sha256":ex["task_envelope_sha256"]}))' "$STACK_BRIDGE" 2>&1)" || { say "WAITING_FOR_ASSISTANT (no single valid task block)"; printf 'WAITING\n' > "$LEDGER/assistant.state"; return 0; }
+  printf '%s\n' "$block" > "$LEDGER/assistant.block.json"
+  python3 - "$LEDGER/assistant.block.json" "$LEDGER/chain.at_ready" <<'PY' || die block_mismatch "assistant block does not match ready chain"
+import json,sys
+b=json.load(open(sys.argv[1])); c=dict(x.split("=",1) for x in open(sys.argv[2]).read().split())
+assert b["task_id"]=="IAP-SMOKE-008" and str(b["sequence"])==c["seq"] and b["nonce"]==c["nonce"] and b["in_reply_to"]==c["in_reply_to"]
+PY
+  printf 'VERIFIED\n' > "$LEDGER/assistant.state"
+  say "ASSISTANT_BLOCK_OK $(cat "$LEDGER/assistant.block.json")"
+}
+
+stage_round() {
+  require_root
+  [ "$(cat "$LEDGER/assistant.state" 2>/dev/null)" = VERIFIED ] || die not_verified "no verified assistant task block; refusing to run a round"
+  assert_operator_state_path
+  local now want; now="$(chain_now)"; want="$(cat "$LEDGER/chain.at_ready")"
+  [ "$now" = "$want" ] || die chain_changed "$now != $want"
+  local seq nonce reply rc=0 out verdict
+  seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"
+  nonce="$(sed -n 's/.*nonce=\([^ ]*\).*/\1/p' <<< "$want")"
+  reply="$(sed -n 's/.*in_reply_to=\([^ ]*\).*/\1/p' <<< "$want")"
+  [ -f "$HELPER" ] || die helper "round verdict helper missing: $HELPER"
+  out="$( ( cd "$STACK" && as_op env BRIDGE_DIR="$BRIDGE_DIR" /usr/bin/python3 orchestration/hermes/supervisor/campaign_cli.py run \
+      --campaign-id "$CAMPAIGN_ID" --milestone S0 --start-sequence "$seq" --start-nonce "$nonce" \
+      --start-in-reply-to "$reply" --max-rounds 1 --max-wall-seconds 900 --poll-seconds 5 ) 2>&1 )" || rc=$?
+  printf '%s\n' "$out" > "$LEDGER/round.out"
+  # Surface the structured diagnostic BEFORE judging any failure.
+  emit_round_diag "$LEDGER/round.out"
+  # Whitelisted phase summary (address index / family / elapsed only — never the raw arg).
+  diag_summary "$DIAG_SINK_DIR/events.jsonl"
+  say "ROUND_CAMPAIGN_RC=$rc"
+  # rc=3 is shared by LIMIT_REACHED and SAFETY_STOP — never treat it as pass or fail alone.
+  verdict="$(/usr/bin/python3 "$HELPER" --mode round --rc "$rc" --campaign-id "$CAMPAIGN_ID" \
+      --supervisor-root "$SUPERVISOR_ROOT" --bridge-dir "$BRIDGE_DIR" \
+      --task-id "$TASK_ID" --sequence "$seq" 2>&1)" || {
+    printf '%s\n' "$verdict"
+    die round_incomplete "$(printf '%s\n' "$verdict" | tr '\n' ' ')"
+  }
+  printf '%s\n' "$verdict"
+  say "ROUND_DONE (one bridge round, max-rounds=1, verdict=COMPLETED)"
+}
+
+stage_accept() {
+  require_root
+  [ -s "$LEDGER/round.out" ] || die accept_missing "no round record: $LEDGER/round.out"
+  [ -f "$HELPER" ] || die helper "accept verdict helper missing: $HELPER"
+  local want seq diag_task verdict
+  want="$(cat "$LEDGER/chain.at_ready")"
+  seq="$(sed -n 's/^seq=\([^ ]*\).*/\1/p' <<< "$want")"
+  diag_task="$(sed -n 's/^CAMPAIGN_ROUND_DIAG .*task_id=\([^ ]*\).*/\1/p' "$LEDGER/round.out" | tail -1)"
+  [ "$diag_task" = "$TASK_ID" ] || die accept_diag_task "diagnostic task_id='${diag_task:-MISSING}' != $TASK_ID"
+  verdict="$(/usr/bin/python3 "$HELPER" --mode accept --task-id "$TASK_ID" --sequence "$seq" \
+      --bridge-dir "$BRIDGE_DIR" --round-out "$LEDGER/round.out" \
+      --worktree "$WORKTREE" --prep-binding "$TASK_ROOT/PREP-BINDING.json" 2>&1)" || {
+    printf '%s\n' "$verdict"
+    die accept_failed "$(printf '%s\n' "$verdict" | tr '\n' ' ')"
+  }
+  printf '%s\n' "$verdict"
+  say "ACCEPT_EVIDENCE_OK sha256=$(sha256sum "$WORKTREE/EVIDENCE.txt" | awk '{print $1}')"
+}
+
+PREP_STAGES=(preflight sandbox_diag baseline worktree permissions contract binding register probe ready)
+EXEC_STAGES=(send wait round accept)
+
+status_mode() {
+  say "TASK=$TASK_ID"
+  say "ANCHOR=$ANCHOR"
+  local b
+  b="$(op_py 'import json,os,sys
+try:
+    d=json.load(open(sys.argv[1], encoding="utf-8"))
+    print("status=%s seq=%s pending=%s" % (d.get("status"), d.get("expected_sequence"), "PRESENT" if os.path.exists(sys.argv[2]) else "ABSENT"))
+except Exception as exc:
+    print("UNKNOWN:%s" % type(exc).__name__)' "$BRIDGE_DIR/state.json" "$BRIDGE_DIR/pending_result.json" 2>&1)" || b="UNKNOWN"
+  say "BRIDGE=$b"
+  say "DIAG_SINK=$(diag_sink_state)"
+  say "TASK_ROOT=$(path_state "$TASK_ROOT")"
+  say "LEDGER=$(path_state "$LEDGER")"
+  say "REGISTRY=$(registry_state)"
+  say "SUPERVISOR=$(supervisor_state)"
+  say "CONTRACT_PARENT=$(contract_parent_state)"
+  say "CONTRACT_SOURCE=$CONTRACT_SRC manifest=$(sha256sum "$CONTRACT_SRC/manifest.json" 2>/dev/null | awk '{print $1}')"
+  say "CONTRACT_TARGET=$(path_state "$PKG_DEST")"
+  say "INSTALLED_LAUNCHER=$(sha256sum "$SANDBOX_BIN" 2>/dev/null | awk '{print $1}')"
+}
+
+cleanup_selftest() { # <T> <file-list> <dir-list> — recorded paths only; no force, no rescan
+  local T="$1" CF="$2" CD="$3" f d
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -L "$f" ] || [ -e "$f" ] || continue
+    if [ -d "$f" ] && [ ! -L "$f" ]; then say "CLEANUP_FAILED dir-as-file $f"; return 1; fi
+    rm -- "$f" || { say "CLEANUP_FAILED $f"; return 1; }
+  done < "$CF"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    [ -d "$d" ] || continue
+    rmdir -- "$d" || { say "CLEANUP_FAILED $d"; return 1; }
+  done < <(sort -r "$CD" | awk '!seen[$0]++')
+  [ ! -e "$T" ] || { say "CLEANUP_FAILED $T"; return 1; }
+  rm -- "$CF" "$CD" || { say "CLEANUP_FAILED records"; return 1; }
+  return 0
+}
+
+self_test() {
+  local T; T="$(mktemp -d /var/tmp/aegl-008-selftest.XXXXXX)" || { say "SELFTEST_FAIL temp"; return 1; }
+  local CF="$T.cleanup-files" CD="$T.cleanup-dirs"
+  : > "$CF"; : > "$CD"
+  record_file() { printf '%s\n' "$1" >> "$CF"; }
+  record_dir() { printf '%s\n' "$1" >> "$CD"; }
+  record_tree() { local r="$1"; find "$r" -type f >> "$CF"; find "$r" -depth -type d >> "$CD"; }
+  record_dir "$T"
+  local pass=0 fail=0
+  ok() { pass=$((pass+1)); say "PASS $1"; }
+  no() { fail=$((fail+1)); say "FAIL $1"; }
+
+  if ( cd "$PKG" && sha256sum -c --quiet MANIFEST.sha256 ) >/dev/null 2>&1 \
+     && [ -f "$PKG/MANIFEST.sha256.sha256" ] \
+     && [ "$(awk 'NR==1{print $1}' "$PKG/MANIFEST.sha256.sha256")" = "$(sha256sum "$PKG/MANIFEST.sha256" | awk '{print $1}')" ]; then
+    ok package_integrity
+  else no package_integrity; fi
+
+  if bash -n "$PKG/bin/run_smoke.sh" && bash -n "$PKG/bin/bootstrap.sh" && bash -n "$PKG/bin/gitmeta.check"; then
+    ok syntax_shell
+  else no syntax_shell; fi
+  if python3 - "$PKG" <<'PY'
+import sys
+base=sys.argv[1]
+for n in ("iap_round_verdict.py","iap_diag_summary.py"):
+    compile(open(base+"/bin/"+n,encoding="utf-8").read(), n, "exec")
+PY
+  then ok syntax_python; else no syntax_python; fi
+
+  local C="$T/IAP-SMOKE-008" R="$T/root"
+  local compiler="/var/tmp/IAP-CONTROL-DEV/stack/specification/compiler"
+  install -d "$C" "$R/project" || true
+  cp -a "$CONTRACT_SRC"/. "$C"/ || true
+  cp "$IAP/$PLAN_FILE" "$R/project/" || true
+  record_tree "$R"
+  if [ -r "$compiler/validate_package.py" ] \
+     && python3 "$compiler/validate_package.py" "$C" --project-root "$R" >/dev/null 2>&1 \
+     && [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$C/READY.json" 2>/dev/null)" = READY ] \
+     && [ "$(sha256sum "$C/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ]; then
+    ok contract_validator
+  else no contract_validator; fi
+  if [ -r "$compiler/build_contract.py" ] \
+     && [ "$(sha256sum "$compiler/build_contract.py" | awk '{print $1}')" = "8de6d8384549195d51b5a13fe0175a743a41c5d5143219e6b9ce54a3099a770c" ] \
+     && python3 "$compiler/hash_manifest.py" "$C" >/dev/null 2>&1 \
+     && python3 "$compiler/build_contract.py" "$C" >/dev/null 2>&1 \
+     && python3 "$compiler/validate_package.py" "$C" --project-root "$R" >/dev/null 2>&1 \
+     && cmp -s "$C/manifest.json" "$CONTRACT_SRC/manifest.json" \
+     && cmp -s "$C/implementation-contract.json" "$CONTRACT_SRC/implementation-contract.json" \
+     && cmp -s "$C/EXECUTOR-PROMPT.md" "$CONTRACT_SRC/EXECUTOR-PROMPT.md"; then
+    ok contract_regeneration
+  else no contract_regeneration; fi
+  if grep -q '/var/tmp/IAP-CONTROL-DEV/stack' "$PKG/README.md" \
+     && grep -q 'f45b1ae5a34f4ee9b0c6496ff141c127e2601d1f' "$PKG/README.md" \
+     && grep -q '8de6d8384549195d51b5a13fe0175a743a41c5d5143219e6b9ce54a3099a770c' "$PKG/README.md"; then
+    ok generator_provenance
+  else no generator_provenance; fi
+  if [ "$(sha256sum "$CONTRACT_SRC/manifest.json" | awk '{print $1}')" = "$EXPECT_MANIFEST_SHA" ] \
+     && python3 - "$CONTRACT_SRC" <<'PY'
+import json,sys
+p=sys.argv[1]
+c=json.load(open(p+"/implementation-contract.json"))
+pc=json.load(open(p+"/project-context.json"))
+vi=json.load(open(p+"/verification-intent.json"))
+assert c["contract_id"]=="IAP-SMOKE-008"
+assert c["allowed_paths"]==["project"]
+assert pc["source_root"]=="/var/tmp/IAP-SMOKE-008"
+ev=[x for x in vi["cli_checks"] if x["step"]=="evidence"][0]["expected"]
+assert "exactly four labeled lines" in ev and "/var/tmp/IAP-SMOKE-008/project" in ev
+assert any(str(x.get("path", "")).startswith("project/") for x in pc["read_first"])
+prompt = open(p + "/EXECUTOR-PROMPT.md", encoding="utf-8").read()
+assert "Record the actual command, actual output, expected result and failure condition in `EVIDENCE.txt`." not in prompt
+assert "If any check fails: STOP, record the failure" not in prompt
+assert "Record evidence only in the files and format required by the frozen contract." in prompt
+assert "Put expected results, failure conditions, and supplemental reporting in the FINAL ASSISTANT RESPONSE" in prompt
+assert "exactly four labeled lines" in prompt
+assert "nothing else is written to the file" in prompt
+assert "Execution order:" in prompt
+assert "one ordered information-gathering pass" in prompt
+assert "run the four real commands once" in prompt
+assert "do not enter an autonomous repair loop" in prompt
+PY
+  then ok contract_consistency; else no contract_consistency; fi
+  record_tree "$C"
+
+  if [ -f "$PKG/payload/aegl-hermes-sandbox" ] && [ ! -L "$PKG/payload/aegl-hermes-sandbox" ] \
+     && [ "$(sha256sum "$PKG/payload/aegl-hermes-sandbox" | awk '{print $1}')" = "$SANDBOX_AFTER_SHA" ] \
+     && grep -qxF -- "$SANDBOX_ALLOWLIST" "$PKG/payload/aegl-hermes-sandbox"; then
+    ok launcher_payload
+  else no launcher_payload; fi
+  if inst_pin_launcher "$SANDBOX_BIN" \
+     && inst_pin "$BROKER_BIN" "$BROKER_SHA" root:root 644 \
+     && inst_pin "$SANDBOX_DIR/tool_event_client.py" "$TOOL_EVENT_SHA" root:root 644 \
+     && inst_pin "$SANDBOX_DIR/tool_observer_config.py" "$TOOL_OBSERVER_SHA" root:root 644 \
+     && inst_pin "$SANDBOX_DIR/guard/contract_guard.py" "$GUARD_SHA" root:root 444 \
+     && inst_pin "$SANDBOX_DIR/git_meta_mounts.sh" "$EXPECT_HELPER_SHA" root:root 755; then
+    ok installed_pins
+  else no installed_pins; fi
+  if ( stack_hashes_ok ) >/dev/null 2>&1; then ok stack_pins; else no stack_pins; fi
+
+  local pred="$T/pred-launcher" cand="$T/cand-launcher" unk="$T/unknown-launcher" link="$T/cand-link"
+  cp "$SANDBOX_BIN" "$pred"; record_file "$pred"
+  cp "$PKG/payload/aegl-hermes-sandbox" "$cand"; record_file "$cand"
+  printf 'unknown\n' > "$unk"; record_file "$unk"
+  ln -s "$cand" "$link"; record_file "$link"
+  if launcher_pin_ok "$pred" && launcher_pin_ok "$cand" \
+     && ! launcher_pin_ok "$unk" && ! launcher_pin_ok "$link"; then
+    ok launcher_prepare_admission
+  else no launcher_prepare_admission; fi
+  if ! launcher_live_ok "$pred" && launcher_live_ok "$cand" \
+     && ! launcher_live_ok "$unk" && ! launcher_live_ok "$link"; then
+    ok launcher_execute_gate
+  else no launcher_execute_gate; fi
+  mkdir -p "$T/stub"; record_dir "$T/stub"
+  cat > "$T/stub/stat" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FAKE_STAT_PIN:-root:root 755}"
+SH
+  record_file "$T/stub/stat"; chmod 0755 "$T/stub/stat"
+  if ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 755'; inst_pin_launcher "$cand" ) \
+     && ! ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 644'; inst_pin_launcher "$cand" ) \
+     && ! ( export PATH="$T/stub:$PATH"; export FAKE_STAT_PIN='root:root 755'; inst_pin_launcher "$unk" ); then
+    ok launcher_owner_mode_gate
+  else no launcher_owner_mode_gate; fi
+  if sed -n '/^verify_live_state()/,/^}/p' "$PKG/bin/run_smoke.sh" | grep -q 'launcher_live_ok'; then
+    ok live_state_candidate_pin
+  else no live_state_candidate_pin; fi
+  if sed -n '/^stage_send()/,/^}/p' "$PKG/bin/run_smoke.sh" | grep -q 'verify_live_state'; then
+    ok send_precheck
+  else no send_precheck; fi
+
+  if bridge_ok; then ok bridge_state; else no bridge_state; fi
+  local ds; ds="$(diag_sink_state)"; say "DIAG_SINK=$ds"
+  [ "$ds" = UNKNOWN ] && ok diag_sink_unknown || no diag_sink_unknown
+  mkdir -p "$T/diag-empty"; record_dir "$T/diag-empty"
+  [ "$(diag_sink_state "$T/diag-empty" "$T/diag-empty/008")" = ABSENT ] && ok diag_sink_absent || no diag_sink_absent
+  mkdir -p "$T/diag-busy/008"; record_dir "$T/diag-busy"; record_dir "$T/diag-busy/008"
+  [ "$(diag_sink_state "$T/diag-busy" "$T/diag-busy/008")" = PRESENT ] && ok diag_sink_present || no diag_sink_present
+  mkdir -p "$T/diag-0000"; chmod 0000 "$T/diag-0000"; record_dir "$T/diag-0000"
+  [ "$(diag_sink_state "$T/diag-0000" "$T/diag-0000/008")" = UNKNOWN ] && ok diag_sink_permission_unknown || no diag_sink_permission_unknown
+  chmod 0700 "$T/diag-0000"
+  ln -s "$T/diag-empty" "$T/diag-link"; record_file "$T/diag-link"
+  [ "$(diag_sink_state "$T/diag-empty" "$T/diag-link")" = UNKNOWN ] && ok diag_sink_link_unknown || no diag_sink_link_unknown
+
+  [ "$(path_state "$TASK_ROOT")" = ABSENT ] && ok task_root_absent || no task_root_absent
+  [ "$(path_state "$LEDGER")" = ABSENT ] && ok ledger_absent || no ledger_absent
+  [ "$(registry_state)" = READABLE_NO_008 ] && ok registry_no_008 || no registry_no_008
+  [ "$(supervisor_state)" = CLEAN ] && ok supervisor_clean || no supervisor_clean
+  [ "$(contract_parent_state)" = PRESENT ] && ok contract_parent_present || no contract_parent_present
+  [ "$(path_state "$PKG_DEST")" = ABSENT ] && ok contract_target_absent || no contract_target_absent
+
+  local pat
+  pat="CONT_""ACTIVE=|CONT_""REQUIRED_STAGES=|continuation_record_""ensure_prep|continuation_""preflight\(\)|--continue-""006)"
+  if ! grep -qE -- "$pat" "$PKG/bin/run_smoke.sh"; then
+    ok no_006_continuation
+  else no no_006_continuation; fi
+  if grep -q '^PREP_STAGES=(preflight sandbox_diag baseline worktree permissions contract binding register probe ready)' "$PKG/bin/run_smoke.sh"; then
+    ok prep_stage_order
+  else no prep_stage_order; fi
+  local body a b c
+  body="$(sed -n '/^stage_preflight()/,/^}/p' "$PKG/bin/run_smoke.sh")"
+  a="$(printf '%s\n' "$body" | grep -n 'diag_sink_state' | head -1 | cut -d: -f1)"
+  b="$(printf '%s\n' "$body" | grep -n 'bridge_ok' | head -1 | cut -d: -f1)"
+  c="$(printf '%s\n' "$body" | grep -nE 'mkdir -p "\$LEDGER"|install -d|cp -a' | head -1 | cut -d: -f1)"
+  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] && { [ -z "$c" ] || [ "$a" -lt "$c" ]; }; then
+    ok preflight_sink_first
+  else no preflight_sink_first; fi
+
+  say "SELFTEST pass=$pass fail=$fail"
+  if [ "$fail" -ne 0 ]; then say "SCENE_KEPT=$T"; return 1; fi
+  if cleanup_selftest "$T" "$CF" "$CD"; then
+    say "TEST_TMP_CLEANED=$T"
+    return 0
+  else
+    say "SCENE_KEPT=$T"
+    return 1
+  fi
+}
+
+main() {
+  set -Eeuo pipefail
+  FAIL_MARK="${TMPDIR:-/tmp}/.iap-smoke-fail.$$"; export FAIL_MARK
+  rm -f "$FAIL_MARK" 2>/dev/null || if [ -e "$FAIL_MARK" ]; then say "FAIL_MARK_CLEANUP_FAILED"; fi
+  trap 'rc=$?; if [ "$rc" -ne 0 ] && [ "$FAIL_REPORTED" != 1 ] && { [ ! -e "${FAIL_MARK:-/nonexistent}" ]; }; then printf "SMOKE_ABORT stage=%s rc=%s cmd=%.160s\n" "${CURRENT_STAGE:-none}" "$rc" "$BASH_COMMAND" >&2; fi' EXIT
+  local mode=prep only=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --execute) mode=execute; shift ;;
+    --stage) only="${2:-}"; shift 2 ;;
+    --status) mode=status; shift ;;
+    *) die usage "$1" ;;
+  esac; done
+  if [ "$mode" = status ]; then status_mode; return 0; fi
+  local stages=()
+  if [ -n "${SMOKE_PREP_STAGES:-}" ]; then IFS=: read -r -a stages <<< "$SMOKE_PREP_STAGES"
+  else stages=("${PREP_STAGES[@]}"); fi
+  if [ "$mode" = execute ]; then stages+=("${EXEC_STAGES[@]}"); fi
+  if [ -n "$only" ]; then CURRENT_STAGE="$only"; "stage_${only//-/_}"; mark "$only"; return 0; fi
+  local s
+  local force=" preflight verify_live_state "
+  for s in "${stages[@]}"; do
+    case "$force" in *" $s "*) : ;; *) if done_marker "$s"; then say "SKIP $s (done)"; continue; fi ;; esac
+    CURRENT_STAGE="$s"; "stage_${s//-/_}"; mark "$s"
+  done
+  if [ "$mode" = prep ]; then
+    verify_live_state
+    bridge_ok || die bridge_before_prep "$(chain_now)"
+    [ "$(cat "$LEDGER/chain.before_prep" 2>/dev/null)" = "$(chain_now)" ] \
+      || die chain_changed_during_prep "$(chain_now) != $(cat "$LEDGER/chain.before_prep" 2>/dev/null)"
+    [ ! -e "$WORKTREE/EVIDENCE.txt" ] || die evidence_created "prep must never create EVIDENCE.txt"
+    say "BRIDGE_OK status=WAITING_FOR_GPT seq=$EXPECT_BRIDGE_SEQ pending=ABSENT unchanged_during_prep=1"
+    say "PREP_COMPLETE (live state verified; no model called, nothing sent, no EVIDENCE.txt)"
+  fi
+}
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-}" in
+    --self-test) self_test; exit $? ;;
+    *) main "$@" ;;
+  esac
+fi

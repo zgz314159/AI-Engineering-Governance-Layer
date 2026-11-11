@@ -1,0 +1,27 @@
+{
+  "contract_sha256": "3be441e26f8d4672a0341f5b4ba0db932773f4639594a6360cdc553e890572b8",
+  "errors": [],
+  "gates": {
+    "acceptance": "PASS",
+    "boundaries": "PASS",
+    "hashes": "PASS",
+    "schema": "PASS",
+    "traceability": "PASS"
+  },
+  "manifest_sha256": "12931e961343ed2f9b8975ceb703f169427f61bbdc8c13bb9d804d94216527f1",
+  "status": "READY",
+  "traceability": [
+    {
+      "acceptance_ids": [
+        "AC-IAP-001"
+      ],
+      "pc1_steps": [
+        "PC1-01"
+      ],
+      "requirement": "REQ-IAP-001",
+      "task_ids": [
+        "TASK-01"
+      ]
+    }
+  ]
+}
