@@ -1,5 +1,10 @@
 # AI Engineering Governance Layer
 
+当前 Linux 系统的使用入口见 **[AEGL 中文操作说明](docs/SYSTEM-USAGE.zh-CN.md)**。
+它说明治理 CLI、受控模型沙箱、项目状态与任务登记的区别，并指向 Stack 的完整
+浏览器／Bridge 教程。本文下方的 Windows bootstrap 是治理层 fixture 验证，不能
+当作现有 Linux 受控系统的日常启动或一键安装。
+
 这是一个**独立治理层母项目**，用来验证下面 6 个组件能否形成闭环，而不依赖任何真实业务项目：
 
 1. GitHub Spec Kit
@@ -115,10 +120,11 @@ aegl continuity history            # 历史快照列表
 aegl continuity check              # 诊断（不参与 release gate）
 ```
 
-产物（默认在 `.aegl/continuity/`，本地运行态、已被 `.gitignore` 忽略）：
+产物（按 `core/continuity/paths.py` 默认写入外部 XDG 状态目录，
+不写入正式项目；项目键由规范绝对路径生成）：
 
 ```text
-.aegl/continuity/
+~/.local/state/aegl/projects/<project-key>/continuity/
 ├── state.json          # 机器事实主状态（canonical）
 ├── HANDOFF.md          # 人/Agent 可读投影（warm）
 ├── NEXT-SESSION.md     # 极短热上下文（hot）
@@ -129,8 +135,9 @@ aegl continuity check              # 诊断（不参与 release gate）
 
 机器事实（Git / HEAD / branch / dirty / VERSION / CI）由程序采集；语义事实
 （goal / completed / inProgress / blocked / failedApproaches / doNotRepeat /
-nextAction 等）可由 Agent 通过 `--goal` 等参数或 `.aegl/continuity/work.json`
-提供。`resume` 只做一次轻量检查，CI 状态仅展示、不作为硬门禁。
+nextAction 等）可由 Agent 通过 `--goal` 等参数或外部 continuity 目录中的 `work.json`
+提供。该 `work.json` 位于上述外部 continuity 目录，不是正式项目里的文件。
+`resume` 只做一次轻量检查，CI 状态仅展示、不作为硬门禁。
 
 ## AEGL Persistent Work Memory（v1.4，可选）
 
@@ -171,7 +178,8 @@ aegl bd <bd args...>               # 用 AEGL 环境直通 bd（create/claim/clo
 
 隔离与安全：
 
-- 数据目录：`BEADS_DIR=<repo>/.aegl/beads`（父目录 `.aegl/` 由 AEGL 预创建）。
+- 默认数据目录：`BEADS_DIR=~/.local/share/aegl/projects/<project-key>/beads`；
+  `AEGL_BEADS_DIR` 可指定外部目录。以 `core/continuity/paths.py` 为准。
 - `bd init --stealth`：不写 AGENTS.md / CLAUDE.md / `.claude` / `.codex` /
   `.cursor`，不装 Git hooks，不产生 commit。**RuleSync 仍是 Agent 规则的唯一来源。**
 - 绝不执行 `bd setup claude|codex|cursor|...`。
