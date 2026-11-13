@@ -44,6 +44,21 @@ die() {
 sha() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
 need() { command -v "$1" >/dev/null 2>&1 || die missing_tool "$1"; }
 
+# One command-level exact safe.directory for the queried repository. The rc and the
+# combined output are captured separately; callers must check GIT_RC before judging.
+GIT_OUT=""
+GIT_RC=0
+git_capture() { # <repository-dir> <git args...>
+  local dir="$1"; shift
+  GIT_OUT="$(git -c safe.directory="$dir" -C "$dir" "$@" 2>&1)"
+  GIT_RC=$?
+}
+git_capture_worktree() { # <worktree-dir> <common-repository-dir> <git args...>
+  local wt="$1" common="$2"; shift 2
+  GIT_OUT="$(git -c safe.directory="$wt" -c safe.directory="$common" -C "$wt" "$@" 2>&1)"
+  GIT_RC=$?
+}
+
 stage_source() {
   CURRENT_STAGE=source
   for tool in python3 git sha256sum awk realpath setpriv setfacl; do need "$tool"; done
@@ -53,15 +68,19 @@ stage_source() {
   [ "$(sha "$CONTRACT_SRC/inputs/INPUTS.sha256")" = "$INPUTS_SHA" ] || die inputs_pin_tampered "INPUTS.sha256"
   ( cd "$CONTRACT_SRC/inputs" && sha256sum --strict -c INPUTS.sha256 >/dev/null ) || die input_hash_mismatch "INPUTS.sha256"
   [ -d "$STACK/.git" ] || die stack_missing "$STACK"
-  [ "$(git -C "$STACK" rev-parse HEAD 2>/dev/null)" = "$STACK_COMMIT" ] \
-    || die stack_commit_mismatch "$(git -C "$STACK" rev-parse HEAD 2>/dev/null)"
-  [ -z "$(git -C "$STACK" status --porcelain -- specification/compiler specification/contracts specification/tests/fixtures/valid_package specification/VERSION 2>/dev/null)" ] \
-    || die stack_source_dirty "compiler/fixture/schema/VERSION"
+  git_capture "$STACK" rev-parse HEAD
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "stack rev-parse HEAD rc=$GIT_RC output=$GIT_OUT"
+  [ "$GIT_OUT" = "$STACK_COMMIT" ] || die stack_commit_mismatch "$GIT_OUT"
+  git_capture "$STACK" status --porcelain -- specification/compiler specification/contracts specification/tests/fixtures/valid_package specification/VERSION
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "stack status rc=$GIT_RC output=$GIT_OUT"
+  [ -z "$GIT_OUT" ] || die stack_source_dirty "$GIT_OUT"
   [ -d "$IAP/.git" ] || die project_missing "$IAP"
-  [ "$(git -c safe.directory="$IAP" -C "$IAP" rev-parse HEAD 2>/dev/null)" = "$IAP_BASE" ] \
-    || die project_base_mismatch "$(git -c safe.directory="$IAP" -C "$IAP" rev-parse HEAD 2>/dev/null)"
-  [ -z "$(git -c safe.directory="$IAP" -C "$IAP" status --porcelain 2>/dev/null)" ] \
-    || die project_dirty "$IAP"
+  git_capture "$IAP" rev-parse HEAD
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "project rev-parse HEAD rc=$GIT_RC output=$GIT_OUT"
+  [ "$GIT_OUT" = "$IAP_BASE" ] || die project_base_mismatch "$GIT_OUT"
+  git_capture "$IAP" status --porcelain
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "project status rc=$GIT_RC output=$GIT_OUT"
+  [ -z "$GIT_OUT" ] || die project_dirty "$GIT_OUT"
   [ -f "$REGISTER" ] && [ -x "$REGISTER" ] || die register_missing "$REGISTER"
   [ -f "$REGISTRY" ] || die registry_missing "$REGISTRY"
   say "SOURCE_OK stack=$STACK_COMMIT project=$IAP_BASE inputs=$(wc -l < "$CONTRACT_SRC/inputs/INPUTS.sha256")"
@@ -69,15 +88,28 @@ stage_source() {
 
 stage_preflight() {
   CURRENT_STAGE=preflight
-  python3 -B - "$REGISTRY" "$TASK_ID" <<'PY' || die identity_used "$TASK_ID is already registered (no overwrite, no cleanup, no retry)"
+  python3 -B - "$REGISTRY" "$TASK_ID" <<'PY'
 import json, sys
-registry = json.load(open(sys.argv[1], encoding="utf-8"))
+try:
+    registry = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit(4)
 raise SystemExit(3 if sys.argv[2] in registry else 0)
 PY
-  for path in "$TASK_ROOT" "$PKG_DEST"; do
-    [ -e "$path" ] && die scene_exists "$path exists (preserved; no overwrite, no cleanup, no retry)"
+  local identity_rc=$?
+  case "$identity_rc" in
+    0) ;;
+    3) die identity_used "$TASK_ID is already registered (no overwrite, no cleanup, no retry)" ;;
+    *) die registry_query_failed "registry query rc=$identity_rc" ;;
+  esac
+  for path in "$TASK_ROOT" "$PKG_DEST" "$TASK_ROOT.tmp" "$PKG_DEST.tmp"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      die scene_exists "$path exists or is a link (preserved; no overwrite, no cleanup, no retry)"
+    fi
   done
-  if git -c safe.directory="$IAP" -C "$IAP" worktree list --porcelain 2>/dev/null | grep -qxF -- "worktree $WORKTREE"; then
+  git_capture "$IAP" worktree list --porcelain
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "worktree list rc=$GIT_RC output=$GIT_OUT"
+  if printf '%s\n' "$GIT_OUT" | grep -qxF -- "worktree $WORKTREE"; then
     die worktree_registered "the worktree is already registered (preserved; no prune)"
   fi
   say "PREFLIGHT_OK identity_unused=1 scene_absent=1"
@@ -118,8 +150,8 @@ stage_scene() {
   require_root
   install -d -m 0750 -o root -g root "$TASK_ROOT" || die task_root "$TASK_ROOT"
   write_pin "" || die pin_initial "$TASK_ROOT/INPUTS-PIN.json"
-  git -c safe.directory="$IAP" -c safe.directory="$WORKTREE" -C "$IAP" \
-    worktree add --detach "$WORKTREE" "$IAP_BASE" || die worktree_add "$WORKTREE"
+  git_capture "$IAP" worktree add --detach "$WORKTREE" "$IAP_BASE"
+  [ "$GIT_RC" -eq 0 ] || die worktree_add "rc=$GIT_RC output=$GIT_OUT"
   chown -R "$AI_USER:$AI_USER" "$WORKTREE" || die worktree_chown "$WORKTREE"
   chmod -R u=rwX,go=rX "$WORKTREE" || die worktree_chmod "$WORKTREE"
   install -d -o "$AI_USER" -g "$AI_USER" -m 0750 "$SCRATCH" || die scratch "$SCRATCH"
@@ -137,8 +169,9 @@ stage_scene() {
   setpriv --reuid="$ai_uid" --regid="$ai_gid" --clear-groups --no-new-privs -- \
     python3 -I -c 'import os,sys; sys.exit(0 if os.access(sys.argv[1], os.W_OK) and os.access(sys.argv[2], os.W_OK) else 1)' \
     "$WORKTREE" "$SCRATCH" || die ai_permission "$AI_USER cannot write the worktree/scratch"
-  [ "$(git -c safe.directory="$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>/dev/null)" = "$IAP_BASE" ] \
-    || die worktree_head "$WORKTREE"
+  git_capture_worktree "$WORKTREE" "$IAP" rev-parse HEAD
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "worktree rev-parse HEAD rc=$GIT_RC output=$GIT_OUT"
+  [ "$GIT_OUT" = "$IAP_BASE" ] || die worktree_head "$GIT_OUT"
   say "SCENE_OK worktree=$WORKTREE scratch=$SCRATCH"
 }
 

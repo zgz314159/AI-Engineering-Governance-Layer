@@ -39,6 +39,29 @@ RESULT_REL = PurePosixPath("RESULT.json")
 PIN_FILE = "INPUTS-PIN.json"
 SHA_LINE = re.compile(r"^([0-9a-f]{64})  (.+)$")
 
+# Frozen fixture-authored inputs (specification/compiler/spec_lib.py AUTHORED).
+EXPECTED_MANIFEST_PATHS = frozenset({
+    "PRODUCT.md",
+    "requirements.md",
+    "design.md",
+    "tasks.md",
+    "DESIGN.md",
+    "acceptance.md",
+    "project-context.json",
+    "verification-intent.json",
+})
+# Frozen READY gates (specification/compiler/validate_package.py GATES).
+FROZEN_GATES = frozenset({"schema", "traceability", "boundaries", "acceptance", "hashes"})
+# Frozen acceptance baseline for this task.
+FROZEN_VALUES = {
+    "fixture_id": FIXTURE_ID,
+    "manifest_entries": 8,
+    "requirements": 1,
+    "tasks": 1,
+    "validator_status": "READY",
+    "errors": 0,
+}
+
 
 class Fail(Exception):
     def __init__(self, code: str, detail: str):
@@ -109,6 +132,12 @@ def check_manifest(copy_dir: Path) -> dict:
         if actual != digest:
             raise Fail("MANIFEST_HASH", "manifest member %s sha256 %s != %s" % (rel, actual, digest))
         artifact_hashes[str(rel)] = digest
+    paths = frozenset(artifact_hashes)
+    missing = sorted(EXPECTED_MANIFEST_PATHS - paths)
+    extra = sorted(paths - EXPECTED_MANIFEST_PATHS)
+    if missing or extra:
+        raise Fail("MANIFEST_SET", "manifest members differ from the frozen authored set: missing=%s extra=%s"
+                   % (missing, extra))
     return {"count": len(entries), "hashes": artifact_hashes}
 
 
@@ -126,6 +155,8 @@ def check_contract(copy_dir: Path, accepted: dict) -> dict:
     artifact_hashes = contract.get("artifact_hashes")
     if not isinstance(artifact_hashes, dict):
         raise Fail("BAD_CONTRACT", "artifact_hashes is not an object")
+    if frozenset(artifact_hashes) != frozenset(accepted["hashes"]):
+        raise Fail("CONTRACT_HASHES", "artifact_hashes set does not equal the manifest member set")
     for path, digest in accepted["hashes"].items():
         if artifact_hashes.get(path) != digest:
             raise Fail("CONTRACT_HASHES", "artifact_hashes mismatch for %s" % path)
@@ -149,11 +180,15 @@ def check_report(copy_dir: Path) -> dict:
     if errors:
         raise Fail("VALIDATOR_ERRORS", "validator reported %d error(s)" % len(errors))
     gates = report.get("gates")
-    if not isinstance(gates, dict) or not gates:
+    if not isinstance(gates, dict):
         raise Fail("BAD_REPORT", "validation report gates is missing")
-    for gate, value in gates.items():
-        if value != "PASS":
-            raise Fail("GATE_FAIL", "gate %s is %r" % (gate, value))
+    got_gates = frozenset(gates)
+    if got_gates != FROZEN_GATES:
+        raise Fail("GATE_SET", "gates differ from the frozen five: missing=%s extra=%s"
+                   % (sorted(FROZEN_GATES - got_gates), sorted(got_gates - FROZEN_GATES)))
+    for gate in sorted(FROZEN_GATES):
+        if gates.get(gate) != "PASS":
+            raise Fail("GATE_FAIL", "gate %s is %r" % (gate, gates.get(gate)))
     for field, target in (("manifest_sha256", "manifest.json"),
                           ("contract_sha256", "implementation-contract.json")):
         recorded = report.get(field)
@@ -379,6 +414,10 @@ def main(argv=None) -> int:
             "validator_status": report["status"],
             "errors": report["errors"],
         }
+        for name, frozen in FROZEN_VALUES.items():
+            if actual.get(name) != frozen:
+                raise Fail("FROZEN_MISMATCH", "actual %s is %r, frozen baseline requires %r"
+                           % (name, actual.get(name), frozen))
         result = check_result(worktree / RESULT_REL, actual)
         if ready != report["status"]:
             raise Fail("READY_MISMATCH", "READY.json and validation-report.json differ")
