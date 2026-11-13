@@ -41,7 +41,7 @@ Entry pins:
 
 | File | SHA-256 |
 | --- | --- |
-| `prepare.sh` | `1600dbfc4e5d79bd8df60d620b8ab1a0baa56774dfb08a9f059f623f81e59c02` |
+| `prepare.sh` | `60a7babe5a3df5d1ce2512637f00a1b4ea875a2974ecaa7751570f0d1d58d6f0` |
 | `accept.py` | `a554931771b1498d462f68adfd1852e61824faccfcfcfc142b938f7493f77bdd` |
 | `SOURCE.sha256` | `958c89103edc05df35997e4891ebfafde8101ab93871289f34091274c233c6a1` |
 
@@ -53,7 +53,7 @@ set -euo pipefail
 umask 077
 SRC=/var/tmp/IAP-CONTROL-DEV/aegl/recovery/system_e2e_001
 BASE=/var/lib/aegl-model/prep-entry
-ENTRY_SHA=1600dbfc4e5d79bd8df60d620b8ab1a0baa56774dfb08a9f059f623f81e59c02
+ENTRY_SHA=60a7babe5a3df5d1ce2512637f00a1b4ea875a2974ecaa7751570f0d1d58d6f0
 ACCEPT_SHA=a554931771b1498d462f68adfd1852e61824faccfcfcfc142b938f7493f77bdd
 SOURCE_SHA=958c89103edc05df35997e4891ebfafde8101ab93871289f34091274c233c6a1
 [ ! -L "$BASE" ] || { echo "ENTRY_FAIL base_link" >&2; exit 1; }

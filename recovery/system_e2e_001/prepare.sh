@@ -117,6 +117,52 @@ PY
 
 require_root() { [ "$(id -u)" -eq 0 ] || die not_root "full preparation requires root"; }
 
+operator_home() {
+  python3 -B -c 'import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)' "$OPERATOR"
+}
+
+operator_git() { # <worktree> <git args...>; runs as the Bridge user with exact safe.directory
+  local wt="$1"; shift
+  local op_uid op_gid op_home
+  op_uid="$(id -u "$OPERATOR" 2>/dev/null)" || return 1
+  op_gid="$(id -g "$OPERATOR" 2>/dev/null)" || return 1
+  op_home="$(operator_home)" || return 1
+  setpriv --reuid="$op_uid" --regid="$op_gid" --clear-groups --no-new-privs -- \
+    env -i HOME="$op_home" PATH="/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+      GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+      git -c safe.directory="$wt" -c safe.directory="$IAP" -C "$wt" "$@" 2>&1
+}
+
+stage_bridge_git_check() { # <worktree> <git-dir>
+  local wt="$1" git_dir="$2" out rc bad
+  bad="$(setpriv --reuid="$(id -u "$OPERATOR")" --regid="$(id -g "$OPERATOR")" --clear-groups --no-new-privs -- \
+    python3 -I -c 'import os,sys
+bad=[]
+for p in sys.argv[1:]:
+    need = os.R_OK | os.X_OK if os.path.isdir(p) else os.R_OK
+    if not os.access(p, need):
+        bad.append(p)
+print(" ".join(bad))
+raise SystemExit(1 if bad else 0)' \
+    "$wt" "$wt/.git" "$git_dir" "$git_dir/gitdir" "$git_dir/commondir" "$git_dir/HEAD")" \
+    || die bridge_git_access "$OPERATOR cannot traverse/read: $bad"
+  out="$(operator_git "$wt" rev-parse --show-toplevel)"; rc=$?
+  [ "$rc" -eq 0 ] || die bridge_git_query "rev-parse --show-toplevel rc=$rc output=$out"
+  [ "$out" = "$wt" ] || die bridge_git_toplevel "$out"
+  out="$(operator_git "$wt" rev-parse --git-common-dir)"; rc=$?
+  [ "$rc" -eq 0 ] || die bridge_git_query "rev-parse --git-common-dir rc=$rc output=$out"
+  case "$out" in /*) ;; *) out="$wt/$out" ;; esac
+  [ "$(realpath -e "$out" 2>/dev/null)" = "$(realpath -e "$IAP/.git" 2>/dev/null)" ] \
+    || die bridge_git_common "$out"
+  out="$(operator_git "$wt" rev-parse HEAD)"; rc=$?
+  [ "$rc" -eq 0 ] || die bridge_git_query "rev-parse HEAD rc=$rc output=$out"
+  [ "$out" = "$IAP_BASE" ] || die bridge_git_head "$out"
+  out="$(operator_git "$wt" status --porcelain)"; rc=$?
+  [ "$rc" -eq 0 ] || die bridge_git_query "status --porcelain rc=$rc output=$out"
+  [ -z "$out" ] || die bridge_git_dirty "$out"
+  say "BRIDGE_GIT_OK operator=$OPERATOR toplevel=$wt common=$IAP/.git head=$IAP_BASE status=clean"
+}
+
 write_pin() { # <manifest_sha256>
   python3 -B - "$TASK_ROOT/INPUTS-PIN.json" "$TASK_ID" "$WORKTREE" "$SCRATCH" "$IAP" \
     "$PKG_DEST" "$1" "$INPUTS_SHA" "$STACK_COMMIT" "$IAP_BASE" <<'PY' || return 1
@@ -150,10 +196,29 @@ stage_scene() {
   require_root
   install -d -m 0750 -o root -g root "$TASK_ROOT" || die task_root "$TASK_ROOT"
   write_pin "" || die pin_initial "$TASK_ROOT/INPUTS-PIN.json"
+  local saved_umask wt_rc wt_out
+  saved_umask="$(umask)"
+  umask 022
   git_capture "$IAP" worktree add --detach "$WORKTREE" "$IAP_BASE"
-  [ "$GIT_RC" -eq 0 ] || die worktree_add "rc=$GIT_RC output=$GIT_OUT"
+  wt_rc="$GIT_RC"; wt_out="$GIT_OUT"
+  umask "$saved_umask"
+  [ "$wt_rc" -eq 0 ] || die worktree_add "rc=$wt_rc output=$wt_out"
   chown -R "$AI_USER:$AI_USER" "$WORKTREE" || die worktree_chown "$WORKTREE"
   chmod -R u=rwX,go=rX "$WORKTREE" || die worktree_chmod "$WORKTREE"
+  git_capture_worktree "$WORKTREE" "$IAP" rev-parse --absolute-git-dir
+  [ "$GIT_RC" -eq 0 ] || die git_query_failed "worktree absolute-git-dir rc=$GIT_RC output=$GIT_OUT"
+  local git_dir="$GIT_OUT"
+  case "$git_dir" in "$IAP"/.git/worktrees/*) ;; *) die worktree_gitdir "$git_dir" ;; esac
+  [ -d "$git_dir" ] && [ ! -L "$git_dir" ] || die worktree_gitdir "$git_dir"
+  chmod 0755 "$git_dir" || die gitdir_mode "$git_dir"
+  local meta
+  for meta in gitdir commondir HEAD index ORIG_HEAD; do
+    [ ! -e "$git_dir/$meta" ] || chmod 0644 "$git_dir/$meta" || die gitdir_mode "$git_dir/$meta"
+  done
+  for meta in logs refs; do
+    [ ! -e "$git_dir/$meta" ] || chmod 0755 "$git_dir/$meta" || die gitdir_mode "$git_dir/$meta"
+  done
+  [ ! -e "$git_dir/logs/HEAD" ] || chmod 0644 "$git_dir/logs/HEAD" || die gitdir_mode "$git_dir/logs/HEAD"
   install -d -o "$AI_USER" -g "$AI_USER" -m 0750 "$SCRATCH" || die scratch "$SCRATCH"
   if command -v setfacl >/dev/null 2>&1; then
     setfacl -m u:"$AI_USER":x "$TASK_ROOT" || die acl_ai "$TASK_ROOT"
@@ -163,6 +228,7 @@ stage_scene() {
   else
     die setfacl_missing "ACL support is required for task-root traversal"
   fi
+  stage_bridge_git_check "$WORKTREE" "$git_dir"
   local ai_uid ai_gid
   ai_uid="$(id -u "$AI_USER" 2>/dev/null)" || die ai_user_missing "$AI_USER"
   ai_gid="$(id -g "$AI_USER" 2>/dev/null)" || die ai_user_missing "$AI_USER"
