@@ -1,0 +1,57 @@
+{
+  "feature_id": "SYSTEM-E2E-COMPILE",
+  "journey_id": "SYSTEM-E2E-RUN",
+  "engine": "cli",
+  "acceptance_ids": [
+    "AC-SYSE2E-002"
+  ],
+  "required_selectors": [],
+  "cli_checks": [
+    {
+      "step": "inputs",
+      "command": "cd \"$HERMES_CONTRACT_PACKAGE/inputs\" && sha256sum -c INPUTS.sha256",
+      "expected": "every listed fixture, compiler and schema file reports OK and the command exits 0",
+      "on_failure": "stop; report the failing path and actual output in the FINAL ASSISTANT RESPONSE; do not fetch an alternate source"
+    },
+    {
+      "step": "copy",
+      "command": "mkdir -p e2e && cp -a \"$HERMES_CONTRACT_PACKAGE/inputs/fixture\" e2e/valid_package && test -d e2e/valid_package",
+      "expected": "e2e/valid_package exists in the worktree as an independent copy of the frozen fixture",
+      "on_failure": "stop; report the actual error in the FINAL ASSISTANT RESPONSE; do not modify the input bundle"
+    },
+    {
+      "step": "hash-manifest",
+      "command": "python3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/compiler/hash_manifest.py\" e2e/valid_package",
+      "expected": "exit 0 and a line reporting MANIFEST=WROTE entries=8 package=valid_package",
+      "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not retry or repair"
+    },
+    {
+      "step": "build-contract",
+      "command": "python3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/compiler/build_contract.py\" e2e/valid_package",
+      "expected": "exit 0 and a line reporting CONTRACT=WROTE id=FIXTURE-B1-CONTRACT requirements=1 tasks=1",
+      "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not retry or repair"
+    },
+    {
+      "step": "validate",
+      "command": "python3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/compiler/validate_package.py\" e2e/valid_package --project-root e2e/valid_package/project",
+      "expected": "exit 0 and a line reporting STATUS=READY with every gate PASS and errors=0",
+      "on_failure": "stop; report the actual command, exit code and output in the FINAL ASSISTANT RESPONSE; do not retry or repair"
+    },
+    {
+      "step": "result",
+      "command": "test -s RESULT.json && python3 -B -m json.tool RESULT.json >/dev/null",
+      "expected": "RESULT.json exists at the worktree root, is valid JSON and has exactly the seven declared keys with values equal to the generated artifacts",
+      "on_failure": "stop; report the actual failure in the FINAL ASSISTANT RESPONSE; do not synthesize or repair RESULT.json"
+    }
+  ],
+  "persistence_checks": [
+    "RESULT.json persists at the worktree root (contract path project/RESULT.json) with exactly the seven declared keys",
+    "The compiled copy persists under e2e/valid_package with manifest.json, implementation-contract.json, validation-report.json and READY.json"
+  ],
+  "rotation_checks": [],
+  "search_checks": [
+    "RESULT.json values equal len(manifest.json.entries), len(implementation-contract.json.requirements), len(implementation-contract.json.tasks), validation-report.json.status and len(validation-report.json.errors); no expected count is embedded"
+  ],
+  "fixture_intent": "The frozen valid_package fixture is copied from the contract input bundle into the disposable worktree; the fixture source is never edited.",
+  "oracle_intent": "Deterministic host acceptance: recompute manifest member hashes and declared input hashes, re-read all generated artifacts, and reject any missing file, extra field, wrong type, invalid JSON or inconsistent summary."
+}
