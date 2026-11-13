@@ -1,0 +1,12 @@
+{
+  "feature_id": "FIXTURE",
+  "journey_id": "PC1-FIXTURE",
+  "engine": "uiautomator",
+  "acceptance_ids": ["AC-FIX-001"],
+  "required_selectors": ["fixture-action"],
+  "persistence_checks": ["state survives restart"],
+  "rotation_checks": ["state survives rotation"],
+  "search_checks": ["search unchanged"],
+  "fixture_intent": "Seed one fixture item.",
+  "oracle_intent": "Assert the fixture-action control is reachable."
+}

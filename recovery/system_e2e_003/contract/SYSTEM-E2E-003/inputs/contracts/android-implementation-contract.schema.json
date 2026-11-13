@@ -1,0 +1,286 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://android-agent-stack/specification/contracts/android-implementation-contract.schema.json",
+  "title": "Android Implementation Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "contract_id",
+    "experiment_id",
+    "experiment_type",
+    "matched_control_available",
+    "project",
+    "mode",
+    "feature",
+    "artifact_refs",
+    "artifact_hashes",
+    "scope",
+    "non_goals",
+    "decisions",
+    "assumptions",
+    "read_first",
+    "allowed_paths",
+    "forbidden_paths",
+    "requirements",
+    "acceptance_ids",
+    "data_change",
+    "ui_change",
+    "selector_contract",
+    "tasks",
+    "verification_intent",
+    "stop_conditions",
+    "unresolved_questions",
+    "readiness"
+  ],
+  "properties": {
+    "contract_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "contract_id": { "type": "string", "minLength": 1 },
+    "experiment_id": { "type": "string", "minLength": 1 },
+    "experiment_type": { "type": "string", "enum": ["SPEC_FIRST_BROWNFIELD", "SPEC_FIRST_GREENFIELD"] },
+    "matched_control_available": { "type": "boolean" },
+    "project": { "type": "string", "minLength": 1 },
+    "mode": { "type": "string", "enum": ["brownfield", "greenfield"] },
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "title", "summary"],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "artifact_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "path", "required", "source"],
+        "properties": {
+          "role": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" },
+          "source": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "artifact_hashes": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    },
+    "scope": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "non_goals": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement", "rationale"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^DEC-[0-9]{3}$" },
+          "statement": { "type": "string", "minLength": 1 },
+          "rationale": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^ASM-[0-9]{3}$" },
+          "statement": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "read_first": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "why"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "why": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "allowed_paths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "forbidden_paths": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "statement", "acceptance_ids", "task_ids"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^REQ-[A-Z0-9]+-[0-9]{3}$" },
+          "statement": { "type": "string", "minLength": 1 },
+          "acceptance_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^AC-[A-Z0-9]+-[0-9]{3}$" } },
+          "task_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^TASK-[0-9]{2}$" } }
+        }
+      }
+    },
+    "acceptance_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^AC-[A-Z0-9]+-[0-9]{3}$" }
+    },
+    "data_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version_current", "schema_version_target", "migration_required", "notes"],
+      "properties": {
+        "schema_version_current": { "type": "integer", "minimum": 0 },
+        "schema_version_target": { "type": "integer", "minimum": 0 },
+        "migration_required": { "type": "boolean" },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ui_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surfaces", "selectors_added"],
+      "properties": {
+        "surfaces": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "selectors_added": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "selector_contract": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "compose_test_tag", "uiautomator", "state", "required"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "compose_test_tag": { "type": "string", "minLength": 1 },
+          "uiautomator": { "type": "string", "minLength": 1 },
+          "state": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "goal", "boundary", "depends", "allowed_paths", "acceptance_ids", "verification", "done_when"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^TASK-[0-9]{2}$" },
+          "goal": { "type": "string", "minLength": 1 },
+          "boundary": { "type": "string", "minLength": 1 },
+          "depends": { "type": "array", "items": { "type": "string", "pattern": "^TASK-[0-9]{2}$" } },
+          "allowed_paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "acceptance_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^AC-[A-Z0-9]+-[0-9]{3}$" } },
+          "verification": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "done_when": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "verification_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feature_id",
+        "journey_id",
+        "engine",
+        "acceptance_ids",
+        "required_selectors",
+        "persistence_checks",
+        "rotation_checks",
+        "search_checks",
+        "fixture_intent",
+        "oracle_intent"
+      ],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "journey_id": { "type": "string", "minLength": 1 },
+        "engine": { "type": "string", "enum": ["uiautomator", "maestro", "cli"] },
+        "acceptance_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^AC-[A-Z0-9]+-[0-9]{3}$" } },
+        "required_selectors": { "type": "array", "minItems": 0, "items": { "type": "string", "minLength": 1 } },
+        "cli_checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["step", "command", "expected", "on_failure"],
+            "properties": {
+              "step": { "type": "string", "minLength": 1 },
+              "command": { "type": "string", "minLength": 1 },
+              "expected": { "type": "string", "minLength": 1 },
+              "on_failure": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "persistence_checks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "rotation_checks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "search_checks": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "fixture_intent": { "type": "string", "minLength": 1 },
+        "oracle_intent": { "type": "string", "minLength": 1 }
+      },
+      "if": {
+        "properties": { "engine": { "const": "cli" } },
+        "required": ["engine"]
+      },
+      "then": {
+        "required": ["cli_checks"]
+      },
+      "else": {
+        "properties": { "required_selectors": { "minItems": 1 } }
+      }
+    },
+    "stop_conditions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "unresolved_questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "question"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "question": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "gates"],
+      "properties": {
+        "status": { "type": "string", "enum": ["READY", "NOT_READY"] },
+        "gates": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "enum": ["PASS", "FAIL"] }
+        }
+      }
+    }
+  },
+  "if": {
+    "properties": {
+      "verification_intent": {
+        "properties": { "engine": { "const": "cli" } },
+        "required": ["engine"]
+      }
+    },
+    "required": ["verification_intent"]
+  },
+  "then": {
+    "properties": { "selector_contract": { "minItems": 0 } }
+  },
+  "else": {
+    "properties": { "selector_contract": { "minItems": 1 } }
+  }
+}

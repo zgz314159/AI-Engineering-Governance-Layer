@@ -1,0 +1,36 @@
+{
+  "project": "ImageAnalysisFactory",
+  "project_type": "brownfield",
+  "source_root": "/var/tmp/SYSTEM-E2E-003",
+  "read_first": [
+    {
+      "path": "/var/tmp/SYSTEM-E2E-003/INPUTS-PIN.json",
+      "why": "root-authored pin of the declared input bundle, fixture identity and compiler hashes"
+    }
+  ],
+  "allowed_paths": [
+    "project"
+  ],
+  "forbidden_paths": [],
+  "path_classes": {
+    "EVIDENCE_OUTPUT": [
+      "project/RESULT.json"
+    ],
+    "CONTRACT_INPUT": [
+      "project/e2e/valid_package"
+    ]
+  },
+  "boundary_notes": {
+    "source_root": "/var/tmp/SYSTEM-E2E-003",
+    "unlisted_is_blocked": "No formal ImageAnalysisFactory, Stack, AEGL or host path is authorized for writes.",
+    "no_broad_access": "Only the disposable project/ subtree is writable; the contract package is read-only."
+  },
+  "contract_notes": {
+    "package_role": "EXECUTION_AUTHORIZATION_CONTRACT",
+    "package_access": "READ_ONLY_INPUT",
+    "generated_by": "specification/compiler (hash_manifest.py -> build_contract.py -> validate_package.py)",
+    "execution_sessions": 1,
+    "verification_passes": 1,
+    "business_write": "NONE"
+  }
+}
