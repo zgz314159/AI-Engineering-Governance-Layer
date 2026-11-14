@@ -283,10 +283,9 @@ grep -qF 'SYSTEM-E2E-003 ' "$L" || fail diag_entry_missing
 
 set +e
 bash "$STAGE/prepare.sh" 2>&1 | tee "$LOG"
-prep_rc=${PIPESTATUS[0]}
-tee_rc=${PIPESTATUS[1]}
+pipeline_rc=("${PIPESTATUS[@]}")
 set -e
-finish_prep "$prep_rc" "$tee_rc"
+finish_prep "${pipeline_rc[0]}" "${pipeline_rc[1]}"
 ENTRY
 ```
 
