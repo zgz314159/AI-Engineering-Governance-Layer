@@ -800,6 +800,21 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         _ev("upstream_resp_headers", seq=req_seq, status=resp.status)
         # minimal routing record: method, inbound path, forwarded path, status ONLY
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=%d" % (method, path, target, resp.status), flush=True)
+        # Send the status line and headers before waiting for the full body. The
+        # sandbox-side loopback shim bounds idle time per direction; without these
+        # bytes a slow model response looks like an idle request tunnel and is
+        # torn down before the body can be delivered.
+        out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
+        for k, v in resp.getheaders():
+            if k.lower() in ("transfer-encoding", "connection", "content-length"):
+                continue
+            out.append("%s: %s" % (k, v))
+        if getattr(resp, "length", None) is not None:
+            out.append("Content-Length: %d" % resp.length)
+        out.append("Connection: close")
+        out.append("")
+        out.append("")
+        conn.sendall("\r\n".join(out).encode("latin-1"))
         payload = resp.read()
         _ev("upstream_body_read_done", seq=req_seq, status=resp.status, bytes_=len(payload))
         if resp.status < 200 or resp.status >= 300:
@@ -815,16 +830,7 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         for call in summary["calls"]:
             _ev("model_tool_request", seq=call["seq"],
                 arg="resp=%d tool=%s" % (resp_seq, _tool_class(call["name"])))
-        out = ["HTTP/1.1 %d %s" % (resp.status, resp.reason)]
-        for k, v in resp.getheaders():
-            if k.lower() in ("transfer-encoding", "connection", "content-length"):
-                continue
-            out.append("%s: %s" % (k, v))
-        out.append("Content-Length: %d" % len(payload))
-        out.append("Connection: close")
-        out.append("")
-        out.append("")
-        conn.sendall("\r\n".join(out).encode("latin-1") + payload)
+        conn.sendall(payload)
         _ev("client_handoff_done", seq=req_seq, status=resp.status, bytes_=len(payload))
     except Exception as exc:  # noqa: BLE001 — log the route only, never the message/headers/body
         _ev("upstream_error", seq=req_seq, error=type(exc).__name__)

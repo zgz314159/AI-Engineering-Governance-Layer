@@ -85,7 +85,7 @@ def run_case(base, server, capture):
                         'upstream_dns_done', 'upstream_tcp_start', 'upstream_tcp_done',
                         'upstream_connect_done', 'upstream_req_write_done',
                         'upstream_resp_headers', 'upstream_body_read_done',
-                        'client_handoff_done']
+                        'model_response', 'client_handoff_done']
             assert phases == expected, phases
             # the startup event is process-scoped: no request sequence number
             assert 'seq' not in events[0], events[0]

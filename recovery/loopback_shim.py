@@ -7,7 +7,8 @@ served here, and this forwards the byte stream to the Unix socket the trusted br
 bound to. It holds no credential and opens no external connection.
 
 It handles both directions, propagates EOF / half-close (so a client that reads until EOF
-terminates), and bounds idle time. stdlib only.
+terminates), and bounds each direction's idle time independently: an idle request side must
+not abort a response that is still being generated. stdlib only.
 
     loopback_shim.py --listen 127.0.0.1:8877 --unix /run/aegl-model/model.sock
 """
@@ -24,11 +25,13 @@ IDLE_TIMEOUT = 30.0
 
 
 def _pump(src: socket.socket, dst: socket.socket, done: threading.Event) -> None:
-    """Forward src→dst until EOF/timeout, then half-close dst and signal ``done``."""
+    """Forward src→dst until EOF; an idle gap retires only THIS direction."""
+    idle = False
     try:
         while not done.is_set():
             r, _, _ = select.select([src], [], [], IDLE_TIMEOUT)
             if not r:
+                idle = True
                 break
             data = src.recv(65536)
             if not data:
@@ -37,7 +40,9 @@ def _pump(src: socket.socket, dst: socket.socket, done: threading.Event) -> None
     except OSError:
         pass
     finally:
-        done.set()
+        # EOF / peer close ends the whole tunnel; an idle request side does not.
+        if not idle:
+            done.set()
         try:
             dst.shutdown(socket.SHUT_WR)
         except OSError:
@@ -59,7 +64,9 @@ def _handle(client: socket.socket, unix_path: str) -> None:
     thread.start()
     try:
         _pump(client, upstream, done)
-        thread.join(2.0)
+        # The request side can idle while the model response is still being generated;
+        # wait for the response direction instead of dropping the live tunnel.
+        thread.join()
     finally:
         for sock in (client, upstream):
             try:
