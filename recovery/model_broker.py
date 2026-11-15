@@ -53,6 +53,10 @@ CONNECT_STAGE_S = 8.0      # per-address TCP / TLS cap, further limited by what 
 DEFAULT_AUTH_HEADER = "Authorization"
 DEFAULT_AUTH_PREFIX = "Bearer "
 
+
+class ResponseStartedError(RuntimeError):
+    """The broker already committed response bytes; a second status line is invalid."""
+
 # Native local model-server probe paths (LM Studio / Ollama / llama.cpp / vLLM). They are
 # NOT OpenAI-compatible endpoints: they are answered LOCALLY with a plain 404 (no model
 # catalog, no fake 200, no context length, no server-type hint, no credential, no upstream
@@ -789,6 +793,7 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         arg="model=%s stream=%s auth_in=%s auth_out=%s auth_fmt=%s"
             % (model_id, stream_flag, _auth_labels(headers), _auth_labels(fwd),
                _auth_format(credential)))
+    response_started = False
     try:
         _ev("upstream_req_start", seq=req_seq, arg=target)
         # Bounded DNS -> TCP -> TLS under one monotonic deadline. The HTTP request is
@@ -814,6 +819,9 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         out.append("Connection: close")
         out.append("")
         out.append("")
+        # From here on the client has an upstream status line; a later failure must
+        # close the tunnel, never append a second (502) response.
+        response_started = True
         conn.sendall("\r\n".join(out).encode("latin-1"))
         payload = resp.read()
         _ev("upstream_body_read_done", seq=req_seq, status=resp.status, bytes_=len(payload))
@@ -836,6 +844,8 @@ def _handle(conn: socket.socket, upstream: str, credential: str, auth_header: st
         _ev("upstream_error", seq=req_seq, error=type(exc).__name__)
         print("AEGL_MODEL_ROUTE method=%s in=%s fwd=%s status=ERROR %s"
               % (method, path, target, type(exc).__name__), flush=True)
+        if response_started:
+            raise ResponseStartedError("response already started: %s" % type(exc).__name__) from exc
         raise
     finally:
         try:
@@ -857,6 +867,12 @@ def serve(sock_path: str, upstream: str, credential: str, auth_header: str) -> i
             conn, _ = server.accept()
             try:
                 _handle(conn, upstream, credential, auth_header)
+            except ResponseStartedError as exc:
+                # The upstream status/headers are already on the wire. Do not append
+                # a second HTTP response; close the tunnel and keep the real cause.
+                cause = exc.__cause__
+                sys.stderr.write("model broker error after response started: %s\n"
+                                 % (type(cause).__name__ if cause is not None else "UNKNOWN"))
             except Exception as exc:  # noqa: BLE001 - never take the broker down
                 try:
                     conn.sendall(("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").encode())
