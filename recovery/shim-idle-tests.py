@@ -3,7 +3,8 @@
 
 Case 1 is the original long response gap. Case 2 is the short reproduced failure:
 request idle 0.2 s, headers at 0.05 s, body at 0.4 s. The response direction has no
-direction idle; it is bounded only by the tunnel deadline.
+direction idle; it is bounded only by the tunnel deadline. Successful cases remove only
+their registered files; failed cases preserve the scene.
 """
 from __future__ import annotations
 
@@ -17,7 +18,6 @@ import sys
 import tempfile
 import threading
 import time
-import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import loopback_shim  # noqa: E402
@@ -29,6 +29,7 @@ CASES = (
     {"name": "idle-0.2", "idle": 0.2, "max_tunnel": 2.0,
      "header_delay": 0.05, "delay": 0.4},
 )
+CASE_FILES = ("key", "broker.out", "broker.err", "model.sock")
 
 
 class SlowUpstream(http.server.BaseHTTPRequestHandler):
@@ -58,31 +59,71 @@ def _wait_socket(path: Path, proc: subprocess.Popen, timeout: float = 5.0) -> No
         time.sleep(0.01)
 
 
-def _stop_broker(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
+def _group_alive(pgid: int) -> bool:
     try:
-        group = os.getpgid(proc.pid)
-    except OSError:
-        proc.terminate()
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError as exc:
+        raise RuntimeError("cannot inspect broker process group %d: %s"
+                           % (pgid, type(exc).__name__)) from exc
+    return True
+
+
+def _stop_broker(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    pgid = proc.pid  # start_new_session makes the broker the group leader
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-        return
-    try:
-        os.killpg(group, signal.SIGTERM)
-    except OSError:
-        pass
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except OSError:
             pass
+    deadline = time.monotonic() + 5.0
+    while _group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        deadline = time.monotonic() + 5.0
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    try:
         proc.wait(timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("broker main process did not exit") from exc
+    if _group_alive(pgid):
+        raise RuntimeError("broker process group %d still alive" % pgid)
+
+
+def _require_thread_stopped(thread: threading.Thread | None, name: str) -> None:
+    if thread is None:
+        return
+    thread.join(5.0)
+    if thread.is_alive():
+        raise RuntimeError("%s thread still alive" % name)
+
+
+def _cleanup_case(case_dir: Path) -> None:
+    if not case_dir.is_dir():
+        raise RuntimeError("missing case dir %s" % case_dir)
+    names = {entry.name for entry in case_dir.iterdir()}
+    unknown = sorted(names - set(CASE_FILES))
+    if unknown:
+        raise RuntimeError("unknown entries %s in %s" % (", ".join(unknown), case_dir))
+    for name in CASE_FILES:
+        path = case_dir / name
+        if path.exists() or path.is_symlink():
+            if path.is_dir():
+                raise RuntimeError("unexpected directory %s" % path)
+            path.unlink()
+    case_dir.rmdir()
 
 
 def run_case(case: dict, base: Path) -> None:
@@ -101,7 +142,7 @@ def run_case(case: dict, base: Path) -> None:
     broker = None
     shim_thread = None
     client = shim_side = None
-    ok = False
+    passed = False
     try:
         with broker_out.open("w") as out, broker_log.open("w") as err:
             broker = subprocess.Popen(
@@ -137,42 +178,52 @@ def run_case(case: dict, base: Path) -> None:
         assert response.startswith(b"HTTP/1.1 200 "), response[:80]
         assert response.endswith(BODY), response[-80:]
         assert elapsed >= case["delay"], "response completed before delayed body: %.2fs" % elapsed
-        ok = True
+        passed = True
         print("SHIM_IDLE_%s=OK elapsed=%.2fs" % (case["name"].upper(), elapsed))
-    finally:
-        if client is not None:
-            client.close()
-        if shim_side is not None:
-            shim_side.close()
-        if shim_thread is not None:
-            shim_thread.join(2.0)
-        if broker is not None:
-            _stop_broker(broker)
-        server.shutdown()
-        server.server_close()
-        server_thread.join(timeout=5)
-    if ok:
-        shutil.rmtree(case_dir)
-    else:
+    except BaseException:
         print("PRESERVED_DIR=%s" % case_dir, file=sys.stderr)
+        raise
+    finally:
+        errors = []
+        for label, action in (
+            ("client", lambda: client.close() if client is not None else None),
+            ("shim_side", lambda: shim_side.close() if shim_side is not None else None),
+            ("broker", lambda: _stop_broker(broker)),
+            ("upstream", lambda: (server.shutdown(), server.server_close())),
+            ("shim", lambda: _require_thread_stopped(shim_thread, "shim")),
+            ("upstream_thread", lambda: _require_thread_stopped(server_thread, "upstream")),
+        ):
+            try:
+                action()
+            except BaseException as exc:
+                errors.append((label, exc))
+        if errors:
+            print("PRESERVED_DIR=%s" % case_dir, file=sys.stderr)
+            raise RuntimeError("cleanup failed: %s"
+                               % ", ".join("%s=%s" % (label, type(exc).__name__)
+                                           for label, exc in errors)) from errors[0][1]
+    if not passed:
+        raise RuntimeError("case did not pass")
+    try:
+        _cleanup_case(case_dir)
+    except BaseException:
+        print("PRESERVED_DIR=%s" % case_dir, file=sys.stderr)
+        raise
 
 
 def main() -> int:
     base = Path(tempfile.mkdtemp(prefix="aegl-shim-idle-", dir="/var/tmp"))
-    failed = False
     try:
         for case in CASES:
             run_case(case, base)
-    except Exception:
-        failed = True
+    except BaseException:
         print("SHIM_IDLE_SCENE=%s" % base, file=sys.stderr)
         raise
-    finally:
-        if not failed:
-            try:
-                base.rmdir()
-            except OSError:
-                pass
+    try:
+        base.rmdir()
+    except BaseException:
+        print("SHIM_IDLE_SCENE=%s" % base, file=sys.stderr)
+        raise
     return 0
 
 
