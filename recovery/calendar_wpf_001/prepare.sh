@@ -26,8 +26,8 @@ STACK="/var/tmp/IAP-CONTROL-DEV/stack"
 BRIDGE_DIR="/home/zhong/.local/state/google-android-agent-stack/bridge"
 AI_USER="aegl-ai"
 OPERATOR="zhong"
-BASE_COMMIT="458562c74c1afe8b58b9a117c59a7dc74d6ee2be"
-MANIFEST_SHA="8cf97f91a251c78c7691283cfe9a26c98f075d184566a90a1c2e5e552c306d3f"
+BASE_COMMIT="fdcb91a5465e4f1f7d69e9dda1d901cb7999dd50"
+MANIFEST_SHA="639ed1fec89a9af7f67b0bb080c169aeb91ab3adb2b0d8c394f99c21fb83d105"
 
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'PREP_FAILED: %s\n' "$*" >&2; exit 1; }
@@ -43,9 +43,11 @@ require_check(){
   [ "$(sha "$CONTRACT_SRC/manifest.json")" = "$MANIFEST_SHA" ] || die "manifest hash mismatch in $CONTRACT_SRC"
   [ -f "$CONTRACT_SRC/READY.json" ] || die "READY.json missing in $CONTRACT_SRC"
 
-  local head status common gitdir
+  local head status common gitdir base_head
   head="$(git -c safe.directory="$WORKTREE" -C "$WORKTREE" rev-parse HEAD 2>/dev/null)" || die "git rev-parse failed"
-  [ "$head" = "$(git -C "$PROJECT" rev-parse "$BASE_COMMIT" 2>/dev/null)" ] || die "worktree HEAD $head is not base $BASE_COMMIT"
+  base_head="$(git -c safe.directory="$PROJECT" -C "$PROJECT" rev-parse "$BASE_COMMIT" 2>&1)" \
+    || die "root git query failed for $PROJECT: $base_head"
+  [ "$head" = "$base_head" ] || die "worktree HEAD $head is not base $BASE_COMMIT"
   git -c safe.directory="$WORKTREE" -C "$WORKTREE" rev-parse --verify "$BASE_COMMIT^{commit}" >/dev/null 2>&1 \
     || die "base commit not found: $BASE_COMMIT"
   status="$(git -c safe.directory="$WORKTREE" -C "$WORKTREE" status --porcelain 2>/dev/null)" || die "git status failed"
@@ -166,8 +168,11 @@ root_prepare(){
   setpriv --reuid="$ai_uid" --regid="$ai_gid" --clear-groups --no-new-privs -- \
     python3 -I -c 'import os,sys; sys.exit(0 if os.access(sys.argv[1], os.W_OK) and os.access(sys.argv[2], os.W_OK) else 1)' \
     "$WORKTREE" "$SCRATCH" || die "$AI_USER cannot write worktree/scratch"
+  local expected_head
+  expected_head="$(git -c safe.directory="$PROJECT" -C "$PROJECT" rev-parse "$BASE_COMMIT" 2>&1)" \
+    || die "root git query failed for $PROJECT: $expected_head"
   as_operator git -c safe.directory="$WORKTREE" -c safe.directory="$PROJECT" -C "$WORKTREE" rev-parse HEAD \
-    | grep -qx "$(git -C "$PROJECT" rev-parse "$BASE_COMMIT")" || die "operator cannot read worktree at base"
+    | grep -qx "$expected_head" || die "operator cannot read worktree at base"
   as_operator python3 -I -c 'import sys; [open(p, "rb").close() for p in sys.argv[1:]]' \
     "$WORKTREE/src/TaskCalendar.Infrastructure/Import/TaskImportService.cs" || die "operator cannot read source"
 
