@@ -7,20 +7,24 @@ the 10 s cleanup grace, the guard and the independent acceptance baseline are un
 
 ## Why this round exists
 
-The 004 execution was `BLOCKED` with exit code 124 and both terminal calls returned
-`exit_code=-1` from the tool's **pre-execution approval** path, not from a command failure:
-the flattened CLI checks were judged dangerous by Hermes' own detector and the run is a
-single-query (`--oneshot`) session, where `approvals.single_query_mode` defaults to `deny`.
-Measured on the real detector:
+Both 004 terminal calls returned `exit_code=-1` with `status=blocked` and the observer
+recorded `err=tool_error`. What is **proven** is the mechanism that produces that class of
+envelope: the flattened CLI checks are judged dangerous by Hermes' own detector, and a
+single-query (`--oneshot`) session defaults `approvals.single_query_mode` to `deny`, so the
+command is refused before it is spawned. Measured on the real detector:
 
 | 004 check | detector verdict |
 | --- | --- |
 | `read` | `script execution via heredoc` |
 | `execute` | `script execution via -e/-c flag` |
 
-`SYSTEM-E2E-001`/`002` used plain commands and were not affected; `003` and `004` did. The
-root cause of the **004 exit 124** itself stays **UNKNOWN** (see "UNKNOWN" below); this
-round only removes the reproduced incompatibility.
+`SYSTEM-E2E-001`/`002` used plain commands and were not affected; `003` and `004` did.
+
+This is **not** a diagnosis of the 004 history. The raw `tool_result` text and traceback of
+those two calls were never persisted, so the exact error string each call produced is
+**UNKNOWN**, and the 004 `exit_code=124` task outcome stays **UNKNOWN** as well. This round
+removes a reproduced, independent blocker; it does not claim either historical error is
+confirmed, nor that 004 is fixed.
 
 ## What changed, and what did not
 
@@ -67,6 +71,7 @@ input hash check, the acceptance baseline and every existing assertion are uncha
 | Compiled manifest | `c5cf4264e3311cb6b28fbb411de8fa049aca55b11c9bb40f8b0b6f643944e036` |
 | Generated prompt | `57eb8fd879f56f28cebae1ead1458b4addeedc8c1684c693518dd6b9fb7507cc` |
 | Preparation entry | `prepare.sh` = `80fa5f09f94b4c559601f06d51795915b3167a1c16abb9887e2708ffd3a4c869` |
+| Outer entry | `trusted-entry.sh` = `10899a20eee768c0bd5a11309d649f7923ce78d7ea9b3b5f24e033f9ac46f289` |
 | Acceptance checker | `accept.py` = `9de90cdccbe160d0d2d6ec7d543deae7a8c8c872867d38071b05cfc313e09ebc` |
 | Dependency pins | `DEPENDENCY-PINS.sha256` = `d04358440144ae8a05657e057fe3bd608f48407f41b30e827cb17acfded89fd9` |
 | Launcher predecessor | `def13354e27797af82535c2bd1c9bbcb4acde4b6abec0004e2ce53fd2fe45ba6` |
@@ -86,7 +91,7 @@ The candidate changes only `DIAG_ENABLED_TASKS`, appending `SYSTEM-E2E-005` afte
 `SYSTEM-E2E-004`; every old entry and every other byte is preserved (26773 → 26788 bytes,
 exactly one differing line). Broker, observer, guard, helper and wrapper are unchanged.
 
-## Order: transport install first, then 005 preparation
+## Order: transport install → outer entry (launcher + prepare.sh)
 
 The dependency pins above are the **post-install** hashes, so the two reviewed transport
 fixes must be installed first. Both are already reviewed and neither is part of this round.
@@ -99,36 +104,67 @@ fixes must be installed first. Both are already reviewed and neither is part of 
 
    It replaces only `model_broker.py` (`7aa88b18…` → `b9ff6a51…`) and `loopback_shim.py`
    (`75cf4ad6…` → `40e71b3d…`) and prints `INSTALL_OK model=b9ff6a51… shim=40e71b3d…`.
-   `DEPENDENCY-PINS.sha256` in this directory will not verify before that step, by design.
+   The 005 entry fails closed at `dependency_hash` until this succeeds.
 
-2. **Run the 005 preparation** (operator, trusted terminal), which stops at `PREP_COMPLETE`:
+2. **Verify the entry digest, then run it** (operator, trusted terminal):
 
    ```bash
+   sha256sum /var/tmp/IAP-CONTROL-DEV/aegl/recovery/system_e2e_005/trusted-entry.sh
+   # expect 10899a20eee768c0bd5a11309d649f7923ce78d7ea9b3b5f24e033f9ac46f289
+
    sudo env -i HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
      LANG=C.UTF-8 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
-     bash /var/tmp/IAP-CONTROL-DEV/aegl/recovery/system_e2e_005/prepare.sh
+     bash /var/tmp/IAP-CONTROL-DEV/aegl/recovery/system_e2e_005/trusted-entry.sh
    ```
 
-   The preparation itself installs the 005 launcher candidate, so no separate launcher step is
-   needed. It creates no model task sink and sends nothing.
+`trusted-entry.sh` is the same outer shape 003/004 used. It does, in this order:
 
-`bash prepare.sh --verify-only` is the unprivileged, write-free pre-check. It currently stops
-at `PREP_FAILED stage=diag reason=launcher_hash` because the installed launcher is still the
-004 candidate; that is the expected state until step 2 runs.
+1. creates a root-private stage and copies **only** `trusted-entry.sh`, `prepare.sh`,
+   `accept.py`, `SOURCE.sha256`, `DEPENDENCY-PINS.sha256` and every member listed in
+   `SOURCE.sha256`; each is verified against its fixed hash, symlinks and undeclared files
+   are refused, and the staged set is compared to the declared set;
+2. normalises the staged file modes to `0644` — under the entry's `umask 077` a plain `cp`
+   produces `0600`, which `prepare.sh`'s auxiliary-input gate would correctly reject — and
+   asserts all five staged `checks/*.py` are `0644` regular files;
+3. runs the pre-install gates: identity unused (registry + journal), scene absent, Bridge
+   `WAITING_FOR_GPT|IDLE` with no pending result and no unresolved accepted entry, no
+   active task, `/run/aegl-model` empty;
+4. installs **only** the launcher candidate, derived from the fixed predecessor `def13354…`
+   by appending `SYSTEM-E2E-005` to `DIAG_ENABLED_TASKS`, and verifies `a7c75e2d…`;
+5. runs `bash "$STAGE/prepare.sh"` **from the root-private copy**, tees to `prep.log`, and
+   keeps the real `prepare`/`tee` exit codes in `ROOT_ENTRY_EXIT=… TEE_EXIT=…`.
+
+Ownership/mode of every copied member and of the launcher, the re-check immediately before
+the launcher replacement, and scene retention on failure are the 003/004 logic, unchanged.
+`prepare.sh` itself does scene → compile → install → diag → **register** → **gate**; this
+entry adds only the copy/verify, preflight and launcher steps, and claims nothing more.
+
+`bash prepare.sh --verify-only` is the unprivileged, write-free pre-check. In the delivered
+tree it currently stops at `PREP_FAILED stage=diag reason=launcher_hash` because the
+installed launcher is still the 004 candidate; that is the expected state until step 2 runs.
+
 
 ## Offline / NOT_RUN
 
-- **NOT RUN:** the transport install, the five-command root preparation, task registration,
-  the real `contract_executor.gate`, guard admission, any `--execute`, any model call and the
-  independent host acceptance. This round delivered commands only.
+- **NOT RUN:** the transport install, the outer entry, the five-stage root preparation, task
+  registration, the real `contract_executor.gate`, guard admission, any `--execute`, any model
+  call and the independent host acceptance. This round delivered commands only.
 - **SYNTHETIC (clearly not 004 history, not business acceptance):** the extracted scripts were
   compared against the 004 inline bodies on identical fixture copies (identical `RESULT.json`
   bytes, identical stdout and exit status); the real `_handle_terminal` was run in a real
   single-query approval context with the default `deny` policy, no yolo and no auto-approval;
   a full two-call run was executed against throwaway packages; and the fail-fast behaviour,
   the auxiliary-input gate and the acceptance checker were exercised against isolated copies.
-- **UNKNOWN (unchanged from 004):** the raw `tool_result` error text and traceback were never
-  persisted, the root diagnostic sink is unreadable to this identity, and the second request's
-  normalized command hash matched no reconstruction. The 004 **exit 124** root cause therefore
-  stays UNKNOWN. This round does not claim 004 was fixed; it removes a reproduced blocker that
-  was independent of it.
+- **SYNTHETIC entry drill (no sudo, nothing installed):** the entry's copy/verify stage was
+  driven against a redirected `BASE`, confirming the 31-member set, the `0644` normalisation
+  (without it the staged `prepare.sh` fails `aux_mode`) and the entry's running-copy equality.
+  Links, a hash mismatch, an undeclared `checks/*.py` and a forced `0600` mode were each
+  refused (`source_members`, `aux_count`, `aux_mode`). The launcher replacement and all later
+  stages were not run.
+- **UNKNOWN:** the raw `tool_result` error text and traceback of the two 004 calls were never
+  persisted (the root diagnostic sink is unreadable to this identity) and the second request's
+  normalized command hash matched no reconstruction. The exact 004 error string and the 004
+  `exit_code=124` outcome therefore stay UNKNOWN. What this round proves is the *mechanism*
+  behind that class of `exit_code=-1 blocked` envelope, not that either historical call has
+  been diagnosed, and not that 004 is fixed.
+
