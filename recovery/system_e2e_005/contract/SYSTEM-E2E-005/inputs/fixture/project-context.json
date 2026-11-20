@@ -1,0 +1,13 @@
+{
+  "project": "FixtureApp",
+  "project_type": "brownfield",
+  "source_root": "project",
+  "architecture": { "ui": "Compose", "data": "Room" },
+  "toolchain": { "language": "Kotlin" },
+  "database": { "engine": "Room", "version": 2 },
+  "verification": { "engine": "uiautomator" },
+  "read_first": [{ "path": "app/Main.kt", "why": "entry surface" }],
+  "relevant_files": ["app/Main.kt"],
+  "allowed_paths": ["app/Main.kt"],
+  "forbidden_paths": ["app/Frozen.kt"]
+}

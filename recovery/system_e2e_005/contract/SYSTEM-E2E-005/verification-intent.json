@@ -1,0 +1,34 @@
+{
+  "feature_id": "SYSTEM-E2E-COMPILE",
+  "journey_id": "SYSTEM-E2E-RUN",
+  "engine": "cli",
+  "acceptance_ids": [
+    "AC-SYSE2E-003"
+  ],
+  "required_selectors": [],
+  "cli_checks": [
+    {
+      "step": "read",
+      "command": "set -euo pipefail\ncd \"$HERMES_CONTRACT_PACKAGE\"\npython3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/checks/read_manifest_check.py\"\nprintf '\\n===== implementation-contract.json =====\\n'\ncat implementation-contract.json\nprintf '\\n===== project-context.json =====\\n'\ncat project-context.json\nPIN=$(python3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/checks/inputs_pin_path.py\")\nprintf '\\n===== INPUTS-PIN.json =====\\n'\ncat \"$PIN\"\nfor f in requirements.md acceptance.md design.md DESIGN.md tasks.md verification-intent.json; do\n  printf '\\n===== %s =====\\n' \"$f\"\n  cat \"$f\"\ndone\necho \"READ_STAGE=COMPLETE\"",
+      "expected": "READ_STAGE=CONTRACT_OK (manifest members verified and READY); implementation-contract, project-context, the declared INPUTS-PIN, requirements, acceptance, design, DESIGN, tasks and verification-intent printed in that order; READ_STAGE=COMPLETE. This one terminal call satisfies the prompt's read section; do not issue separate read_file calls.",
+      "on_failure": "stop immediately; report the actual failure and rc in the FINAL ASSISTANT RESPONSE; do not start the execute call; do not retry"
+    },
+    {
+      "step": "execute",
+      "command": "set -euo pipefail\nSTAGE=start\ntrap 'rc=$?; printf \"EXEC_FAIL stage=%s rc=%s\\n\" \"$STAGE\" \"$rc\" >&2; exit \"$rc\"' ERR\nPIN=/var/tmp/SYSTEM-E2E-005/INPUTS-PIN.json\nSTAGE=worktree\nWT=$(python3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/checks/pin_worktree.py\" \"$PIN\")\n[ -n \"$WT\" ]\n[ -d \"$WT\" ]\ncd \"$WT\"\nSTAGE=target\n[ ! -e e2e ]\n[ ! -L e2e ]\n[ ! -e RESULT.json ]\n[ ! -L RESULT.json ]\nSTAGE=inputs\n( cd \"$HERMES_CONTRACT_PACKAGE/inputs\" && sha256sum --strict -c INPUTS.sha256 >/dev/null )\necho \"INPUTS_OK\"\nSTAGE=copy\nmkdir -p e2e\ncp -a \"$HERMES_CONTRACT_PACKAGE/inputs/fixture\" e2e/valid_package\nC=\"$HERMES_CONTRACT_PACKAGE/inputs/compiler\"\nSTAGE=hash_manifest\npython3 -B \"$C/hash_manifest.py\" e2e/valid_package\nSTAGE=build_contract\npython3 -B \"$C/build_contract.py\" e2e/valid_package\nSTAGE=validate\npython3 -B \"$C/validate_package.py\" e2e/valid_package --project-root e2e/valid_package/project\nSTAGE=result\npython3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/checks/write_result.py\"\nSTAGE=result_check\npython3 -B \"$HERMES_CONTRACT_PACKAGE/inputs/checks/check_result.py\"\nSTAGE=done\necho \"EXEC_STAGE=COMPLETE\"",
+      "expected": "INPUTS_OK; MANIFEST=WROTE entries=8 package=valid_package; CONTRACT=WROTE id=FIXTURE-B1-CONTRACT requirements=1 tasks=1; STATUS=READY with all five gates PASS and errors=0; RESULT_WRITTEN; EXEC_SUMMARY with task_id SYSTEM-E2E-005 and actual-derived 8/1/1/READY/0; EXEC_STAGE=COMPLETE. The result check is inside this call; no compiler or validation command is re-run.",
+      "on_failure": "stop immediately; report EXEC_FAIL stage and the real rc in the FINAL ASSISTANT RESPONSE; do not retry, patch, overwrite or re-run any step; make no further tool call"
+    }
+  ],
+  "persistence_checks": [
+    "RESULT.json persists at the worktree root with exactly the seven declared keys",
+    "The compiled copy persists under e2e/valid_package with manifest.json, implementation-contract.json, validation-report.json and READY.json"
+  ],
+  "rotation_checks": [],
+  "search_checks": [
+    "RESULT.json values equal len(manifest.json.entries), len(implementation-contract.json.requirements), len(implementation-contract.json.tasks), validation-report.json.status and len(validation-report.json.errors); the extraction does not embed expected counts",
+    "The in-call result check compares RESULT.json with the actual artifacts and then with the frozen FIXTURE-B1-CONTRACT / 8 / 1 / 1 / READY / 0 baseline"
+  ],
+  "fixture_intent": "The frozen valid_package fixture is copied from the contract input bundle into the worktree; the input hash check and the compile loop run in one ordered call.",
+  "oracle_intent": "Deterministic host acceptance is out-of-session: recompute manifest member hashes and declared input hashes, re-read all generated artifacts, and reject missing files, extra fields, wrong types, invalid JSON or inconsistent summaries. The executor runs exactly two terminal calls and does not run the host acceptance."
+}
