@@ -98,7 +98,7 @@ PY
 
   python3 -B "$STACK/specification/compiler/validate_package.py" "$CONTRACT_SRC" --project-root "$TASK_ROOT" >/dev/null \
     || die "contract validator did not return READY"
-  [ "$(python3 -B -c "import json;print(json.load(open('$CONTRACT_SRC/validation-report.json'))['status'])")" = "READY" ] \
+  [ "$(python3 -B -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$CONTRACT_SRC/validation-report.json")" = "READY" ] \
     || die "validation-report is not READY"
 
   python3 -B - "$STACK/orchestration/hermes/bridge" "$CONTRACT_SRC" "$PKG_DEST" "$WORKTREE" "$TASK_ROOT" "$PROJECT_NAME" <<'PY' \
@@ -146,7 +146,9 @@ root_prepare(){
   for tool in git sha256sum realpath setpriv setfacl stat python3; do need "$tool"; done
   require_check
 
-  local gitdir="$PROJECT/.git/worktrees/project"
+  local gitdir
+  gitdir="$(git -c safe.directory="$WORKTREE" -C "$WORKTREE" rev-parse --absolute-git-dir 2>&1)" \
+    || die "worktree git dir query failed: $gitdir"
   [ -d "$gitdir" ] || die "worktree git dir missing: $gitdir"
   chown -R "$AI_USER:$AI_USER" "$WORKTREE" || die "worktree chown failed"
   chmod -R u=rwX,go=rX "$WORKTREE" || die "worktree chmod failed"
@@ -219,6 +221,23 @@ PY
   say "PREP_COMPLETE task=$TASK_ID project=$PROJECT_NAME worktree=$WORKTREE scratch=$SCRATCH contract=$PKG_DEST manifest_sha256=$MANIFEST_SHA"
   say "NEXT: no message was sent and no model was called. A real run needs a separate one-execution approval."
 }
+
+# Reuse the existing preparation path for a new explicitly authorized calendar
+# slice. Arguments are data only; no source/eval, no copied per-task preparer.
+# --task TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--check]
+if [ "${1:-}" = "--task" ]; then
+  [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || die "--task needs TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--check]"
+  TASK_ID="$2"; TASK_ROOT="$3"; BASE_COMMIT="$4"; MANIFEST_SHA="$5"
+  [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid task id"
+  [[ "$BASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "base must be a full commit id"
+  [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]] || die "manifest must be a SHA-256"
+  [[ "$TASK_ROOT" =~ ^/var/tmp/RILI-WPF-V2/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "task root outside approved calendar base"
+  [ "$TASK_ROOT" = "$(realpath -e "$TASK_ROOT")" ] || die "task root must be canonical"
+  WORKTREE="$TASK_ROOT/project"; SCRATCH="$TASK_ROOT/scratch"
+  CONTRACT_SRC="$TASK_ROOT/contract-final"
+  PKG_DEST="/var/lib/aegl-model/trusted/OfflineTaskCalendar_WPF/reports/contracts/$TASK_ID"
+  shift 5
+fi
 
 case "${1:-}" in
   --check) require_check; exit 0 ;;
