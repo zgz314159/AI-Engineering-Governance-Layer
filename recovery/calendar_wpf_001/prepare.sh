@@ -74,6 +74,7 @@ PY
   local helper=/usr/local/lib/aegl-model/iap_diag_summary.py p
   [ ! -L "$helper" ] || die "diagnostic helper destination is a link"
   [ ! -e "$helper" ] || [ "$(sha "$helper")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic helper destination differs"
+  [ ! -e "$helper" ] || [ "$(stat -c '%U:%G %a' "$helper")" = 'root:root 644' ] || die "diagnostic helper owner/mode"
   bash -n "$STACK/orchestration/hermes/bridge/run_registered_task" || die "wrapper syntax"
   for p in "$LAUNCHER" "$WRAPPER"; do
     [ ! -L "$p" ] && [ "$(stat -c '%U:%G %a' "$p")" = 'root:root 755' ] || die "diagnostic installed entry owner/mode"
