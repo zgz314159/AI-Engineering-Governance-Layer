@@ -36,7 +36,8 @@ DIAG_CHECKED_LAUNCHER_SHA=""
 WRAPPER=/usr/local/lib/aegl-bridge/run_registered_task
 WRAPPER_PREDECESSOR_SHA=5ed0b06db96b48297e562277149b0e7f66d0314c96279c6d7e2365b772a9c5ca
 WRAPPER_SOURCE_SHA=e8b90a5a995795555ef077482f0a80cc14a6249815e1c182decca4444e398725
-SUMMARY_SOURCE_SHA=5a3f3923fa186cc8770e5b6ef806627ca53895ab183051dd41e9c8ad520b84eb
+SUMMARY_PREDECESSOR_SHA=5a3f3923fa186cc8770e5b6ef806627ca53895ab183051dd41e9c8ad520b84eb
+SUMMARY_SOURCE_SHA=26f1cbbb937c582a793abec01540cd3a7222c0d89b99bc2ac2707780fc5d21bf
 AEGL_SRC=/var/tmp/IAP-CONTROL-DEV/aegl
 
 say(){ printf '%s\n' "$*"; }
@@ -73,7 +74,7 @@ PY
   [ "$(sha "$AEGL_SRC/recovery/iap_diag_summary.py")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic summary source changed"
   local helper=/usr/local/lib/aegl-model/iap_diag_summary.py p
   [ ! -L "$helper" ] || die "diagnostic helper destination is a link"
-  [ ! -e "$helper" ] || [ "$(sha "$helper")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic helper destination differs"
+  [ ! -e "$helper" ] || [ "$(sha "$helper")" = "$SUMMARY_PREDECESSOR_SHA" ] || [ "$(sha "$helper")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic helper destination differs"
   [ ! -e "$helper" ] || [ "$(stat -c '%U:%G %a' "$helper")" = 'root:root 644' ] || die "diagnostic helper owner/mode"
   bash -n "$STACK/orchestration/hermes/bridge/run_registered_task" || die "wrapper syntax"
   for p in "$LAUNCHER" "$WRAPPER"; do

@@ -4,7 +4,8 @@
 Prints ONLY metadata from an explicit allowlist. The free-form ``arg`` label is NEVER
 echoed: for the connection phases it is parsed as a fixed-format record and only the
 address index, the address family, the elapsed milliseconds and the resolved count are
-re-emitted. Bodies, headers, credentials and the environment are never read or printed.
+re-emitted. Tool observations expose only the broker's fixed classes and numeric outcome
+fields. Bodies, headers, credentials and the environment are never read or printed.
 
     iap_diag_summary.py <events.jsonl>
 """
@@ -25,6 +26,29 @@ _VERSION = re.compile(r"\bversion=(TLSv1\.[0-9])")
 
 _INT_FIELDS = ("seq", "status", "bytes")
 _STR_FIELDS = ("task", "error")
+
+
+def tool_fields(phase, arg):
+    """Decode the exact broker observer record, never search arbitrary free-form text."""
+    when = {"tool_pre_observe": "pre", "tool_post_observe": "post"}.get(phase)
+    if when is None or not isinstance(arg, str):
+        return []
+    pattern = (
+        r"src=hook trust=diagnostic when=" + when +
+        r" corr=1 tool=(terminal|read_file|write_file|patch|other)"
+        r" status=(OK|ERROR|BLOCKED|UNKNOWN|OTHER)"
+        r" err=(tool_error|TimeoutError|FileNotFoundError|PermissionError|ValueError|"
+        r"RuntimeError|CalledProcessError|OSError|UNKNOWN|OTHER)"
+    )
+    if when == "post":
+        pattern += r" duration_ms=([0-9]{1,12}|UNKNOWN) exit=(-?[0-9]{1,12}|UNKNOWN)"
+    match = re.fullmatch(pattern, arg)
+    if match is None:
+        return ["tool_metadata=UNKNOWN"]
+    labels = ["tool", "tool_status", "tool_error"]
+    if when == "post":
+        labels += ["duration_ms", "exit"]
+    return ["%s=%s" % pair for pair in zip(labels, match.groups())]
 
 
 def registered_events(task, *, registry=Path('/var/lib/aegl-model/registry.json'),
@@ -84,6 +108,7 @@ def summarise(path: str) -> int:
                 out.append("%s=%s" % (key, value[:64]))
         # fixed-format label fields ONLY — the raw arg is never printed
         arg = event.get("arg")
+        out.extend(tool_fields(event.get("phase"), arg))
         if isinstance(arg, str):
             for pattern, label in ((_ADDR, "addr"), (_FAMILY, "family"), (_ELAPSED, "elapsed_ms"),
                                    (_RESOLVED, "resolved"), (_VERSION, "version")):

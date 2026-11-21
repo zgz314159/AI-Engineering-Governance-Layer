@@ -47,6 +47,36 @@ class DiagnosticSummaryTests(unittest.TestCase):
             with self.subTest(task=task),self.assertRaises(ValueError):
                 self.resolve(task)
 
+    def test_tool_outcome_is_visible_without_command_or_result_body(self):
+        self.events.write_text(json.dumps({'phase':'tool_post_observe','seq':3,
+            'arg':'src=hook trust=diagnostic when=post corr=1 tool=terminal '
+                  'status=ERROR err=PermissionError duration_ms=4 exit=-1',
+            'command':'SECRET_COMMAND','result':'SECRET_RESULT'})+'\n')
+        output=io.StringIO()
+        before=self.events.read_bytes()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(summary.summarise(str(self.resolve())),0)
+        self.assertIn('tool=terminal tool_status=ERROR tool_error=PermissionError duration_ms=4 exit=-1',output.getvalue())
+        self.assertNotIn('SECRET',output.getvalue())
+        self.assertEqual(before,self.events.read_bytes())
+
+    def test_unknown_outcomes_stay_unknown_and_pre_is_not_an_exit(self):
+        prefix='src=hook trust=diagnostic when='
+        self.assertEqual(summary.tool_fields('tool_post_observe',prefix+'post corr=1 tool=other '
+            'status=UNKNOWN err=UNKNOWN duration_ms=UNKNOWN exit=UNKNOWN'),
+            ['tool=other','tool_status=UNKNOWN','tool_error=UNKNOWN','duration_ms=UNKNOWN','exit=UNKNOWN'])
+        self.assertEqual(summary.tool_fields('tool_pre_observe',prefix+'pre corr=1 tool=read_file '
+            'status=OK err=UNKNOWN'),['tool=read_file','tool_status=OK','tool_error=UNKNOWN'])
+
+    def test_malformed_or_injected_tool_record_never_exposes_free_text(self):
+        valid='src=hook trust=diagnostic when=post corr=1 tool=terminal status=ERROR err=OSError duration_ms=4 exit=1'
+        for arg in (valid+' SECRET',valid.replace('tool=terminal','tool=SECRET'),
+                    valid.replace('err=OSError','err=SECRET'),valid.replace('exit=1','exit=1SECRET'),
+                    valid.replace('when=post','when=pre'),valid.replace('corr=1','corr=0')):
+            with self.subTest(arg=arg):
+                self.assertEqual(summary.tool_fields('tool_post_observe',arg),['tool_metadata=UNKNOWN'])
+        self.assertEqual(summary.tool_fields('upstream_response',valid),[])
+
     def test_wrong_owner_is_refused(self):
         with self.assertRaisesRegex(ValueError,'UNTRUSTED'):
             summary.registered_events('CAL-DIAG',registry=self.registry,diag_root=self.root,required_uid=os.getuid()+1)
