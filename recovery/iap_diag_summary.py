@@ -11,7 +11,10 @@ re-emitted. Bodies, headers, credentials and the environment are never read or p
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import re
+import stat
 import sys
 
 _ADDR = re.compile(r"\baddr=(\d+)")
@@ -22,6 +25,31 @@ _VERSION = re.compile(r"\bversion=(TLSv1\.[0-9])")
 
 _INT_FIELDS = ("seq", "status", "bytes")
 _STR_FIELDS = ("task", "error")
+
+
+def registered_events(task, *, registry=Path('/var/lib/aegl-model/registry.json'),
+                      diag_root=Path('/var/tmp/aegl-diag'), required_uid=0):
+    """Resolve only a registered task's root-owned metadata sink; never arbitrary paths."""
+    if not isinstance(task, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', task):
+        raise ValueError('DIAG_TASK_ID')
+    def trusted(path, directory=False):
+        s=path.lstat()
+        correct_type=stat.S_ISDIR(s.st_mode) if directory else stat.S_ISREG(s.st_mode)
+        if not correct_type or s.st_uid != required_uid or s.st_mode & 0o022:
+            raise ValueError('DIAG_UNTRUSTED_PATH')
+        return s
+    trusted(registry.parent, directory=True)
+    trusted(registry)
+    entry=json.loads(registry.read_text()).get(task)
+    if not isinstance(entry, dict) or not entry.get('contract_package'):
+        raise ValueError('DIAG_UNREGISTERED_TASK')
+    trusted(diag_root, directory=True)
+    sink=diag_root/task
+    trusted(sink, directory=True)
+    events=sink/'events.jsonl'
+    if trusted(events).st_size > 8*1024*1024:
+        raise ValueError('DIAG_SINK_TOO_LARGE')
+    return events
 
 
 def summarise(path: str) -> int:
@@ -67,6 +95,15 @@ def summarise(path: str) -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == '--task':
+        if os.geteuid() != 0:
+            raise SystemExit('DIAG_SUMMARY_FAILED reason=root_required')
+        try:
+            events=registered_events(sys.argv[2])
+        except (OSError, ValueError) as exc:
+            print('DIAG_SUMMARY_FAILED reason='+type(exc).__name__,file=sys.stderr)
+            raise SystemExit(2)
+        raise SystemExit(summarise(str(events)))
     if len(sys.argv) != 2:
         print("DIAG_SUMMARY_FAILED reason=usage: iap_diag_summary.py <events.jsonl>", file=sys.stderr)
         raise SystemExit(2)

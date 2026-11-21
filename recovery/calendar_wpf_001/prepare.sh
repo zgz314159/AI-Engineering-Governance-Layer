@@ -28,11 +28,72 @@ AI_USER="aegl-ai"
 OPERATOR="zhong"
 BASE_COMMIT="fdcb91a5465e4f1f7d69e9dda1d901cb7999dd50"
 MANIFEST_SHA="639ed1fec89a9af7f67b0bb080c169aeb91ab3adb2b0d8c394f99c21fb83d105"
+DIAGNOSTICS=0
+CHECK_ONLY=0
+LAUNCHER=/usr/local/lib/aegl-model/aegl-hermes-sandbox
+LAUNCHER_PREDECESSOR_SHA=a7c75e2d8277b0ebdcb7b467a7375ad1863086828f4a01e5bce55664e36865d3
+WRAPPER=/usr/local/lib/aegl-bridge/run_registered_task
+WRAPPER_PREDECESSOR_SHA=5ed0b06db96b48297e562277149b0e7f66d0314c96279c6d7e2365b772a9c5ca
+WRAPPER_SOURCE_SHA=e8b90a5a995795555ef077482f0a80cc14a6249815e1c182decca4444e398725
+SUMMARY_SOURCE_SHA=5a3f3923fa186cc8770e5b6ef806627ca53895ab183051dd41e9c8ad520b84eb
+AEGL_SRC=/var/tmp/IAP-CONTROL-DEV/aegl
 
 say(){ printf '%s\n' "$*"; }
 die(){ printf 'PREP_FAILED: %s\n' "$*" >&2; exit 1; }
 sha(){ sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
+
+diagnostics_check(){
+  [ "$(sha "$LAUNCHER")" = "$LAUNCHER_PREDECESSOR_SHA" ] || die "diagnostic launcher predecessor changed"
+  [ "$(sha "$WRAPPER")" = "$WRAPPER_PREDECESSOR_SHA" ] || die "diagnostic wrapper predecessor changed"
+  [ "$(sha "$STACK/orchestration/hermes/bridge/run_registered_task")" = "$WRAPPER_SOURCE_SHA" ] || die "diagnostic wrapper source changed"
+  [ "$(sha "$AEGL_SRC/recovery/iap_diag_summary.py")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic summary source changed"
+  local helper=/usr/local/lib/aegl-model/iap_diag_summary.py p
+  [ ! -L "$helper" ] || die "diagnostic helper destination is a link"
+  [ ! -e "$helper" ] || [ "$(sha "$helper")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic helper destination differs"
+  bash -n "$STACK/orchestration/hermes/bridge/run_registered_task" || die "wrapper syntax"
+  for p in "$LAUNCHER" "$WRAPPER"; do
+    [ ! -L "$p" ] && [ "$(stat -c '%U:%G %a' "$p")" = 'root:root 755' ] || die "diagnostic installed entry owner/mode"
+    [ ! -L "$(dirname "$p")" ] && [ "$(stat -c '%U:%G %a' "$(dirname "$p")")" = 'root:root 755' ] || die "diagnostic installed parent owner/mode"
+  done
+  if [ "$(id -u)" -eq 0 ]; then
+    [ ! -L /var/tmp/aegl-diag ] && [ "$(stat -c '%U:%G %a' /var/tmp/aegl-diag)" = 'root:root 700' ] || die "diagnostic root owner/mode"
+    [ ! -e "/var/tmp/aegl-diag/$TASK_ID" ] && [ ! -L "/var/tmp/aegl-diag/$TASK_ID" ] || die "diagnostic sink already exists"
+  else
+    say "DIAG_SINK_STATE=UNKNOWN_REQUIRES_ROOT task=$TASK_ID"
+  fi
+  say "DIAG_INPUTS_OK task=$TASK_ID"
+}
+
+diagnostics_install(){
+  diagnostics_check
+  local candidate helper=/usr/local/lib/aegl-model/iap_diag_summary.py
+  candidate="$(mktemp "$LAUNCHER.calendar.XXXXXX")" || die "diagnostic candidate file"
+  python3 -B - "$LAUNCHER" "$candidate" "$TASK_ID" <<'PY' || die "diagnostic allowlist update"
+from pathlib import Path
+import sys
+src,dst,task=sys.argv[1:]
+text=Path(src).read_text()
+lines=[line for line in text.splitlines(keepends=True) if line.startswith('DIAG_ENABLED_TASKS="')]
+if len(lines)!=1 or not lines[0].endswith(' "\n') or (' '+task+' ') in lines[0]:
+    raise SystemExit('unexpected diagnostic allowlist')
+line=lines[0]
+Path(dst).write_text(text.replace(line,line[:-3]+' '+task+' "\n',1))
+PY
+  bash -n "$candidate" || die "diagnostic launcher candidate syntax"
+  chmod 0755 "$candidate" || die "diagnostic candidate mode"
+  chown root:root "$candidate" || die "diagnostic candidate owner"
+  [ "$(sha "$LAUNCHER")" = "$LAUNCHER_PREDECESSOR_SHA" ] || die "diagnostic launcher changed during prepare"
+  mv -T -- "$candidate" "$LAUNCHER" || die "diagnostic launcher install"
+  [ ! -e "$helper.new" ] && [ ! -L "$helper.new" ] || die "diagnostic helper temporary exists"
+  install -o root -g root -m 0644 "$AEGL_SRC/recovery/iap_diag_summary.py" "$helper.new" || die "diagnostic helper stage"
+  [ ! -e "$WRAPPER.new" ] && [ ! -L "$WRAPPER.new" ] || die "diagnostic wrapper temporary exists"
+  install -o root -g root -m 0755 "$STACK/orchestration/hermes/bridge/run_registered_task" "$WRAPPER.new" || die "diagnostic wrapper stage"
+  [ "$(sha "$WRAPPER.new")" = "$WRAPPER_SOURCE_SHA" ] && [ "$(sha "$helper.new")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic staged content mismatch"
+  mv -T -- "$helper.new" "$helper" || die "diagnostic helper install"
+  mv -T -- "$WRAPPER.new" "$WRAPPER" || die "diagnostic wrapper install"
+  say "DIAG_ENABLED task=$TASK_ID sink=/var/tmp/aegl-diag/$TASK_ID wrapper_sha256=$WRAPPER_SOURCE_SHA"
+}
 
 require_check(){
   [ -d "$TASK_ROOT" ] && [ ! -L "$TASK_ROOT" ] || die "task root missing or a link: $TASK_ROOT"
@@ -145,6 +206,7 @@ root_prepare(){
   [ "$(id -u)" -eq 0 ] || die "root mode requires root"
   for tool in git sha256sum realpath setpriv setfacl stat python3; do need "$tool"; done
   require_check
+  if [ "$DIAGNOSTICS" -eq 1 ]; then diagnostics_install; fi
 
   local gitdir
   gitdir="$(git -c safe.directory="$WORKTREE" -C "$WORKTREE" rev-parse --absolute-git-dir 2>&1)" \
@@ -219,14 +281,14 @@ PY
 )" || die "gate failed: $out"
   say "GATE_OK $out"
   say "PREP_COMPLETE task=$TASK_ID project=$PROJECT_NAME worktree=$WORKTREE scratch=$SCRATCH contract=$PKG_DEST manifest_sha256=$MANIFEST_SHA"
-  say "NEXT: no message was sent and no model was called. A real run needs a separate one-execution approval."
+  say "NEXT: no message was sent and no model was called. Execution requires an applicable unconsumed user authorization."
 }
 
 # Reuse the existing preparation path for a new explicitly authorized calendar
 # slice. Arguments are data only; no source/eval, no copied per-task preparer.
 # --task TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--check]
 if [ "${1:-}" = "--task" ]; then
-  [ "$#" -eq 5 ] || [ "$#" -eq 6 ] || die "--task needs TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--check]"
+  [ "$#" -ge 5 ] && [ "$#" -le 7 ] || die "--task needs TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--diagnostics] [--check]"
   TASK_ID="$2"; TASK_ROOT="$3"; BASE_COMMIT="$4"; MANIFEST_SHA="$5"
   [[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "invalid task id"
   [[ "$BASE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "base must be a full commit id"
@@ -239,8 +301,17 @@ if [ "${1:-}" = "--task" ]; then
   shift 5
 fi
 
-case "${1:-}" in
-  --check) require_check; exit 0 ;;
-  "") root_prepare ;;
-  *) die "unknown argument: $1" ;;
-esac
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) [ "$CHECK_ONLY" -eq 0 ] || die "duplicate --check"; CHECK_ONLY=1 ;;
+    --diagnostics) [ "$DIAGNOSTICS" -eq 0 ] || die "duplicate --diagnostics"; DIAGNOSTICS=1 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  require_check
+  if [ "$DIAGNOSTICS" -eq 1 ]; then diagnostics_check; fi
+else
+  root_prepare
+fi
