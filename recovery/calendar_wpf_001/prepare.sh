@@ -31,7 +31,8 @@ MANIFEST_SHA="639ed1fec89a9af7f67b0bb080c169aeb91ab3adb2b0d8c394f99c21fb83d105"
 DIAGNOSTICS=0
 CHECK_ONLY=0
 LAUNCHER=/usr/local/lib/aegl-model/aegl-hermes-sandbox
-LAUNCHER_PREDECESSOR_SHA=a7c75e2d8277b0ebdcb7b467a7375ad1863086828f4a01e5bce55664e36865d3
+LAUNCHER_BODY_SHA=0c8aafde79be9b2564ef771d97ed78982aa5887790da50d84147b2d2d19174ec
+DIAG_CHECKED_LAUNCHER_SHA=""
 WRAPPER=/usr/local/lib/aegl-bridge/run_registered_task
 WRAPPER_PREDECESSOR_SHA=5ed0b06db96b48297e562277149b0e7f66d0314c96279c6d7e2365b772a9c5ca
 WRAPPER_SOURCE_SHA=e8b90a5a995795555ef077482f0a80cc14a6249815e1c182decca4444e398725
@@ -44,8 +45,30 @@ sha(){ sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 
 diagnostics_check(){
-  [ "$(sha "$LAUNCHER")" = "$LAUNCHER_PREDECESSOR_SHA" ] || die "diagnostic launcher predecessor changed"
-  [ "$(sha "$WRAPPER")" = "$WRAPPER_PREDECESSOR_SHA" ] || die "diagnostic wrapper predecessor changed"
+  # The root-owned task list is configuration; every other launcher byte stays pinned.
+  python3 -B - "$LAUNCHER" "$REGISTRY" "$LAUNCHER_BODY_SHA" <<'PY' || die "diagnostic launcher code/config validation failed"
+# DIAG_CONFIG_VALIDATOR_BEGIN
+from pathlib import Path
+import hashlib,json,re,sys
+path,registry,expected=sys.argv[1:]
+text=Path(path).read_text()
+lines=[line for line in text.splitlines(keepends=True) if line.startswith('DIAG_ENABLED_TASKS="')]
+if len(lines)!=1 or not re.fullmatch(r'DIAG_ENABLED_TASKS=" (?:[A-Za-z0-9._-]{1,64} )+"\n',lines[0]):
+    raise SystemExit('invalid diagnostic task configuration')
+tasks=lines[0].split('"')[1].split()
+baseline='BRIDGE-DIAG-003 BRIDGE-VERIFY-004 BRIDGE-VERIFY-007 BRIDGE-VERIFY-008 IAP-SMOKE-003 IAP-SMOKE-004 IAP-SMOKE-005 IAP-SMOKE-006 IAP-SMOKE-007 IAP-SMOKE-008 SYSTEM-E2E-002 SYSTEM-E2E-003 SYSTEM-E2E-004 SYSTEM-E2E-005'.split()
+if len(tasks)!=len(set(tasks)) or tasks[:len(baseline)]!=baseline:
+    raise SystemExit('diagnostic baseline changed or duplicate task')
+registered=json.loads(Path(registry).read_text())
+if any(task not in registered for task in tasks[len(baseline):]):
+    raise SystemExit('unregistered diagnostic task')
+normalized=text.replace(lines[0],'DIAG_ENABLED_TASKS="<REGISTERED_TASK_CONFIG>"\n',1)
+if hashlib.sha256(normalized.encode()).hexdigest()!=expected:
+    raise SystemExit('diagnostic launcher code changed')
+# DIAG_CONFIG_VALIDATOR_END
+PY
+  DIAG_CHECKED_LAUNCHER_SHA="$(sha "$LAUNCHER")"
+  [ "$(sha "$WRAPPER")" = "$WRAPPER_PREDECESSOR_SHA" ] || [ "$(sha "$WRAPPER")" = "$WRAPPER_SOURCE_SHA" ] || die "diagnostic wrapper version changed"
   [ "$(sha "$STACK/orchestration/hermes/bridge/run_registered_task")" = "$WRAPPER_SOURCE_SHA" ] || die "diagnostic wrapper source changed"
   [ "$(sha "$AEGL_SRC/recovery/iap_diag_summary.py")" = "$SUMMARY_SOURCE_SHA" ] || die "diagnostic summary source changed"
   local helper=/usr/local/lib/aegl-model/iap_diag_summary.py p
@@ -83,8 +106,12 @@ PY
   bash -n "$candidate" || die "diagnostic launcher candidate syntax"
   chmod 0755 "$candidate" || die "diagnostic candidate mode"
   chown root:root "$candidate" || die "diagnostic candidate owner"
-  [ "$(sha "$LAUNCHER")" = "$LAUNCHER_PREDECESSOR_SHA" ] || die "diagnostic launcher changed during prepare"
+  [ "$(sha "$LAUNCHER")" = "$DIAG_CHECKED_LAUNCHER_SHA" ] || die "diagnostic launcher changed during prepare"
   mv -T -- "$candidate" "$LAUNCHER" || die "diagnostic launcher install"
+  if [ "$(sha "$WRAPPER")" = "$WRAPPER_SOURCE_SHA" ] && [ "$(sha "$helper")" = "$SUMMARY_SOURCE_SHA" ]; then
+    say "DIAG_ENABLED task=$TASK_ID sink=/var/tmp/aegl-diag/$TASK_ID wrapper_sha256=$WRAPPER_SOURCE_SHA components=REUSED"
+    return
+  fi
   [ ! -e "$helper.new" ] && [ ! -L "$helper.new" ] || die "diagnostic helper temporary exists"
   install -o root -g root -m 0644 "$AEGL_SRC/recovery/iap_diag_summary.py" "$helper.new" || die "diagnostic helper stage"
   [ ! -e "$WRAPPER.new" ] && [ ! -L "$WRAPPER.new" ] || die "diagnostic wrapper temporary exists"
