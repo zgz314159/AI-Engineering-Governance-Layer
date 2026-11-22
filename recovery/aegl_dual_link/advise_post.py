@@ -75,7 +75,7 @@ def build_report(body: str, *, cwd: str, source: str) -> tuple[str, str]:
         f"{body}\n\n"
         "—— 系统门禁短清单（每轮必含；未写视为缺口）——\n"
         "1) 正式 Projects/AEGL/Stack 树：未写入 / 仅 worktree？\n"
-        "2) HERMES_TASK_V1 / EXECUTE_CONTRACT：未发往 Chrome？\n"
+        "2) Hermes 任务信封 / 执行契约控制块：未发往 Chrome？\n"
         "3) ChatGPT control_url：未与其它 aegl_project 共用？\n"
         "4) 本轮 scope：未越出当轮禁止项？\n"
         "5) 改动文件清单 + 各文件大约行数（体量异常请标出）？\n"
@@ -87,8 +87,8 @@ def build_report(body: str, *, cwd: str, source: str) -> tuple[str, str]:
         "不要改 task_id、路径、预算或要求晋升正式仓。\n"
         "业务指令与系统摩擦分开写；不要要求本轮顺手改 AEGL/Stack 正式树。\n"
     )
-    if CONTROL_BLOCK.search(report):
-        raise SystemExit("REFUSED: wrapped report contains control block")
+    # Only scan the CC body. The wrapper above is trusted template text and must
+    # not contain CONTROL_BLOCK tokens (or it false-refuses every post).
     return report, ident
 
 
