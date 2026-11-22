@@ -26,11 +26,11 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 FAILED_IMPORT_ANCHOR = "a41e8c53488955881853830bed1d57868ebe001dc2899b191638ea104729e32f"
 FAILED_IMPORT_AEGL = "34cbf247ad5fb1dd3fdf4cadaa5f7e066ba29a29"
 PRODUCTION = {
-    # Baselines = current formal tips at dual-link migrate (2026-11-22).
+    # Baselines = formal tips after dual-link 20261122c promote (retarget for 22d).
     "stack": ("/home/zhong/Projects/Google-Android-Agent-Development-Stack", "master",
-              "f32d18a4f1479854d3c28bcf21b1e31391041243"),
+              "b049a3aff18c8f23a76436ada177c87196b588e6"),
     "aegl": ("/home/zhong/Projects/AI-Engineering-Governance-Layer", "main",
-             "a387a501916600fc8feaab6da249d3a2c4764b8d"),
+             "2c1e2bbe1afa9e06e9e28d343a10258ab00be8b0"),
 }
 GITLINK = {"references/architecture-templates": "4a3b2a141f457f1312c8dc52d6cbea6c9592af72"}
 PACKAGE_SOURCES = {

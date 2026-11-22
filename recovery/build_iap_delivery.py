@@ -21,8 +21,11 @@ def git(repo, *args):
 def build(aegl, stack, aegl_tip, stack_tip, out):
     if out.exists() or out.is_symlink():
         raise SystemExit('OUTPUT_EXISTS=' + str(out))
-    for repo, tip, base in [(aegl, aegl_tip, 'a387a501916600fc8feaab6da249d3a2c4764b8d'),
-                            (stack, stack_tip, 'f32d18a4f1479854d3c28bcf21b1e31391041243')]:
+    # Baselines = formal tips after 20261122c (must match iap_delivery.PRODUCTION).
+    AEGL_BASE = '2c1e2bbe1afa9e06e9e28d343a10258ab00be8b0'
+    STACK_BASE = 'b049a3aff18c8f23a76436ada177c87196b588e6'
+    for repo, tip, base in [(aegl, aegl_tip, AEGL_BASE),
+                            (stack, stack_tip, STACK_BASE)]:
         git(repo, 'merge-base', '--is-ancestor', base, tip)
         if git(repo, 'rev-parse', tip).decode().strip() != tip:
             raise SystemExit('FULL_COMMIT_OID_REQUIRED')
@@ -42,8 +45,8 @@ def build(aegl, stack, aegl_tip, stack_tip, out):
     (out/'bundle').mkdir(mode=0o700)
     release={'schema':1,'repos':[], 'source_files':files}
     for name, repo, tip, branch, base in [
-        ('stack',stack,stack_tip,'master','f32d18a4f1479854d3c28bcf21b1e31391041243'),
-        ('aegl',aegl,aegl_tip,'main','a387a501916600fc8feaab6da249d3a2c4764b8d')]:
+        ('stack',stack,stack_tip,'master',STACK_BASE),
+        ('aegl',aegl,aegl_tip,'main',AEGL_BASE)]:
         # A disposable ref is required to name HEAD in the bundle without switching
         # the developer's checkout. Use a separate temporary bare repository.
         import tempfile
