@@ -92,6 +92,7 @@ hits=[t for t in tabs if (t.get("url") or "") == ctrl or ctrl in (t.get("url") o
 print(f"CDP_OK tabs={len(tabs)} control_hits={len(hits)} url={ctrl}")
 if not hits:
     print("CONTROL_TAB_MISSING open", ctrl)
+    print("HINT: bash ~/.local/share/aegl-dual-link/ensure-cdp-control.sh  # then login if ChatGPT shows 登录")
     sys.exit(2)
 PY
   else
