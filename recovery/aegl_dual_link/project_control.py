@@ -2,12 +2,15 @@
 """Per-project ChatGPT control-conversation binding for AEGL dual-link.
 
 Resolution order (first hit wins):
-  1. explicit URL argument / HERMES_CHATGPT_CONTROL_URL (must be valid)
-  2. map by AEGL project id (by_aegl_project)
-  3. map by longest matching cwd prefix under projects
-  4. if require_binding: raise; else default pinned URL
+  1. explicit URL argument
+  2. HERMES_CHATGPT_CONTROL_URL (must be valid) when allow_env
+  3. longest matching cwd prefix under projects  (most specific — different
+     worktrees/projects must not collapse onto one AEGL id)
+  4. map by AEGL project id (by_aegl_project)
+  5. if require_binding: raise (no shared default conversation)
 
 Different coding projects must not share one ChatGPT advisor thread.
+bind_control refuses to reuse another project's control_url.
 """
 from __future__ import annotations
 
@@ -16,7 +19,7 @@ import os
 import re
 from pathlib import Path
 
-# No shared default ChatGPT URL — calendar and system projects must bind explicitly.
+# No shared default ChatGPT URL — every project must bind explicitly.
 DEFAULT_CONTROL_URL = ""
 CONTROL_URL_RE = re.compile(r"^https://chatgpt\.com/c/[A-Za-z0-9._-]{1,128}$")
 ENV_URL = "HERMES_CHATGPT_CONTROL_URL"
@@ -60,6 +63,24 @@ def _normalize_cwd(cwd: str | None) -> str | None:
     return str(Path(cwd).expanduser().resolve())
 
 
+def _cwd_match_url(data: dict, abs_cwd: str) -> str | None:
+    projects = data.get("projects") or {}
+    best = None
+    best_len = -1
+    for key, meta in projects.items():
+        try:
+            root = str(Path(key).expanduser().resolve())
+        except OSError:
+            continue
+        if abs_cwd == root or abs_cwd.startswith(root + os.sep):
+            if len(root) > best_len:
+                url = meta.get("control_url") if isinstance(meta, dict) else meta
+                if url:
+                    best = url
+                    best_len = len(root)
+    return best
+
+
 def resolve_control_url(
     *,
     explicit: str | None = None,
@@ -76,35 +97,21 @@ def resolve_control_url(
             return validate_url(env)
 
     data = load_map()
+    abs_cwd = _normalize_cwd(cwd)
+    # cwd prefix before by_aegl_project so OfflineTaskCalendar worktrees can still
+    # use a distinct advisor chat when their task_root is bound separately.
+    if abs_cwd:
+        hit = _cwd_match_url(data, abs_cwd)
+        if hit:
+            return validate_url(hit)
+
     if aegl_project:
         by = data.get("by_aegl_project") or {}
         if aegl_project in by:
             return validate_url(by[aegl_project])
-
-    abs_cwd = _normalize_cwd(cwd)
-    if abs_cwd:
-        projects = data.get("projects") or {}
-        # longest prefix match
-        best = None
-        best_len = -1
-        for key, meta in projects.items():
-            try:
-                root = str(Path(key).expanduser().resolve())
-            except OSError:
-                continue
-            if abs_cwd == root or abs_cwd.startswith(root + os.sep):
-                if len(root) > best_len:
-                    url = meta.get("control_url") if isinstance(meta, dict) else meta
-                    if url:
-                        best = url
-                        best_len = len(root)
-        if best:
-            return validate_url(best)
-        # also match aegl_project embedded in meta when cwd matches
-        for key, meta in projects.items():
-            if not isinstance(meta, dict):
-                continue
-            if meta.get("aegl_project") and aegl_project and meta["aegl_project"] == aegl_project:
+        # fall through: match aegl_project embedded in projects meta
+        for _key, meta in (data.get("projects") or {}).items():
+            if isinstance(meta, dict) and meta.get("aegl_project") == aegl_project and meta.get("control_url"):
                 return validate_url(meta["control_url"])
 
     if data.get("require_binding", True) or not DEFAULT_CONTROL_URL:
@@ -116,6 +123,19 @@ def resolve_control_url(
     return validate_url(DEFAULT_CONTROL_URL)
 
 
+def _url_owner(data: dict, url: str) -> tuple[str | None, str | None]:
+    """Return (cwd_key, aegl_project) already owning this url, if any."""
+    for key, meta in (data.get("projects") or {}).items():
+        u = meta.get("control_url") if isinstance(meta, dict) else meta
+        if u == url:
+            proj = meta.get("aegl_project") if isinstance(meta, dict) else None
+            return key, proj
+    for proj, u in (data.get("by_aegl_project") or {}).items():
+        if u == url:
+            return None, proj
+    return None, None
+
+
 def bind_control(*, cwd: str, url: str, aegl_project: str | None = None, note: str | None = None) -> dict:
     abs_cwd = _normalize_cwd(cwd)
     if not abs_cwd:
@@ -124,14 +144,40 @@ def bind_control(*, cwd: str, url: str, aegl_project: str | None = None, note: s
     p = map_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     data = load_map(p)
+
+    owner_cwd, owner_proj = _url_owner(data, url)
+    if owner_cwd and Path(owner_cwd).resolve() != Path(abs_cwd):
+        raise ControlBindError(
+            "control_url already bound to cwd %r — different projects must use different ChatGPT conversations"
+            % (owner_cwd,)
+        )
+    if owner_proj and aegl_project and owner_proj != aegl_project:
+        raise ControlBindError(
+            "control_url already bound to aegl_project %r — refuse sharing across %r"
+            % (owner_proj, aegl_project)
+        )
+    # Also refuse assigning a new url that equals another project's when rebinding same cwd is OK
+    existing = (data.get("projects") or {}).get(abs_cwd)
+    if isinstance(existing, dict) and existing.get("control_url") == url:
+        pass  # idempotent rebind
+
     entry = {"control_url": url}
     if aegl_project:
+        # Ensure this aegl_project is not pointed at a different url already used by another project id
+        by = data.setdefault("by_aegl_project", {})
+        for other, other_url in list(by.items()):
+            if other != aegl_project and other_url == url:
+                raise ControlBindError(
+                    "control_url already used by aegl_project %r — each project needs its own ChatGPT chat"
+                    % (other,)
+                )
         entry["aegl_project"] = aegl_project
-        data.setdefault("by_aegl_project", {})[aegl_project] = url
+        by[aegl_project] = url
     if note:
         entry["note"] = note
     data.setdefault("projects", {})[abs_cwd] = entry
     data["version"] = int(data.get("version") or 1)
+    data["require_binding"] = True
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(p)
