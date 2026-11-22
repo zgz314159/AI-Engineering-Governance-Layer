@@ -146,11 +146,14 @@ def bind_control(*, cwd: str, url: str, aegl_project: str | None = None, note: s
     data = load_map(p)
 
     owner_cwd, owner_proj = _url_owner(data, url)
+    # Same AEGL project may bind multiple coding roots (e.g. RILI umbrella + formal
+    # OfflineTaskCalendar_WPF) to one advisor chat. Different AEGL projects may not share.
     if owner_cwd and Path(owner_cwd).resolve() != Path(abs_cwd):
-        raise ControlBindError(
-            "control_url already bound to cwd %r — different projects must use different ChatGPT conversations"
-            % (owner_cwd,)
-        )
+        if not (aegl_project and owner_proj and aegl_project == owner_proj):
+            raise ControlBindError(
+                "control_url already bound to cwd %r — different projects must use different ChatGPT conversations"
+                % (owner_cwd,)
+            )
     if owner_proj and aegl_project and owner_proj != aegl_project:
         raise ControlBindError(
             "control_url already bound to aegl_project %r — refuse sharing across %r"
@@ -193,6 +196,11 @@ if __name__ == "__main__":
     r.add_argument("--cwd")
     r.add_argument("--aegl-project")
     r.add_argument("--url")
+    r.add_argument(
+        "--no-env",
+        action="store_true",
+        help="Ignore HERMES_CHATGPT_CONTROL_URL (use map cwd/aegl only)",
+    )
     b = sub.add_parser("bind")
     b.add_argument("--cwd", required=True)
     b.add_argument("--url", required=True)
@@ -200,7 +208,14 @@ if __name__ == "__main__":
     b.add_argument("--note")
     args = ap.parse_args()
     if args.cmd == "resolve":
-        print(resolve_control_url(explicit=args.url, aegl_project=args.aegl_project, cwd=args.cwd))
+        print(
+            resolve_control_url(
+                explicit=args.url,
+                aegl_project=args.aegl_project,
+                cwd=args.cwd,
+                allow_env=not args.no_env,
+            )
+        )
     else:
         print(json.dumps(bind_control(cwd=args.cwd, url=args.url, aegl_project=args.aegl_project, note=args.note),
                          ensure_ascii=False))

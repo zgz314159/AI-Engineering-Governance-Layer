@@ -35,12 +35,15 @@ log(){ [[ $QUIET -eq 1 ]] || echo "$*"; }
 mkdir -p "$STATE_DIR" "$INBOX"
 
 resolve_control_url(){
+  # Arm/bind must prefer project-control-map over a leftover HERMES_* env
+  # (e.g. smoke URL still exported in the parent shell).
   local cwd=${1:-$PWD} project=${2:-} out
   if [[ -n ${CONTROL_URL:-} ]]; then
     printf '%s\n' "$CONTROL_URL"
     return 0
   fi
-  if ! out=$(python3 "$PROJECT_CONTROL_PY" resolve --cwd "$cwd" ${project:+--aegl-project "$project"} 2>/dev/null); then
+  if ! out=$(python3 "$PROJECT_CONTROL_PY" resolve --cwd "$cwd" --no-env \
+       ${project:+--aegl-project "$project"} 2>/dev/null); then
     return 1
   fi
   printf '%s\n' "$out"
@@ -117,12 +120,82 @@ cmd_bind_control(){
     ${project:+--aegl-project "$project"} ${note:+--note "$note"}
 }
 
+continue_running(){
+  [[ -f $STATE_DIR/continue.pid ]] || return 1
+  kill -0 "$(cat "$STATE_DIR/continue.pid")" 2>/dev/null
+}
+
+# Background prepare→submit→host-run when queue has work (command-code session-up / watcher).
+kick_continue_bg(){
+  local why=${1:-session-up}
+  mkdir -p "$STATE_DIR"
+  local n
+  n=$(queue_len)
+  if [[ "$n" -le 0 ]]; then
+    echo "HERMES_WAITING_CONTRACT queue=0 (freeze+enqueue will auto-start Hermes)"
+    printf '%s\n' "{\"kind\":\"HERMES_WAITING_CONTRACT\",\"written_at\":$(date +%s),\"hint\":\"freeze contract then enqueue; watcher auto-continues\"}" \
+      >"$STATE_DIR/SESSION.json"
+    return 0
+  fi
+  if continue_running; then
+    echo "HERMES_EXEC_ALREADY_RUNNING pid=$(cat "$STATE_DIR/continue.pid") queue=$n"
+    return 0
+  fi
+  if ! prepare_nopasswd_ok; then
+    echo "HERMES_BLOCKED_PREPARE_NOPASSWD — bash $ROOT/install-nopasswd-prepare.sh" >&2
+    return 1
+  fi
+  # shellcheck disable=SC1091
+  [[ -f $STATE_DIR/last-env.sh ]] && . "$STATE_DIR/last-env.sh" || true
+  export AEGL_DUAL_LINK_AUTO_DECIDE=${AEGL_DUAL_LINK_AUTO_DECIDE:-1}
+  nohup bash -c "
+    flock -n '$STATE_DIR/continue.lock' -c '
+      echo \$\$ >\"$STATE_DIR/continue.pid\"
+      \"$SELF\" continue
+      ec=\$?
+      rm -f \"$STATE_DIR/continue.pid\"
+      exit \$ec
+    '
+  " >>"$STATE_DIR/continue-auto.log" 2>&1 &
+  disown || true
+  sleep 0.4
+  if continue_running; then
+    echo "HERMES_EXEC_STARTED why=$why pid=$(cat "$STATE_DIR/continue.pid") queue=$n log=$STATE_DIR/continue-auto.log"
+    printf '%s\n' "{\"kind\":\"HERMES_EXEC_STARTED\",\"why\":\"$why\",\"queue\":$n,\"pid\":$(cat "$STATE_DIR/continue.pid"),\"written_at\":$(date +%s)}" \
+      >"$STATE_DIR/SESSION.json"
+    return 0
+  fi
+  echo "HERMES_EXEC_START_UNCERTAIN see $STATE_DIR/continue-auto.log" >&2
+  return 1
+}
+
+hermes_runtime_probe(){
+  local ok=1
+  command -v hermes >/dev/null 2>&1 || { echo "HERMES_BIN=MISSING"; ok=0; }
+  [[ -f $STACK_JOBS_PY ]] || { echo "STACK_JOBS_PY=MISSING"; ok=0; }
+  if prepare_nopasswd_ok; then echo "PREPARE_NOPASSWD=OK"; else echo "PREPARE_NOPASSWD=MISSING"; ok=0; fi
+  if [[ $ok -eq 1 ]]; then echo "HERMES_RUNTIME=READY"; return 0; fi
+  echo "HERMES_RUNTIME=DEGRADED"
+  return 1
+}
+
+cmd_session_up(){
+  # Called after arm (command-code every chat): CDP + runtime probe + auto Hermes if queued.
+  local cwd=${1:-${ARM_CWD:-$PWD}}
+  bash "$ROOT/ensure-cdp-control.sh" "$cwd" >/dev/null 2>&1 || true
+  hermes_runtime_probe || true
+  kick_continue_bg session-up || true
+}
+
 cmd_arm(){
   local cwd=$ARM_CWD
+  local do_session=${AEGL_DUAL_LINK_SESSION_UP:-1}
   while [[ $# -gt 0 ]]; do
     case $1 in
       --quiet|-q) QUIET=1; shift ;;
       --cwd) cwd=$2; shift 2 ;;
+      --session-up) do_session=1; shift ;;
+      --no-session-up) do_session=0; shift ;;
       *) shift ;;
     esac
   done
@@ -147,7 +220,10 @@ cmd_arm(){
   fi
   export HERMES_CHATGPT_CONTROL_URL=$ctrl
   export AEGL_DUAL_LINK_AUTO_DECIDE=${AEGL_DUAL_LINK_AUTO_DECIDE:-1}
-  if cdp_check "$ctrl" >/dev/null 2>&1; then cdp_st=OK; else cdp_check "$ctrl" || true; fi
+  if cdp_check "$ctrl" >/dev/null 2>&1; then cdp_st=OK; else
+    bash "$ROOT/ensure-cdp-control.sh" "$cwd" >/dev/null 2>&1 || true
+    if cdp_check "$ctrl" >/dev/null 2>&1; then cdp_st=OK; else cdp_check "$ctrl" || true; fi
+  fi
   if ensure_watcher; then watch_st=OK; fi
   python3 - "$STATE_DIR/ARM.json" "$cwd" "$now" "$cdp_st" "$watch_st" "$ctrl" <<'PY'
 import json,sys,os
@@ -176,6 +252,9 @@ PY
   printf 'export HERMES_CHATGPT_CONTROL_URL=%q\nexport AEGL_DUAL_LINK_AUTO_DECIDE=1\n' "$ctrl" >"$STATE_DIR/last-env.sh"
   log "DUAL_LINK_ARMED cwd=$cwd control_url=$ctrl cdp=$cdp_st watcher=$watch_st auto_decide=1"
   log "host-run will auto CONTINUE/COMPLETE; advisor uses THIS project's ChatGPT tab only."
+  if [[ "$do_session" != 0 && "$do_session" != false && "$do_session" != no ]]; then
+    cmd_session_up "$cwd"
+  fi
 }
 
 cmd_status(){
@@ -277,10 +356,12 @@ cmd_watch_inbox(){
   echo $$ >"$INBOX/.watch.pid"
   [[ -f $INBOX/WAKE ]] && cp -f "$INBOX/WAKE" "$INBOX/.cursor-loop-seen" || true
   [[ -f $INBOX/DUAL_LINK_ARM ]] && cp -f "$INBOX/DUAL_LINK_ARM" "$INBOX/.dual-link-arm-seen" || true
-  echo "WATCHING inbox WAKE + DUAL_LINK_ARM pid=$$"
+  local last_q=0
+  last_q=$(queue_len)
+  echo "WATCHING inbox WAKE + DUAL_LINK_ARM + queue auto-continue pid=$$"
   trap 'rm -f "$INBOX/.watch.pid"' EXIT
   while true; do
-    sleep 10
+    sleep 5
     if [[ -f $INBOX/WAKE ]]; then
       cur=$(cat "$INBOX/WAKE" 2>/dev/null || true)
       prev=$(cat "$INBOX/.cursor-loop-seen" 2>/dev/null || true)
@@ -296,6 +377,15 @@ cmd_watch_inbox(){
         printf '%s\n' "$cur" >"$INBOX/.dual-link-arm-seen"
         echo "AGENT_LOOP_WAKE_dual_link_armed $cur"
       fi
+    fi
+    # A-ring: any new queued item → auto Hermes host-run (no Cursor pause).
+    if [[ ${AEGL_DUAL_LINK_AUTO_CONTINUE:-1} != 0 ]]; then
+      local qn
+      qn=$(queue_len)
+      if [[ "$qn" -gt 0 && ( "$qn" -gt "$last_q" || ! continue_running ) ]]; then
+        kick_continue_bg watcher-queue || true
+      fi
+      last_q=$qn
     fi
   done
 }
@@ -345,6 +435,10 @@ for it in items:
 open(qf,"w").write(json.dumps(q, ensure_ascii=False, indent=2)+"\n")
 print(f"QUEUE_LEN={len(q.get('items',[]))}")
 PY
+  # Kick Hermes immediately after enqueue (command-code sessions expect auto host-run).
+  if [[ ${AEGL_DUAL_LINK_AUTO_CONTINUE:-1} != 0 ]]; then
+    kick_continue_bg enqueue || true
+  fi
 }
 
 write_job_plan(){
@@ -494,15 +588,53 @@ cmd_continue(){
 
 usage(){
   cat <<EOF
-Usage: $0 arm [--quiet] [--cwd DIR]
+Usage: $0 arm [--quiet] [--cwd DIR] [--session-up|--no-session-up]
+       $0 session-up [DIR]
+       $0 advise-post --cwd DIR (--text-file PATH | --stdin)
        $0 bind-control --cwd DIR --url https://chatgpt.com/c/<id> [--aegl-project NAME]
        $0 status | watch-inbox | host-run <JOB> | decide-hint <JOB>
        $0 enqueue <item.json> | continue
+       $0 new-control [--forbid SUBSTR] [--bind-cwd DIR --aegl-project NAME]
 
 Per-project ChatGPT: each coding root must be bound to its own conversation.
-host-run / continue auto-decide execute→acceptance→COMPLETE (no Cursor pause).
+command-code → arm --session-up + onStop advise-post to Chrome ChatGPT.
+enqueue / watcher also auto-continue (Hermes) when AEGL_DUAL_LINK_AUTO_CONTINUE=1.
+host-run auto-decide execute→acceptance→COMPLETE (no Cursor pause).
 continue needs NOPASSWD prepare: bash $ROOT/install-nopasswd-prepare.sh
+new-control: IME-safe CDP create of a fresh https://chatgpt.com/c/<id> (optional bind).
 EOF
+}
+
+cmd_advise_post(){
+  need python3
+  python3 "$ROOT/advise_post.py" "$@"
+}
+
+cmd_new_control(){
+  # IME-safe fresh ChatGPT conversation for a project (never shares calendar by default).
+  local forbid=6ac4d058 bind_cwd= aegl= note='dual-link new-control'
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --forbid|--forbid-substring) forbid=$2; shift 2 ;;
+      --bind-cwd) bind_cwd=$2; shift 2 ;;
+      --aegl-project) aegl=$2; shift 2 ;;
+      --note) note=$2; shift 2 ;;
+      *) die "unknown new-control arg: $1" ;;
+    esac
+  done
+  need python3
+  bash "$ROOT/ensure-cdp-control.sh" --restart >/dev/null 2>&1 || \
+    python3 "$ROOT/cdp_chat.py" ensure-cdp --restart
+  # Wait for login if needed — new-chat will fail clearly.
+  local url
+  url=$(python3 "$ROOT/cdp_chat.py" new-chat ${forbid:+--forbid-substring "$forbid"})
+  echo "NEW_CONTROL_URL=$url"
+  if [[ -n $bind_cwd ]]; then
+    [[ -n $aegl ]] || die "new-control --bind-cwd requires --aegl-project"
+    python3 "$ROOT/project_control.py" bind --cwd "$bind_cwd" --url "$url" \
+      --aegl-project "$aegl" --note "$note"
+    echo "BOUND cwd=$bind_cwd aegl_project=$aegl"
+  fi
 }
 
 main(){
@@ -510,7 +642,10 @@ main(){
   shift || true
   case $c in
     arm) cmd_arm "$@" ;;
+    session-up) cmd_session_up "${1:-$PWD}" ;;
+    advise-post) cmd_advise_post "$@" ;;
     bind-control) cmd_bind_control "$@" ;;
+    new-control) cmd_new_control "$@" ;;
     status) cmd_status ;;
     watch-inbox) cmd_watch_inbox ;;
     host-run) cmd_host_run "${1:?job_id}" ;;
