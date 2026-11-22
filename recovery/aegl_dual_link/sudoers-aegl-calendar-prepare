@@ -1,0 +1,3 @@
+# Narrow NOPASSWD for calendar dual-link prepare only.
+# Install: bash ~/.local/share/aegl-dual-link/install-nopasswd-prepare.sh
+zhong ALL=(root) NOPASSWD: /usr/local/sbin/aegl-calendar-prepare

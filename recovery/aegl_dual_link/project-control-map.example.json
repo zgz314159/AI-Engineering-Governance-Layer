@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "require_binding": true,
+  "projects": {
+    "/home/zhong/EXE/RILI": {
+      "control_url": "https://chatgpt.com/c/6ac4d058-acb8-83e8-bf2c-8bb4b8aa2278",
+      "aegl_project": "OfflineTaskCalendar_WPF",
+      "note": "Calendar WPF advisor chat — do not reuse for Projects/system cwd"
+    }
+  },
+  "by_aegl_project": {
+    "OfflineTaskCalendar_WPF": "https://chatgpt.com/c/6ac4d058-acb8-83e8-bf2c-8bb4b8aa2278"
+  }
+}

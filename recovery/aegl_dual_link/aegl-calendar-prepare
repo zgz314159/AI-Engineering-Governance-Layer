@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Root-only thin wrapper for calendar prepare.sh.
+# Installed to /usr/local/sbin/aegl-calendar-prepare and granted via a single
+# NOPASSWD sudoers rule. Validates argv then execs prepare with a clean env.
+# No shell metacharacters, no eval, no arbitrary paths outside the approved base.
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { printf 'BLOCKED: root required\n' >&2; exit 1; }
+
+PREPARE=/var/tmp/IAP-CONTROL-DEV/aegl/recovery/calendar_wpf_001/prepare.sh
+[ -f "$PREPARE" ] && [ ! -L "$PREPARE" ] || { printf 'BLOCKED: prepare.sh missing\n' >&2; exit 1; }
+[ "$(stat -c '%U' "$PREPARE")" = "zhong" ] || [ "$(stat -c '%u' "$PREPARE")" = "0" ] \
+  || { printf 'BLOCKED: prepare.sh unexpected owner\n' >&2; exit 1; }
+
+# Expected: --task TASK_ID TASK_ROOT BASE_COMMIT MANIFEST_SHA [--diagnostics] [--check]
+[ "${1:-}" = "--task" ] || { printf 'BLOCKED: only --task mode allowed\n' >&2; exit 1; }
+[ "$#" -ge 5 ] && [ "$#" -le 7 ] || { printf 'BLOCKED: bad argc\n' >&2; exit 1; }
+TASK_ID=$2
+TASK_ROOT=$3
+BASE=$4
+MANIFEST=$5
+[[ "$TASK_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { printf 'BLOCKED: bad task id\n' >&2; exit 1; }
+[[ "$BASE" =~ ^[0-9a-f]{40}$ ]] || { printf 'BLOCKED: bad base\n' >&2; exit 1; }
+[[ "$MANIFEST" =~ ^[0-9a-f]{64}$ ]] || { printf 'BLOCKED: bad manifest\n' >&2; exit 1; }
+[[ "$TASK_ROOT" =~ ^/var/tmp/RILI-WPF-V2/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+  || { printf 'BLOCKED: task root outside approved base\n' >&2; exit 1; }
+[ "$TASK_ROOT" = "$(realpath -e "$TASK_ROOT")" ] || { printf 'BLOCKED: task root not canonical\n' >&2; exit 1; }
+
+shift 5
+EXTRA=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check|--diagnostics) EXTRA+=("$1"); shift ;;
+    *) printf 'BLOCKED: unknown arg %s\n' "$1" >&2; exit 1 ;;
+  esac
+done
+
+exec /usr/bin/env -i \
+  HOME=/root \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 \
+  /bin/bash "$PREPARE" --task "$TASK_ID" "$TASK_ROOT" "$BASE" "$MANIFEST" "${EXTRA[@]}"
