@@ -209,17 +209,20 @@ def derive_frictions(body: str, gate: dict) -> list[tuple[str, str]]:
     ):
         out.append(("P1", f"门禁4异常：scope — {_clip(v4, 100)}"))
 
+    def denied(v: str) -> bool:
+        return bool(re.search(r"(未|没有|无|否|不存在|未发现)", v))
+
     v5 = val("5")
-    if v5 and re.search(r"(异常体量|过大|巨大|huge|abnormal)", v5, re.I):
+    if v5 and re.search(r"(异常体量|过大|巨大|huge|abnormal)", v5, re.I) and not denied(v5):
         out.append(("P2", f"门禁5异常体量 — {_clip(v5, 100)}"))
 
     v6 = val("6")
-    if v6 and re.search(r"(泄漏|越界|边界破坏|违规)", v6):
+    if v6 and re.search(r"(泄漏|越界|边界破坏|违规)", v6) and not denied(v6):
         out.append(("P1", f"门禁6异常：分层 — {_clip(v6, 100)}"))
 
     v7 = val("7")
     if v7 and re.search(r"\bFAIL\b|失败|error\s*[1-9]|错误\s*[1-9]", v7, re.I):
-        if not re.search(r"0\s*error|0\s*错误|PASS", v7, re.I):
+        if not re.search(r"0\s*error|0\s*错误|\bPASS\b", v7, re.I):
             out.append(("P1", f"门禁7异常：测试/构建 — {_clip(v7, 100)}"))
 
     cand8 = extract_friction_candidate(body)
