@@ -31,8 +31,14 @@ CONTROL_BLOCK = re.compile(
     r"HERMES_TASK_V1|EXECUTE_CONTRACT|<<<END_HERMES|<<<HERMES",
     re.I,
 )
-NONE_FRICTION = re.compile(
-    r"^(none|n/?a|无|无候选|没有|nil|-|—|－)?$",
+NONE_FRICTION_EXACT = re.compile(
+    r"^(none|n/?a|无|无候选|没有|无新增|没有新增|暂无|nil|-|—|－)?$",
+    re.I,
+)
+# "无新增（沿用…）" / "none — keeping prior items" etc.
+NONE_FRICTION_SOFT = re.compile(
+    r"(无新增|没有新增|无新的?\s*摩擦|无候选|暂无摩擦|no\s*new\s*friction|"
+    r"none\s*(\(|（|-|—|:|：))",
     re.I,
 )
 _GATE_ROW = re.compile(
@@ -150,9 +156,24 @@ def extract_friction_candidate(body: str) -> str | None:
         raw,
         flags=re.I,
     ).strip()
-    if not raw or NONE_FRICTION.match(raw):
+    if not raw or _is_none_friction(raw):
         return None
     return raw
+
+
+def _is_none_friction(raw: str) -> bool:
+    s = (raw or "").strip()
+    if not s:
+        return True
+    if NONE_FRICTION_EXACT.match(s):
+        return True
+    # Leading "无新增…" counts as none even with trailing explanation.
+    if re.match(r"^(none|n/?a|无新增|没有新增|无候选|暂无)\b", s, re.I):
+        return True
+    if NONE_FRICTION_SOFT.search(s) and not re.search(r"[①②③1-9]\s*[.、:：]", s):
+        # Soft none, unless it also lists numbered new items (①/1.) after a none claim.
+        return True
+    return False
 
 
 def _neg_ok(value: str, *, ok_words: tuple[str, ...], bad_words: tuple[str, ...]) -> str | None:
