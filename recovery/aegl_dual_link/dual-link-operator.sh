@@ -8,14 +8,13 @@ set -euo pipefail
 
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 ROOT=$(dirname "$SELF")
-# Until feat/system-usage is promoted into formal Projects Stack, prefer IAP.
-# After promote, set STACK_JOBS_PY to the formal path or flip the order below.
+# Prefer formal Projects Stack after dual-link IAP promote (2026-11-22).
 _default_stack_jobs() {
-  local iap=/var/tmp/IAP-CONTROL-DEV/stack/orchestration/hermes/supervisor/agent_link_jobs.py
   local formal=/home/zhong/Projects/Google-Android-Agent-Development-Stack/orchestration/hermes/supervisor/agent_link_jobs.py
-  if [[ -f $iap ]]; then printf '%s\n' "$iap"
-  elif [[ -f $formal ]]; then printf '%s\n' "$formal"
-  else printf '%s\n' "$iap"
+  local iap=/var/tmp/IAP-CONTROL-DEV/stack/orchestration/hermes/supervisor/agent_link_jobs.py
+  if [[ -f $formal ]]; then printf '%s\n' "$formal"
+  elif [[ -f $iap ]]; then printf '%s\n' "$iap"
+  else printf '%s\n' "$formal"
   fi
 }
 STACK_JOBS_PY=${STACK_JOBS_PY:-$(_default_stack_jobs)}
