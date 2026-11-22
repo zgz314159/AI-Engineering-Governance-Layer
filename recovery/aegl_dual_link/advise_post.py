@@ -26,6 +26,27 @@ CONTROL_BLOCK = re.compile(
     re.I,
 )
 
+FRICTION_LEDGER = Path("/home/zhong/Projects/SYSTEM-FRICTION.md")
+NONE_FRICTION = re.compile(
+    r"^(none|n/?a|无|无候选|没有|nil|-|—|－)?$",
+    re.I,
+)
+
+# Table row: | 8 | SYSTEM-FRICTION 候选 | text |
+_FRICTION_TABLE = re.compile(
+    r"\|\s*8\s*\|\s*[^|]*?(?:SYSTEM-FRICTION|系统摩擦|摩擦候选)[^|]*\|\s*([^|\n]+)\s*\|",
+    re.I,
+)
+# Inline: SYSTEM-FRICTION 候选: text  /  8) ...：text
+_FRICTION_INLINE = re.compile(
+    r"(?:SYSTEM-FRICTION\s*候选|系统摩擦(?:候选)?)\s*[:：|]\s*(.+)$",
+    re.I | re.M,
+)
+_FRICTION_ITEM8 = re.compile(
+    r"(?:^|\n)\s*8[).、]\s*(?:系统摩擦[^:\n]*[:：]\s*)?(.+)$",
+    re.I,
+)
+
 
 def _load_adapter():
     for bridge in (STACK_BRIDGE, FORMAL_BRIDGE):
@@ -81,7 +102,7 @@ def build_report(body: str, *, cwd: str, source: str) -> tuple[str, str]:
         "5) 改动文件清单 + 各文件大约行数（体量异常请标出）？\n"
         "6) 若触碰分层/边界：Core/Infra/App 或 Domain 规则结论？\n"
         "7) 测试/构建：命令 + PASS/FAIL 数字？\n"
-        "8) 系统摩擦（可选一行）：记入 Projects/SYSTEM-FRICTION.md 的候选？\n\n"
+        "8) 系统摩擦一行（非 none 将自动写入 Projects/SYSTEM-FRICTION.md）？\n\n"
         "请只分析并给出下一步开发指令（中文或英文均可）。\n"
         "禁止输出任何 Hermes 任务控制信封或协议控制块。\n"
         "不要改 task_id、路径、预算或要求晋升正式仓。\n"
@@ -90,6 +111,131 @@ def build_report(body: str, *, cwd: str, source: str) -> tuple[str, str]:
     # Only scan the CC body. The wrapper above is trusted template text and must
     # not contain CONTROL_BLOCK tokens (or it false-refuses every post).
     return report, ident
+
+
+def extract_friction_candidate(body: str) -> str | None:
+    """Return friction text from SYSTEM GATE REPORT item 8, or None if absent/none."""
+    text = (body or "").strip()
+    if not text:
+        return None
+    raw = ""
+    m = _FRICTION_TABLE.search(text)
+    if m:
+        raw = m.group(1).strip()
+    if not raw:
+        m = _FRICTION_INLINE.search(text)
+        if m:
+            raw = m.group(1).strip()
+    if not raw:
+        # Prefer a GATE REPORT section if present
+        gate = re.search(
+            r"SYSTEM\s+GATE\s+REPORT(.+?)(?:\n#{1,3}\s|\n——|\Z)",
+            text,
+            re.I | re.S,
+        )
+        chunk = gate.group(1) if gate else text
+        m = _FRICTION_ITEM8.search(chunk)
+        if m:
+            raw = m.group(1).strip()
+    raw = re.sub(r"\s+", " ", raw).strip(" `*\"'")
+    # Drop leading labels left in the cell
+    raw = re.sub(
+        r"^(?:SYSTEM-FRICTION\s*候选|系统摩擦(?:候选)?)\s*[:：]\s*",
+        "",
+        raw,
+        flags=re.I,
+    ).strip()
+    if not raw or NONE_FRICTION.match(raw):
+        return None
+    # Keep one line, cap length for the markdown table cell
+    if len(raw) > 160:
+        raw = raw[:157] + "..."
+    return raw
+
+
+def _friction_already_open(ledger: str, friction: str) -> bool:
+    needle = friction.casefold()
+    for line in ledger.splitlines():
+        if not line.startswith("|"):
+            continue
+        parts = [p.strip() for p in line.strip("|").split("|")]
+        if len(parts) < 5:
+            continue
+        # date | source | friction | severity | status | note
+        cell, status = parts[2], parts[4].casefold()
+        if cell.casefold() != needle:
+            continue
+        if status in {"open", "mitigating", "ready", "pending"}:
+            return True
+    return False
+
+
+def append_friction_ledger(
+    friction: str,
+    *,
+    cwd: str,
+    source: str,
+    report_id: str = "",
+    severity: str = "P2",
+) -> str:
+    """Append one open row to SYSTEM-FRICTION.md. Returns status token."""
+    path = FRICTION_LEDGER
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# System friction ledger\n\n"
+            "业务开发中发现的**系统**缺口/摩擦。不要写进日历契约；攒一批后走 IAP → promote。\n\n"
+            "| 日期 | 来源 | 摩擦 | 严重度 | 状态 | 备注 |\n"
+            "|---|---|---|---|---|---|\n",
+            encoding="utf-8",
+        )
+    existing = path.read_text(encoding="utf-8")
+    if _friction_already_open(existing, friction):
+        print(f"FRICTION_SKIP_DUP {friction}")
+        return "skip_dup"
+
+    day = time.strftime("%Y-%m-%d")
+    proj = Path(cwd).name or "CC"
+    src = f"{proj} CC 自动"
+    note_bits = [f"auto from {source or 'advise_post'}"]
+    if report_id:
+        note_bits.append(report_id)
+    note = "; ".join(note_bits)
+    # Escape pipes in cells
+    cell = friction.replace("|", "/")
+    row = f"| {day} | {src} | {cell} | {severity} | open | {note} |\n"
+
+    lines = existing.splitlines(keepends=True)
+    sep_idx = next((i for i, l in enumerate(lines) if l.startswith("|---")), None)
+    if sep_idx is None:
+        if not existing.endswith("\n"):
+            existing += "\n"
+        path.write_text(existing + row, encoding="utf-8")
+    else:
+        lines.insert(sep_idx + 1, row)
+        path.write_text("".join(lines), encoding="utf-8")
+
+    STATE.mkdir(parents=True, exist_ok=True)
+    audit = {
+        "kind": "FRICTION_AUTO",
+        "friction": friction,
+        "cwd": os.path.abspath(cwd),
+        "source": source,
+        "report_id": report_id,
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    with (STATE / "friction-auto.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(audit, ensure_ascii=False) + "\n")
+    print(f"FRICTION_LOGGED {path} :: {friction}")
+    return "logged"
+
+
+def maybe_log_friction(body: str, *, cwd: str, source: str, report_id: str = "") -> None:
+    cand = extract_friction_candidate(body)
+    if not cand:
+        print("FRICTION_NONE")
+        return
+    append_friction_ledger(cand, cwd=cwd, source=source, report_id=report_id)
 
 
 def queue_pending(instruction: str, *, cwd: str, source: str, report_id: str = "") -> Path:
@@ -165,6 +311,10 @@ def main() -> int:
     _ensure_tab(args.cwd, url)
 
     report, ident = build_report(body, cwd=os.path.abspath(args.cwd), source=args.source)
+    # Log friction as soon as the CC body is accepted (even if Chrome send fails later).
+    maybe_log_friction(
+        body, cwd=os.path.abspath(args.cwd), source=args.source, report_id=ident
+    )
     adapter = _load_adapter()
 
     previous = adapter.read_latest_assistant().get("sha256")
